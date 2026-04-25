@@ -640,8 +640,8 @@ with tab3:
             with st.expander(f"⬜ 비CP 제외 공종 ({len(df_non_cp)}건) — 운반·수압시험 등"):
                 if len(df_non_cp) > 0:
                     df_non_show = df_non_cp[["group","name","spec","qty","unit"]].copy()
-                    df_non_show.columns = ["공종그
-
+                     df_non_show.columns = ["공종그룹","공종명","규격","수량","단위"]
+                    
 # ═══════════════════════════════════════════════════════════════
 # TAB 4: 비작업일수 계산기
 # ═══════════════════════════════════════════════════════════════

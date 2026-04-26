@@ -7,9 +7,11 @@ import openpyxl
 from datetime import date, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
+from labor_rates_2025 import get_excavation_labor_detail, get_pipe_labor
 
 st.set_page_config(page_title="상하수도 공기산정", layout="wide")
 
+# ── 로그인 ────────────────────────────────────────────────────
 def check_password():
     if st.session_state.get("authenticated"):
         return True
@@ -28,6 +30,7 @@ def check_password():
 if not check_password():
     st.stop()
 
+# ── 표준품셈 딕셔너리 (기본값) ───────────────────────────────
 LABOR_RATES = {
     "준비공": {"규준틀 설치": {"unit":"개소","보통인부":0.5}},
     "굴착공": {
@@ -54,10 +57,12 @@ LABOR_RATES = {
     },
 }
 
+# ── 키워드 매핑 ───────────────────────────────────────────────
 KEYWORD_MAP_DETAIL = {
     "굴착공":   ["터파기","굴착","줄파기"],
     "토사운반": ["사토","운반-토사","잔토처리","소운반"],
-    "관부설공": ["관 부설","관부설","PE다중벽관","고강성PVC","주철관","GRP관","유리섬유복합관","흄관","이중벽관","강관부설","콘크리트관"],
+    "관부설공": ["관 부설","관부설","PE다중벽관","고강성PVC","주철관","GRP관",
+                 "유리섬유복합관","흄관","이중벽관","강관부설","콘크리트관"],
     "되메우기": ["되메우기","모래기초","모래,관기초"],
     "포장복구": ["아스팔트포장","아스콘포장","보조기층","콘크리트포장","포장 복구","포장복구"],
     "포장철거": ["포장 절단","포장절단","아스팔트포장 절단","포장 깨기","포장깨기"],
@@ -77,6 +82,7 @@ def map_group_detail(name):
             return group
     return "기타"
 
+# ── CP 정의 ───────────────────────────────────────────────────
 CP_DEFINITION = [
     {"order":1,"대공종":"토공","cp_name":"터파기",
      "keywords":["터파기","굴착","줄파기"],"exclude":["운반","사토","잔토"],
@@ -108,6 +114,7 @@ def map_cp_group(name):
             return cp["대공종"]
     return None
 
+# ── 비작업일수 데이터 ─────────────────────────────────────────
 HOLIDAYS_DB = {
     2025:{1:8,2:4,3:7,4:4,5:6,6:6,7:4,8:6,9:4,10:9,11:5,12:5},
     2026:{1:5,2:7,3:6,4:4,5:7,6:5,7:4,8:7,9:7,10:7,11:5,12:5},
@@ -119,7 +126,6 @@ HOLIDAYS_DB = {
     2032:{1:5,2:8,3:5,4:4,5:7,6:4,7:4,8:6,9:7,10:8,11:4,12:6},
     2033:{1:7,2:6,3:5,4:4,5:7,6:5,7:5,8:5,9:7,10:7,11:4,12:5},
 }
-
 WEATHER_DB = {
     "rain5":{
         "서울":[0.5,1.1,1.7,3.7,4.4,5.2,7.2,8.4,3.6,3.0,3.3,1.4],
@@ -249,6 +255,7 @@ MAJOR_WORKS = [
     {"no":"No.118","group":"맨홀공","name":"조립식PC맨홀(원형1호)-야간","spec":"H=1.76m","qty":134,"unit":"개소","amount":180492238,"labor":152431566,"night":True},
 ]
 
+# ── 공통 함수 ─────────────────────────────────────────────────
 def calc_manday(rates, quantity):
     return round(sum(v*quantity for k,v in rates.items() if k!="unit"), 2)
 
@@ -270,6 +277,60 @@ def get_work_end_date(start, work_days):
 def fmt_ok(val):
     return f"{val/1e8:.1f}억"
 
+# ── 관경 추출 함수 ────────────────────────────────────────────
+def extract_diameter(spec_str):
+    patterns = [
+        r'D\s*[=＝]?\s*(\d+)',
+        r'Φ\s*(\d+)',
+        r'φ\s*(\d+)',
+        r'(\d{2,4})\s*(?:mm|㎜)',
+        r'(\d{2,4})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, spec_str)
+        if m:
+            val = int(m.group(1))
+            if 50 <= val <= 3000:
+                return val
+    return None
+
+# ── 품셈 자동 적용 함수 ───────────────────────────────────────
+def apply_labor_rate(item):
+    name = item.get("name","")
+    spec = item.get("spec","")
+    qty  = item.get("qty") or 0
+
+    # 터파기
+    if any(kw in name for kw in ["터파기","굴착","줄파기"]) and "운반" not in name:
+        info = get_excavation_labor_detail(spec)
+        rate = info.get("인/m3")
+        if rate and qty:
+            item["manday"]     = round(rate * qty, 1)
+            item["labor_rate"] = rate
+            item["labor_unit"] = "인/m3"
+            item["soil_info"]  = f"{info['토질']}{' '+'/'.join(info['보정조건']) if info['보정조건'] else ''}"
+        return item
+
+    # 관 부설
+    pipe_kws = ["관 부설","관부설","이중벽관","주철관","흄관","콘크리트관",
+                "GRP관","유리섬유복합관","파형강관","PE다중벽","고강성PVC","강관부설"]
+    if any(kw in name for kw in pipe_kws):
+        dia = extract_diameter(spec)
+        if dia:
+            try:
+                info = get_pipe_labor(name, dia, "A")
+                rate = info.get("합계")
+                if rate and qty:
+                    item["manday"]     = round(rate * qty, 1)
+                    item["labor_rate"] = rate
+                    item["labor_unit"] = "인/본"
+                    item["soil_info"]  = f"D={dia}mm"
+            except Exception:
+                pass
+        return item
+
+    return item
+
 # ── 엑셀 파서 ─────────────────────────────────────────────────
 SKIP_NAMES = [
     "남천지구","동부지구","신설오수관로","간선관로","지선관로",
@@ -279,158 +340,111 @@ SKIP_NAMES = [
 
 def parse_by_keyword(file):
     wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
-
-    # 시트 선택 — 설계내역서 우선, 목차/안내 시트 제외
+    skip_sheets = ["목차","안내","INITIAL","초기","index"]
+    priority    = ["설계내역서","내역서","공사비내역서"]
     target_sheet = None
-    skip_sheets  = ["목차","안내","INITIAL","초기","index"]
-    priority     = ["설계내역서","내역서","공사비내역서"]
-
     for p in priority:
         if p in wb.sheetnames:
-            target_sheet = p
-            break
+            target_sheet = p; break
     if not target_sheet:
         for sname in wb.sheetnames:
-            if any(sk in sname for sk in skip_sheets):
-                continue
-            if "내역" in sname:
-                target_sheet = sname
-                break
+            if any(sk in sname for sk in skip_sheets): continue
+            if "내역" in sname: target_sheet = sname; break
     if not target_sheet:
-        # 목차·안내·INITIAL 제외하고 첫 번째 시트
         for sname in wb.sheetnames:
             if not any(sk in sname for sk in skip_sheets):
-                target_sheet = sname
-                break
+                target_sheet = sname; break
     if not target_sheet:
         target_sheet = wb.sheetnames[0]
 
     ws = wb[target_sheet]
     all_rows = list(ws.iter_rows(values_only=True))
 
-    # 컬럼 탐색
     header_row_idx = None
-    name_col   = 1
-    qty_col    = 3
-    unit_col   = 4
-    amount_col = 6
-    labor_col  = 8
+    name_col=1; qty_col=3; unit_col=4; amount_col=6; labor_col=8
 
     for i, row in enumerate(all_rows[:10]):
         row_strs = [str(c).strip() if c else "" for c in row]
         for j, cell in enumerate(row_strs):
             if cell in ["명      칭","명칭","공종명","품명","작업명"]:
-                header_row_idx = i
-                name_col = j
-            if cell in ["수   량","수량","물량"] and header_row_idx==i:
-                qty_col = j
-            if cell in ["단위","규격단위"] and header_row_idx==i:
-                unit_col = j
-        if header_row_idx is not None:
-            break
+                header_row_idx=i; name_col=j
+            if cell in ["수   량","수량","물량"] and header_row_idx==i: qty_col=j
+            if cell in ["단위","규격단위"] and header_row_idx==i: unit_col=j
+        if header_row_idx is not None: break
 
-    # 서브헤더에서 금액/노무비 컬럼 탐색
     if header_row_idx is not None and header_row_idx+1 < len(all_rows):
         sub = [str(c).strip() if c else "" for c in all_rows[header_row_idx+1]]
         amt_cols = [j for j,c in enumerate(sub) if c in ["금    액","금액"]]
-        if len(amt_cols) >= 1: amount_col = amt_cols[0]
-        if len(amt_cols) >= 2: labor_col  = amt_cols[1]
+        if len(amt_cols)>=1: amount_col=amt_cols[0]
+        if len(amt_cols)>=2: labor_col=amt_cols[1]
 
-    data_start = (header_row_idx + 2) if header_row_idx is not None else 4
-
+    data_start = (header_row_idx+2) if header_row_idx is not None else 4
     col_info = {
-        "시트명":     target_sheet,
-        "헤더행":     header_row_idx,
-        "명칭컬럼":   name_col,
-        "수량컬럼":   qty_col,
-        "단위컬럼":   unit_col,
-        "금액컬럼":   amount_col,
-        "노무비컬럼": labor_col,
-        "데이터시작": data_start,
+        "시트명":target_sheet,"헤더행":header_row_idx,
+        "명칭컬럼":name_col,"수량컬럼":qty_col,"단위컬럼":unit_col,
+        "금액컬럼":amount_col,"노무비컬럼":labor_col,"데이터시작":data_start,
     }
 
     results = []
     for row in all_rows[data_start:]:
-        if not row or len(row) <= name_col:
-            continue
-
+        if not row or len(row)<=name_col: continue
         name = str(row[name_col]).strip() if row[name_col] else ""
-        if not name or name == "None":
-            continue
+        if not name or name=="None": continue
 
-        # 계층 코드 행 제외 (Ⅰ,Ⅱ... 또는 1., 1.1, 1.1.1 형태)
         code = str(row[0]).strip() if row[0] else ""
-        if re.match(r'^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]', code):
-            continue
-        if re.match(r'^\d+(\.\d+)*\.?\s*$', code):
-            continue
-        if re.match(r'^\s*\(\d+\)', code):
-            continue
+        if re.match(r'^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]', code): continue
+        if re.match(r'^\d+(\.\d+)*\.?\s*$', code): continue
+        if re.match(r'^\s*\(\d+\)', code): continue
+        if any(sk in name for sk in SKIP_NAMES): continue
 
-        # 구간명·소계명 제외
-        if any(sk in name for sk in SKIP_NAMES):
-            continue
+        unit = str(row[unit_col]).strip() if unit_col<len(row) and row[unit_col] else ""
+        if unit in ["식","1식","LS","ls","LOT","lot"]: continue
 
-        # 1식 제외
-        unit = str(row[unit_col]).strip() if unit_col < len(row) and row[unit_col] else ""
-        if unit in ["식","1식","LS","ls","LOT","lot"]:
-            continue
-
-        # 수량
-        try:    qty = float(row[qty_col]) if qty_col < len(row) and isinstance(row[qty_col],(int,float)) else None
+        try:    qty = float(row[qty_col]) if qty_col<len(row) and isinstance(row[qty_col],(int,float)) else None
         except: qty = None
-
-        # 금액
-        try:    amount = float(row[amount_col]) if amount_col < len(row) and isinstance(row[amount_col],(int,float)) else None
+        try:    amount = float(row[amount_col]) if amount_col<len(row) and isinstance(row[amount_col],(int,float)) else None
         except: amount = None
-
-        # 노무비
-        try:    labor = float(row[labor_col]) if labor_col < len(row) and isinstance(row[labor_col],(int,float)) else None
+        try:    labor = float(row[labor_col]) if labor_col<len(row) and isinstance(row[labor_col],(int,float)) else None
         except: labor = None
 
-        # 노무비 0인 순수재료 행 제외
-        if (labor is None or labor == 0) and amount is not None and amount > 0:
-            continue
+        if (labor is None or labor==0) and amount is not None and amount>0: continue
 
-        spec  = str(row[2]).strip() if len(row) > 2 and row[2] else ""
+        spec  = str(row[2]).strip() if len(row)>2 and row[2] else ""
         group = map_group_detail(name)
 
         results.append({
-            "group":    group,
-            "name":     name,
-            "spec":     spec,
-            "qty":      qty,
-            "unit":     unit,
-            "amount":   amount,
-            "labor":    labor,
-            "is_night": "-야간" in name,
+            "group":group,"name":name,"spec":spec,
+            "qty":qty,"unit":unit,"amount":amount,"labor":labor,
+            "is_night":"-야간" in name,
+            "manday":0,"labor_rate":None,"labor_unit":"","soil_info":"",
         })
 
     wb.close()
 
-    # 같은 공종명 물량 합산 (규격 괄호 앞 기준)
+    # 같은 공종명 물량 합산
     merged = {}
     for r in results:
         key = (r["group"], r["name"].split("(")[0].strip())
         if key not in merged:
-            merged[key] = {
-                "group":    r["group"],
-                "name":     r["name"].split("(")[0].strip(),
-                "spec":     "규격 합산",
-                "qty":      r["qty"] or 0.0,
-                "unit":     r["unit"],
-                "amount":   r["amount"] or 0.0,
-                "labor":    r["labor"] or 0.0,
-                "is_night": r["is_night"],
-            }
+            merged[key] = dict(r)
+            merged[key]["name"] = r["name"].split("(")[0].strip()
+            merged[key]["spec"] = "규격 합산"
         else:
-            merged[key]["qty"]    = (merged[key]["qty"]    or 0) + (r["qty"]    or 0)
-            merged[key]["amount"] = (merged[key]["amount"] or 0) + (r["amount"] or 0)
-            merged[key]["labor"]  = (merged[key]["labor"]  or 0) + (r["labor"]  or 0)
+            merged[key]["qty"]    = (merged[key]["qty"]    or 0)+(r["qty"]    or 0)
+            merged[key]["amount"] = (merged[key]["amount"] or 0)+(r["amount"] or 0)
+            merged[key]["labor"]  = (merged[key]["labor"]  or 0)+(r["labor"]  or 0)
 
-    return list(merged.values()), col_info
+    # 품셈 자동 적용
+    final = []
+    for item in merged.values():
+        item = apply_labor_rate(item)
+        final.append(item)
 
-# ── 사이드바 ──────────────────────────────────────────────────
+    return final, col_info
+
+# ══════════════════════════════════════════════════════════════
+# 사이드바
+# ══════════════════════════════════════════════════════════════
 st.sidebar.header("기본 설정")
 pipe_dia   = st.sidebar.selectbox("관경", ["200mm","300mm"])
 start_date = st.sidebar.date_input("착공 예정일", value=date.today())
@@ -441,58 +455,55 @@ if "workers" not in st.session_state:
     st.session_state.workers = {"준비공":4,"굴착공":6,"관부설공":4,"되메우기공":4,"포장복구공":4}
 
 for 공종 in ["준비공","굴착공","관부설공","되메우기공","포장복구공"]:
-    ca, cb, cc = st.sidebar.columns([1,2,1])
+    ca,cb,cc = st.sidebar.columns([1,2,1])
     with ca:
-        if st.button("－", key=f"m_{공종}"):
-            st.session_state.workers[공종] = max(1, st.session_state.workers[공종]-1)
+        if st.button("－",key=f"m_{공종}"):
+            st.session_state.workers[공종]=max(1,st.session_state.workers[공종]-1)
     with cb:
-        st.markdown(f"<div style='text-align:center;padding-top:6px'><b>{공종}</b><br>{st.session_state.workers[공종]}명</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align:center;padding-top:6px'><b>{공종}</b><br>{st.session_state.workers[공종]}명</div>",unsafe_allow_html=True)
     with cc:
-        if st.button("＋", key=f"p_{공종}"):
-            st.session_state.workers[공종] = min(50, st.session_state.workers[공종]+1)
+        if st.button("＋",key=f"p_{공종}"):
+            st.session_state.workers[공종]=min(50,st.session_state.workers[공종]+1)
 
 w = st.session_state.workers
 
 st.title("상하수도 관로공사 공기산정 시스템")
 st.markdown("---")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📋 공기산정","📂 엑셀 내역서 인식","🔍 주요공종 CP 분석","🌧 비작업일수 계산기"])
+tab1,tab2,tab3,tab4 = st.tabs(["📋 공기산정","📂 엑셀 내역서 인식","🔍 주요공종 CP 분석","🌧 비작업일수 계산기"])
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 1
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# TAB 1: 공기산정
+# ══════════════════════════════════════════════════════════════
 with tab1:
     st.subheader("공종별 물량 입력")
-    col1, col2 = st.columns(2)
+    col1,col2 = st.columns(2)
     with col1:
         st.markdown("**준비공**")
-        q_준비 = st.number_input("규준틀 설치 (개소)", min_value=0.0, value=float(st.session_state.get("_q_준비",5.0)), step=1.0)
+        q_준비 = st.number_input("규준틀 설치 (개소)",min_value=0.0,value=float(st.session_state.get("_q_준비",5.0)),step=1.0)
         st.markdown("**굴착공**")
-        q_터파기 = st.number_input("터파기 물량 (m3)", min_value=0.0, value=float(st.session_state.get("_q_터파기",350.0)), step=10.0)
+        q_터파기 = st.number_input("터파기 물량 (m3)",min_value=0.0,value=float(st.session_state.get("_q_터파기",350.0)),step=10.0)
         st.markdown("**관부설공**")
-        q_관부설 = st.number_input("관 부설 연장 (m)", min_value=0.0, value=float(st.session_state.get("_q_관부설",120.0)), step=10.0)
+        q_관부설 = st.number_input("관 부설 연장 (m)",min_value=0.0,value=float(st.session_state.get("_q_관부설",120.0)),step=10.0)
     with col2:
         st.markdown("**되메우기공**")
-        q_되메우기 = st.number_input("되메우기 물량 (m3)", min_value=0.0, value=float(st.session_state.get("_q_되메우기",180.0)), step=10.0)
+        q_되메우기 = st.number_input("되메우기 물량 (m3)",min_value=0.0,value=float(st.session_state.get("_q_되메우기",180.0)),step=10.0)
         st.markdown("**포장복구공**")
-        q_포장 = st.number_input("포장 면적 (m2)", min_value=0.0, value=float(st.session_state.get("_q_포장",60.0)), step=5.0)
+        q_포장 = st.number_input("포장 면적 (m2)",min_value=0.0,value=float(st.session_state.get("_q_포장",60.0)),step=5.0)
 
     st.markdown("---")
-    md_준비     = calc_manday(LABOR_RATES["준비공"]["규준틀 설치"], q_준비)
-    md_굴착     = calc_manday(LABOR_RATES["굴착공"]["터파기(기계)"], q_터파기) + calc_manday(LABOR_RATES["굴착공"]["버력운반(기계)"], q_터파기)
-    md_관부설   = calc_manday(LABOR_RATES["관부설공"]["관 부설접합"][pipe_dia], q_관부설) + calc_manday(LABOR_RATES["관부설공"]["수압시험"][pipe_dia], q_관부설)
-    md_되메우기 = calc_manday(LABOR_RATES["되메우기공"]["모래기초 포설"], q_되메우기) + calc_manday(LABOR_RATES["되메우기공"]["되메우기(기계다짐)"], q_되메우기)
-    md_포장     = calc_manday(LABOR_RATES["포장복구공"]["보조기층 포설"], q_포장) + calc_manday(LABOR_RATES["포장복구공"]["아스콘포장"], q_포장)
+    md_준비     = calc_manday(LABOR_RATES["준비공"]["규준틀 설치"],q_준비)
+    md_굴착     = calc_manday(LABOR_RATES["굴착공"]["터파기(기계)"],q_터파기)+calc_manday(LABOR_RATES["굴착공"]["버력운반(기계)"],q_터파기)
+    md_관부설   = calc_manday(LABOR_RATES["관부설공"]["관 부설접합"][pipe_dia],q_관부설)+calc_manday(LABOR_RATES["관부설공"]["수압시험"][pipe_dia],q_관부설)
+    md_되메우기 = calc_manday(LABOR_RATES["되메우기공"]["모래기초 포설"],q_되메우기)+calc_manday(LABOR_RATES["되메우기공"]["되메우기(기계다짐)"],q_되메우기)
+    md_포장     = calc_manday(LABOR_RATES["포장복구공"]["보조기층 포설"],q_포장)+calc_manday(LABOR_RATES["포장복구공"]["아스콘포장"],q_포장)
 
-    d_준비     = to_days(md_준비,     w["준비공"])
-    d_굴착     = to_days(md_굴착,     w["굴착공"])
-    d_관부설   = to_days(md_관부설,   w["관부설공"])
-    d_되메우기 = to_days(md_되메우기, w["되메우기공"])
-    d_포장     = to_days(md_포장,     w["포장복구공"])
-    d_total    = d_준비+d_굴착+d_관부설+d_되메우기+d_포장
+    d_준비=to_days(md_준비,w["준비공"]); d_굴착=to_days(md_굴착,w["굴착공"])
+    d_관부설=to_days(md_관부설,w["관부설공"]); d_되메우기=to_days(md_되메우기,w["되메우기공"])
+    d_포장=to_days(md_포장,w["포장복구공"]); d_total=d_준비+d_굴착+d_관부설+d_되메우기+d_포장
 
     st.subheader("공기산정 결과")
-    result_df = pd.DataFrame({
+    result_df=pd.DataFrame({
         "대공종":["준비공","굴착공","관부설공","되메우기공","포장복구공"],
         "투입인원(명)":[w["준비공"],w["굴착공"],w["관부설공"],w["되메우기공"],w["포장복구공"]],
         "Man-day(인일)":[md_준비,md_굴착,md_관부설,md_되메우기,md_포장],
@@ -503,11 +514,10 @@ with tab1:
                  hide_index=True,use_container_width=True)
 
     st.markdown("---")
-    ca,cb,cc,cd = st.columns(4)
+    ca,cb,cc,cd=st.columns(4)
     ca.metric("순 작업일수",f"{d_total}일")
     cb.metric("총 Man-day",f"{round(md_준비+md_굴착+md_관부설+md_되메우기+md_포장,1)}인일")
-    cc.metric("관경",pipe_dia)
-    cd.metric("착공일",str(start_date))
+    cc.metric("관경",pipe_dia); cd.metric("착공일",str(start_date))
 
     st.markdown("---")
     st.subheader("조수 시나리오 비교")
@@ -551,18 +561,18 @@ with tab1:
         "작업일수":[f"{d_준비}일",f"{d_굴착}일",f"{d_관부설}일",f"{d_되메우기}일",f"{d_포장}일"],
     }),hide_index=True,use_container_width=True)
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 2
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# TAB 2: 엑셀 내역서 인식
+# ══════════════════════════════════════════════════════════════
 with tab2:
     st.subheader("엑셀 내역서 자동 인식")
-    st.caption("도급(사급) 설계내역서를 업로드하세요. 키워드로 공종을 자동 탐지하고 1식·재료비 항목은 자동 제외됩니다.")
+    st.caption("도급(사급) 설계내역서 업로드 → 키워드 공종 탐지 → 2025 표준품셈 자동 적용 → Man-day 산출")
 
     uploaded = st.file_uploader("설계내역서 엑셀 (.xlsx)", type=["xlsx","xls"])
 
     if uploaded:
         try:
-            with st.spinner("파싱 중..."):
+            with st.spinner("파싱 및 품셈 적용 중..."):
                 all_rows, col_info = parse_by_keyword(uploaded)
 
             matched   = [r for r in all_rows if r["group"]!="기타" and r["qty"] is not None]
@@ -570,7 +580,7 @@ with tab2:
 
             st.success(f"시트 **{col_info['시트명']}** 파싱 완료 | 인식 **{len(matched)}건** | 미인식 **{len(unmatched)}건**")
 
-            with st.expander("컬럼 탐색 결과 확인"):
+            with st.expander("컬럼 탐색 결과"):
                 st.json(col_info)
 
             if matched:
@@ -578,78 +588,151 @@ with tab2:
                 df_m["금액(억원)"]   = (df_m["amount"].fillna(0)/1e8).round(2)
                 df_m["노무비(억원)"] = (df_m["labor"].fillna(0)/1e8).round(2)
                 df_m["주야간"]       = df_m["is_night"].map({True:"🌙야간",False:"☀️주간"})
+                df_m["Man-day"]      = df_m["manday"].apply(lambda x: round(x,1) if x else "")
+                df_m["품셈단가"]     = df_m.apply(lambda r:
+                    f"{r['labor_rate']} {r['labor_unit']}" if r.get("labor_rate") else "", axis=1)
+                df_m["토질/관경"]    = df_m["soil_info"]
                 df_m = df_m.sort_values("노무비(억원)",ascending=False).reset_index(drop=True)
 
-                ca,cb,cc,cd = st.columns(4)
+                # 요약
+                ca,cb,cc,cd,ce = st.columns(5)
                 ca.metric("인식 공종",f"{len(matched)}건")
                 cb.metric("총 금액",f"{df_m['금액(억원)'].sum():.1f}억")
                 cc.metric("총 노무비",f"{df_m['노무비(억원)'].sum():.1f}억")
-                cd.metric("야간공종",f"{df_m['is_night'].sum()}건")
+                cd.metric("품셈적용",f"{df_m['Man-day'].apply(lambda x: x!='').sum()}건")
+                ce.metric("야간공종",f"{df_m['is_night'].sum()}건")
 
-                st.markdown("#### 인식된 공종 목록")
+                st.markdown("#### 인식된 공종 목록 (2025 표준품셈 적용)")
                 all_groups = sorted(df_m["group"].unique().tolist())
                 sel = st.multiselect("공종그룹 필터",all_groups,default=all_groups,key="t2f")
                 fm = df_m[df_m["group"].isin(sel)]
-                sd = fm[["group","name","spec","qty","unit","금액(억원)","노무비(억원)","주야간"]].copy()
-                sd.columns = ["공종그룹","공종명","규격","수량","단위","금액(억원)","노무비(억원)","주야간"]
+
+                show_df = fm[["group","name","spec","qty","unit",
+                              "Man-day","품셈단가","토질/관경",
+                              "금액(억원)","노무비(억원)","주야간"]].copy()
+                show_df.columns = ["공종그룹","공종명","규격","수량","단위",
+                                   "Man-day(인일)","품셈단가","토질/관경",
+                                   "금액(억원)","노무비(억원)","주야간"]
+
                 top10 = set(fm.nlargest(10,"노무비(억원)").index)
                 def hl(row):
                     return ["background-color:#3a3000;color:#FFD700"]*len(row) if row.name in top10 else [""]*len(row)
-                st.dataframe(sd.style.apply(hl,axis=1),hide_index=True,use_container_width=True,height=450)
 
+                st.dataframe(show_df.style.apply(hl,axis=1),
+                             hide_index=True,use_container_width=True,height=420)
+
+            # 미인식 항목
             if unmatched:
                 st.markdown("---")
                 st.markdown(f"#### 미인식 항목 ({len(unmatched)}건)")
                 공종목록 = ["(선택안함)"]+list(KEYWORD_MAP_DETAIL.keys())+["기타"]
-                manual = []
+                manual=[]
                 for idx,item in enumerate(unmatched[:30]):
-                    ca,cb,cc,cd,ce = st.columns([3,1,1,1,2])
+                    ca,cb,cc,cd,ce=st.columns([3,1,1,1,2])
                     ca.markdown(f"<span style='color:#FFA500'>{item['name'][:30]}</span>",unsafe_allow_html=True)
                     cb.write(item.get("spec","")[:10])
                     cc.write(str(item["qty"]) if item["qty"] else "-")
                     cd.write(item["unit"])
-                    sel2 = ce.selectbox("공종",공종목록,key=f"mn_{idx}")
-                    if sel2!="(선택안함)": manual.append({**item,"group":sel2})
+                    sel2=ce.selectbox("공종",공종목록,key=f"mn_{idx}")
+                    if sel2!="(선택안함)":
+                        item["group"]=sel2
+                        item=apply_labor_rate(item)
+                        manual.append(item)
                 if len(unmatched)>30: st.caption(f"... 외 {len(unmatched)-30}건 더 있음")
-                if manual: matched = matched+manual
+                if manual: matched=matched+manual
 
+            # Man-day 기반 공기 산출
             st.markdown("---")
-            if matched and st.button("인식 물량을 공기산정에 적용",type="primary"):
-                df_a = pd.DataFrame(matched)
-                gq   = df_a.groupby("group")["qty"].sum()
-                st.session_state["_q_준비"]     = float(gq.get("준비공",5.0))
-                st.session_state["_q_터파기"]   = float(gq.get("굴착공",350.0))
-                st.session_state["_q_관부설"]   = float(gq.get("관부설공",120.0))
-                st.session_state["_q_되메우기"] = float(gq.get("되메우기",180.0))
-                st.session_state["_q_포장"]     = float(gq.get("포장복구",60.0))
-                st.success(f"적용 완료! 굴착공:{gq.get('굴착공',0):.0f}m3 | 관부설:{gq.get('관부설공',0):.0f}m | 되메우기:{gq.get('되메우기',0):.0f}m3 | 포장:{gq.get('포장복구',0):.0f}m2")
+            st.subheader("Man-day 기반 공기 산출")
+            st.caption("2025년 표준품셈 자동 적용 | 토질·관경별 세분화 품셈")
+
+            if matched:
+                df_md = pd.DataFrame(matched)
+
+                # 공종그룹별 Man-day 집계
+                md_summary = {}
+                for _, row in df_md.iterrows():
+                    grp = row.get("group","기타")
+                    md  = row.get("manday",0) or 0
+                    if grp not in md_summary:
+                        md_summary[grp] = 0
+                    md_summary[grp] += md
+
+                # 조수 입력
+                st.markdown("**공종별 투입 인원 설정**")
+                target_groups = ["굴착공","관부설공","되메우기","포장복구","맨홀공","배수설비","추진공"]
+                defaults_map  = {"굴착공":6,"관부설공":4,"되메우기":4,"포장복구":4,
+                                 "맨홀공":4,"배수설비":4,"추진공":4}
+                crew_cols = st.columns(len(target_groups))
+                crew = {}
+                for i,grp in enumerate(target_groups):
+                    with crew_cols[i]:
+                        crew[grp] = st.number_input(
+                            f"{grp}(명)", min_value=1, max_value=30,
+                            value=defaults_map.get(grp,4), key=f"crew_{grp}"
+                        )
+
+                # 공기 계산 테이블
+                result_rows=[]
+                for grp in target_groups:
+                    md   = md_summary.get(grp,0)
+                    wrk  = crew.get(grp,4)
+                    days = math.ceil(md/wrk) if md>0 else 0
+                    result_rows.append({
+                        "공종":     grp,
+                        "Man-day(인일)": round(md,1),
+                        "투입인원(명)":  wrk,
+                        "작업일수(일)":  days,
+                        "비고": "✅ 품셈 적용" if md>0 else "⚠️ 내역서 없음",
+                    })
+
+                st.dataframe(pd.DataFrame(result_rows),hide_index=True,use_container_width=True)
+
+                total_md   = sum(r["Man-day(인일)"] for r in result_rows)
+                total_days = sum(r["작업일수(일)"] for r in result_rows)
+                ca,cb,cc = st.columns(3)
+                ca.metric("총 Man-day",f"{total_md:.0f} 인일")
+                cb.metric("순 작업일수",f"{total_days} 일")
+                cc.metric("품셈 적용 공종",f"{sum(1 for r in result_rows if r['Man-day(인일)']>0)}개")
+
+                # 공기산정 탭 적용
+                st.markdown("---")
+                if st.button("공기산정 탭에 물량 적용", type="primary"):
+                    df_a = pd.DataFrame(matched)
+                    gq   = df_a.groupby("group")["qty"].sum()
+                    st.session_state["_q_준비"]     = float(gq.get("준비공",   5.0))
+                    st.session_state["_q_터파기"]   = float(gq.get("굴착공",   350.0))
+                    st.session_state["_q_관부설"]   = float(gq.get("관부설공", 120.0))
+                    st.session_state["_q_되메우기"] = float(gq.get("되메우기", 180.0))
+                    st.session_state["_q_포장"]     = float(gq.get("포장복구", 60.0))
+                    st.success("적용 완료! 공기산정 탭으로 이동하세요.")
 
         except Exception as e:
             st.error(f"파싱 오류: {e}")
             st.markdown("**파일 구조 확인 (첫 4행)**")
             try:
-                wb2 = openpyxl.load_workbook(uploaded,read_only=True,data_only=True)
-                ws2 = wb2[wb2.sheetnames[0]]
-                prev = []
+                wb2=openpyxl.load_workbook(uploaded,read_only=True,data_only=True)
+                ws2=wb2[wb2.sheetnames[0]]
+                prev=[]
                 for row in ws2.iter_rows(min_row=1,max_row=4,values_only=True):
                     prev.append([str(c)[:15] if c is not None else "" for c in list(row)[:15]])
                 wb2.close()
-                pf = pd.DataFrame(prev,index=["1행","2행","3행","4행"])
-                pf.columns = [f"col{i}" for i in range(len(pf.columns))]
+                pf=pd.DataFrame(prev,index=["1행","2행","3행","4행"])
+                pf.columns=[f"col{i}" for i in range(len(pf.columns))]
                 st.dataframe(pf,use_container_width=True)
             except Exception as e2:
                 st.error(f"미리보기 실패: {e2}")
     else:
         st.info("도급(사급) 설계내역서 엑셀을 업로드해주세요.")
         st.markdown("""
-**업로드 가능 파일:** 설계내역서(도급), 공사비내역서, 사급내역서
-**자동 제외:** 1식 항목, 재료비만인 항목, 관급자재 항목, 계층코드 행
-**지원 시트명:** 설계내역서, 내역서, 공사비내역서 (자동 탐색)
+**지원 파일:** 설계내역서(도급), 공사비내역서, 사급내역서
+**자동 제외:** 1식 항목, 재료비만인 항목, 관급자재, 계층코드 행
+**품셈 자동 적용:** 터파기(토질·용수·심도별), 관부설(관종·관경별) — 2025년 표준품셈 기준
         """)
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 3
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# TAB 3: 주요공종 CP 분석
+# ══════════════════════════════════════════════════════════════
 with tab3:
     df_mw = pd.DataFrame(MAJOR_WORKS)
     df_mw["labor_ratio"] = df_mw["labor"]/df_mw["amount"]
@@ -659,7 +742,7 @@ with tab3:
     df_non_cp = df_mw[~df_mw["is_cp"]].copy()
 
     st.subheader("주요공종 CP 분석")
-    ca,cb,cc,cd = st.columns(4)
+    ca,cb,cc,cd=st.columns(4)
     ca.metric("전체 주요공종",f"{len(df_mw)}건")
     cb.metric("CP 공종",f"{len(df_cp)}건")
     cc.metric("총 CP 노무비",fmt_ok(df_cp["labor"].sum()) if len(df_cp)>0 else "0억")
@@ -667,14 +750,15 @@ with tab3:
 
     st.markdown("---")
     st.markdown("#### 크리티컬패스 흐름")
-    cp_cols = st.columns(len(CP_DEFINITION))
+    cp_cols=st.columns(len(CP_DEFINITION))
     for i,cp in enumerate(CP_DEFINITION):
         with cp_cols[i]:
-            gd = df_cp[df_cp["cp_group"]==cp["대공종"]] if len(df_cp)>0 else pd.DataFrame()
-            hd = len(gd)>0
-            bc = cp["color"] if hd else "#555"
+            gd=df_cp[df_cp["cp_group"]==cp["대공종"]] if len(df_cp)>0 else pd.DataFrame()
+            hd=len(gd)>0
+            bc=cp["color"] if hd else "#555"
             st.markdown(f"""
-<div style='border:2px solid {bc};border-radius:8px;padding:8px;text-align:center;opacity:{"1.0" if hd else "0.4"};margin:2px'>
+<div style='border:2px solid {bc};border-radius:8px;padding:8px;text-align:center;
+     opacity:{"1.0" if hd else "0.4"};margin:2px'>
 <div style='font-size:11px;color:{bc};font-weight:bold'>{cp["order"]}순위</div>
 <div style='font-size:13px;font-weight:bold'>{cp["대공종"]}</div>
 <div style='font-size:10px;color:#aaa'>{cp["cp_name"]}</div>
@@ -682,38 +766,38 @@ with tab3:
 </div>""",unsafe_allow_html=True)
 
     st.markdown("---")
-    left,right = st.columns([2,1])
+    left,right=st.columns([2,1])
 
     with left:
         st.markdown("#### CP 공종 상위 10개 (노무비 기준)")
         if len(df_cp)>0:
-            dcs = df_cp.copy()
-            dcs["금액(억원)"]   = (dcs["amount"]/1e8).round(2)
-            dcs["노무비(억원)"] = (dcs["labor"]/1e8).round(2)
-            dcs["노무비율"]     = (dcs["labor_ratio"]*100).round(1).astype(str)+"%"
-            dcs["주야간"]       = dcs["night"].map({True:"야간",False:"주간"})
-            dcs["노무집약"]     = dcs["labor_ratio"].apply(lambda x:"🔥" if x>=0.8 else "")
-            t10 = dcs.nlargest(10,"노무비(억원)").reset_index(drop=True)
-            t10.index += 1
-            sc = t10[["cp_group","name","spec","qty","unit","금액(억원)","노무비(억원)","노무비율","주야간","노무집약"]].copy()
-            sc.columns = ["CP그룹","공종명","규격","수량","단위","금액(억원)","노무비(억원)","노무비율","주야간","노무집약"]
+            dcs=df_cp.copy()
+            dcs["금액(억원)"]  =(dcs["amount"]/1e8).round(2)
+            dcs["노무비(억원)"]=(dcs["labor"]/1e8).round(2)
+            dcs["노무비율"]    =(dcs["labor_ratio"]*100).round(1).astype(str)+"%"
+            dcs["주야간"]      =dcs["night"].map({True:"야간",False:"주간"})
+            dcs["노무집약"]    =dcs["labor_ratio"].apply(lambda x:"🔥" if x>=0.8 else "")
+            t10=dcs.nlargest(10,"노무비(억원)").reset_index(drop=True)
+            t10.index+=1
+            sc=t10[["cp_group","name","spec","qty","unit","금액(억원)","노무비(억원)","노무비율","주야간","노무집약"]].copy()
+            sc.columns=["CP그룹","공종명","규격","수량","단위","금액(억원)","노무비(억원)","노무비율","주야간","노무집약"]
             st.dataframe(sc,hide_index=False,use_container_width=True,height=380)
 
             with st.expander(f"비CP 제외 공종 ({len(df_non_cp)}건)"):
                 if len(df_non_cp)>0:
-                    dns = df_non_cp[["group","name","spec","qty","unit"]].copy()
-                    dns.columns = ["공종그룹","공종명","규격","수량","단위"]
+                    dns=df_non_cp[["group","name","spec","qty","unit"]].copy()
+                    dns.columns=["공종그룹","공종명","규격","수량","단위"]
                     st.dataframe(dns,hide_index=True,use_container_width=True)
 
         st.markdown("---")
         st.markdown("#### CP 공종 노무비 비교")
         if len(df_cp)>0:
-            cd2 = df_cp.copy()
-            cd2["노무비(억원)"] = (cd2["labor"]/1e8).round(2)
-            cd2["공종명단축"]   = cd2["name"].str[:15]
-            fb = px.bar(cd2.nlargest(10,"노무비(억원)"),x="노무비(억원)",y="공종명단축",
-                        color="cp_group",color_discrete_map={cp["대공종"]:cp["color"] for cp in CP_DEFINITION},
-                        orientation="h",text="노무비(억원)")
+            cd2=df_cp.copy()
+            cd2["노무비(억원)"]=(cd2["labor"]/1e8).round(2)
+            cd2["공종명단축"]=cd2["name"].str[:15]
+            fb=px.bar(cd2.nlargest(10,"노무비(억원)"),x="노무비(억원)",y="공종명단축",
+                      color="cp_group",color_discrete_map={cp["대공종"]:cp["color"] for cp in CP_DEFINITION},
+                      orientation="h",text="노무비(억원)")
             fb.update_layout(height=350,showlegend=True,margin=dict(l=10,r=10,t=20,b=10),yaxis=dict(autorange="reversed"))
             fb.update_traces(textposition="outside")
             st.plotly_chart(fb,use_container_width=True)
@@ -721,8 +805,8 @@ with tab3:
     with right:
         st.markdown("#### CP 선정 기준")
         for cp in CP_DEFINITION:
-            gd = df_cp[df_cp["cp_group"]==cp["대공종"]] if len(df_cp)>0 else pd.DataFrame()
-            hd = len(gd)>0
+            gd=df_cp[df_cp["cp_group"]==cp["대공종"]] if len(df_cp)>0 else pd.DataFrame()
+            hd=len(gd)>0
             with st.expander(f'{"🔴" if hd else "⚪"} {cp["order"]}. {cp["대공종"]}'):
                 st.markdown(f"**근거:** {cp['reason']}")
                 st.markdown(f"**키워드:** {', '.join(cp['keywords'][:4])}")
@@ -732,29 +816,29 @@ with tab3:
         st.markdown("---")
         if len(df_mw)>0:
             st.markdown("#### CP vs 비CP 노무비")
-            cl = df_cp["labor"].sum() if len(df_cp)>0 else 0
-            nl = df_non_cp["labor"].sum() if len(df_non_cp)>0 else 0
-            fd = go.Figure(go.Pie(labels=["CP","비CP"],values=[cl,nl],hole=0.55,
-                                  marker_colors=["#E74C3C","#555"],textinfo="label+percent",textfont_size=11))
+            cl=df_cp["labor"].sum() if len(df_cp)>0 else 0
+            nl=df_non_cp["labor"].sum() if len(df_non_cp)>0 else 0
+            fd=go.Figure(go.Pie(labels=["CP","비CP"],values=[cl,nl],hole=0.55,
+                                marker_colors=["#E74C3C","#555"],textinfo="label+percent",textfont_size=11))
             fd.update_layout(height=240,margin=dict(l=0,r=0,t=10,b=0),showlegend=False)
             st.plotly_chart(fd,use_container_width=True)
 
         if len(df_cp)>0:
             st.markdown("#### CP 그룹별 노무비")
-            gs = df_cp.groupby("cp_group")["labor"].sum().reset_index()
-            fd2= go.Figure(go.Pie(labels=gs["cp_group"],values=gs["labor"],hole=0.55,
-                                  textinfo="label+percent",textfont_size=10))
+            gs=df_cp.groupby("cp_group")["labor"].sum().reset_index()
+            fd2=go.Figure(go.Pie(labels=gs["cp_group"],values=gs["labor"],hole=0.55,
+                                 textinfo="label+percent",textfont_size=10))
             fd2.update_layout(height=240,margin=dict(l=0,r=0,t=10,b=0),showlegend=False)
             st.plotly_chart(fd2,use_container_width=True)
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 4
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# TAB 4: 비작업일수 계산기
+# ══════════════════════════════════════════════════════════════
 with tab4:
     st.subheader("비작업일수 계산기 (가이드라인 기준)")
     st.caption("국토교통부 적정 공사기간 확보 가이드라인 (2025.01.) | 전국 24개 도시 기상데이터")
 
-    col1,col2 = st.columns(2)
+    col1,col2=st.columns(2)
     with col1:
         proj_type       = st.selectbox("공사 종류",list(PREP_PERIOD.keys()),index=0)
         start_year      = st.selectbox("착공 연도",list(range(2025,2034)),index=0)
@@ -763,45 +847,44 @@ with tab4:
         city            = st.selectbox("공사 지역",CITY_LIST,index=CITY_LIST.index("서울") if "서울" in CITY_LIST else 0)
     with col2:
         st.markdown("**기상 조건**")
-        use_rain = st.checkbox("강우 (5mm 이상)",value=True)
-        use_cold = st.checkbox("동절기 (0도 이하)",value=True)
-        use_heat = st.checkbox("혹서기 (35도 이상)",value=False)
-        use_wind = st.checkbox("강풍 (15m/s 이상)",value=False)
+        use_rain=st.checkbox("강우 (5mm 이상)",value=True)
+        use_cold=st.checkbox("동절기 (0도 이하)",value=True)
+        use_heat=st.checkbox("혹서기 (35도 이상)",value=False)
+        use_wind=st.checkbox("강풍 (15m/s 이상)",value=False)
         prep_days    = st.number_input("준비기간 (일)",value=PREP_PERIOD.get(proj_type,60),min_value=0)
         cleanup_days = st.number_input("정리기간 (일)",value=20,min_value=0)
 
     st.markdown("---")
     corr_rows=[]; total_applied=0.0
-
     for i in range(int(duration_months)):
-        cm = ((start_month-1+i)%12)+1
-        cy = start_year+(start_month-1+i)//12
-        A  = 0.0
-        if use_rain: A += WEATHER_DB["rain5"].get(city,{}).get("monthly",[0]*12)[cm-1] if isinstance(WEATHER_DB["rain5"].get(city),dict) else WEATHER_DB["rain5"].get(city,[0]*12)[cm-1]
-        if use_cold: A += WEATHER_DB["cold"].get(city,[0]*12)[cm-1]
-        if use_heat: A += WEATHER_DB["heat"].get(city,[0]*12)[cm-1]
-        if use_wind: A += WEATHER_DB["wind"].get(city,[0]*12)[cm-1]
-        B        = HOLIDAYS_DB.get(cy,HOLIDAYS_DB[2025]).get(cm,5)
-        C        = round(A*B/30,0)
-        non_work = round(A+B-C,1)
-        applied  = max(8.0,non_work)
-        total_applied += applied
+        cm=((start_month-1+i)%12)+1
+        cy=start_year+(start_month-1+i)//12
+        A=0.0
+        if use_rain: A+=WEATHER_DB["rain5"].get(city,[0]*12)[cm-1]
+        if use_cold: A+=WEATHER_DB["cold"].get(city,[0]*12)[cm-1]
+        if use_heat: A+=WEATHER_DB["heat"].get(city,[0]*12)[cm-1]
+        if use_wind: A+=WEATHER_DB["wind"].get(city,[0]*12)[cm-1]
+        B=HOLIDAYS_DB.get(cy,HOLIDAYS_DB[2025]).get(cm,5)
+        C=round(A*B/30,0)
+        non_work=round(A+B-C,1)
+        applied=max(8.0,non_work)
+        total_applied+=applied
         corr_rows.append({"연월":f"{cy}년 {cm}월","기상비작업일(A)":round(A,1),
                           "법정공휴일(B)":B,"중복일수(C)":int(C),
                           "비작업일수":non_work,"적용일수":round(applied,1),
                           "비고":"최소8일" if applied>non_work else ""})
 
-    nw_df = pd.DataFrame(corr_rows)
-    tr = pd.DataFrame([{"연월":"합계","기상비작업일(A)":round(nw_df["기상비작업일(A)"].sum(),1),
-                         "법정공휴일(B)":nw_df["법정공휴일(B)"].sum(),"중복일수(C)":nw_df["중복일수(C)"].sum(),
-                         "비작업일수":round(nw_df["비작업일수"].sum(),1),"적용일수":round(total_applied,1),"비고":""}])
+    nw_df=pd.DataFrame(corr_rows)
+    tr=pd.DataFrame([{"연월":"합계","기상비작업일(A)":round(nw_df["기상비작업일(A)"].sum(),1),
+                       "법정공휴일(B)":nw_df["법정공휴일(B)"].sum(),"중복일수(C)":nw_df["중복일수(C)"].sum(),
+                       "비작업일수":round(nw_df["비작업일수"].sum(),1),"적용일수":round(total_applied,1),"비고":""}])
     st.dataframe(pd.concat([nw_df,tr],ignore_index=True),hide_index=True,use_container_width=True)
 
     st.markdown("---")
     st.subheader("총 공사기간 산출")
     st.caption("공사기간 = 준비기간 + 비작업일수 + 작업일수 + 정리기간")
-    total_dur = prep_days+int(total_applied)+d_total+cleanup_days
-    ca,cb,cc,cd,ce = st.columns(5)
+    total_dur=prep_days+int(total_applied)+d_total+cleanup_days
+    ca,cb,cc,cd,ce=st.columns(5)
     ca.metric("준비기간",f"{prep_days}일")
     cb.metric("비작업일수",f"{int(total_applied)}일")
     cc.metric("순 작업일수",f"{d_total}일")
@@ -810,8 +893,8 @@ with tab4:
     st.info(f"**{prep_days}일(준비) + {int(total_applied)}일(비작업) + {d_total}일(작업) + {cleanup_days}일(정리) = {total_dur}일 (약 {round(total_dur/30,1)}개월)**")
 
     st.markdown("#### 월별 비작업일수")
-    fn = px.bar(nw_df,x="연월",y=["기상비작업일(A)","법정공휴일(B)"],barmode="stack",
-                color_discrete_map={"기상비작업일(A)":"#378ADD","법정공휴일(B)":"#E67E22"})
+    fn=px.bar(nw_df,x="연월",y=["기상비작업일(A)","법정공휴일(B)"],barmode="stack",
+              color_discrete_map={"기상비작업일(A)":"#378ADD","법정공휴일(B)":"#E67E22"})
     fn.add_scatter(x=nw_df["연월"],y=nw_df["적용일수"],mode="lines+markers",name="적용일수",
                    line=dict(color="red",width=2))
     fn.update_layout(height=300,margin=dict(l=10,r=10,t=20,b=10))

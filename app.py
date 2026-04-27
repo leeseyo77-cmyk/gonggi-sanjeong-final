@@ -322,6 +322,7 @@ def apply_labor_rate(item):
         return item
 
     # 2. 관 부설 (관종·관경별)
+# 2. 관 부설 (관종·관경별)
     pipe_kws = ["관 부설","관부설","이중벽관","주철관","흄관","콘크리트관",
                 "GRP관","유리섬유복합관","파형강관","PE다중벽","고강성PVC","강관부설"]
     if any(kw in name for kw in pipe_kws):
@@ -329,14 +330,25 @@ def apply_labor_rate(item):
         if dia:
             try:
                 info = get_pipe_labor(name, dia, "A")
-                rate = info.get("합계")
-                if rate and qty:
-                    item["manday"]     = round(rate * qty, 1)
-                    item["labor_rate"] = rate
-                    item["labor_unit"] = "인/본"
-                    item["soil_info"]  = f"D={dia}mm"
+                if info and isinstance(info, dict):
+                    rate = info.get("합계")
+                    if rate and qty:
+                        item["manday"]     = round(rate * qty, 1)
+                        item["labor_rate"] = rate
+                        item["labor_unit"] = "인/본"
+                        item["soil_info"]  = f"D={dia}mm"
             except Exception:
-                pass
+                # 품셈 없으면 노무비 역산으로 대체
+                labor = item.get("labor") or 0
+                if labor > 0 and qty > 0:
+                    item["manday"]     = round(labor / 200000, 1)
+                    item["soil_info"]  = "노무비 역산"
+        else:
+            # 관경 추출 실패시 노무비 역산
+            labor = item.get("labor") or 0
+            if labor > 0 and qty > 0:
+                item["manday"]     = round(labor / 200000, 1)
+                item["soil_info"]  = "노무비 역산"
         return item
 
     # 3. 맨홀 설치 (노무비 역산)

@@ -505,16 +505,14 @@ def parse_by_keyword(file):
 
 # ── 사이드바 ──────────────────────────────────────────────────
 st.sidebar.header("기본 설정")
-pipe_dia   = st.sidebar.selectbox("관경", ["200mm","300mm"])
 start_date = st.sidebar.date_input("착공 예정일", value=date.today())
 st.sidebar.markdown("---")
-st.sidebar.caption("투입 인원은 각 탭에서 설정하세요.")
+st.sidebar.caption("공종별 투입 조수는 엑셀 내역서 인식 탭에서 설정하세요.")
 
-w = {
-    "준비공":4,"굴착공":6,"관부설공":4,"되메우기공":4,"포장복구공":4
-}
 if "workers" not in st.session_state:
-    st.session_state.workers = w
+    st.session_state.workers = {
+        "준비공":4,"굴착공":6,"관부설공":4,"되메우기공":4,"포장복구공":4
+    }
 w = st.session_state.workers
 
 st.title("상하수도 관로공사 공기산정 시스템")
@@ -527,6 +525,7 @@ tab1,tab2,tab3,tab4 = st.tabs(["📋 공기산정","📂 엑셀 내역서 인식
 # ══════════════════════════════════════════════════════════════
 with tab1:
     st.subheader("공종별 물량 입력")
+    pipe_dia = st.selectbox("관경 선택", ["200mm","300mm"], key="tab1_pipe")
     col1,col2 = st.columns(2)
     with col1:
         st.markdown("**준비공**")

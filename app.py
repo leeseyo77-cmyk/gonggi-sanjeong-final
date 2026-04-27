@@ -435,24 +435,27 @@ def parse_by_keyword(file):
 
     wb.close()
 
+# ── 품셈 먼저 적용 (spec 합산 전) ────────────────────────
+    for r in results:
+        r = apply_labor_rate(r)
+
+    # ── 같은 공종명 물량·작업일수 합산 ───────────────────────
     merged = {}
     for r in results:
         key = (r["group"], r["name"].split("(")[0].strip())
         if key not in merged:
             merged[key] = dict(r)
             merged[key]["name"] = r["name"].split("(")[0].strip()
-            merged[key]["spec"] = "규격 합산"
+            merged[key]["spec"] = r["spec"]  # 첫 번째 규격 유지
         else:
-            merged[key]["qty"]    = (merged[key]["qty"]    or 0)+(r["qty"]    or 0)
-            merged[key]["amount"] = (merged[key]["amount"] or 0)+(r["amount"] or 0)
-            merged[key]["labor"]  = (merged[key]["labor"]  or 0)+(r["labor"]  or 0)
+            merged[key]["qty"]       = (merged[key]["qty"]       or 0) + (r["qty"]       or 0)
+            merged[key]["amount"]    = (merged[key]["amount"]    or 0) + (r["amount"]    or 0)
+            merged[key]["labor"]     = (merged[key]["labor"]     or 0) + (r["labor"]     or 0)
+            merged[key]["manday"]    = (merged[key]["manday"]    or 0) + (r["manday"]    or 0)
+            merged[key]["work_days"] = (merged[key]["work_days"] or 0) + (r["work_days"] or 0)
 
-    final = []
-    for item in merged.values():
-        item = apply_labor_rate(item)
-        final.append(item)
-
-    return final, col_info
+    # apply_labor_rate는 합산 후 재실행 불필요 (이미 적용됨)
+    return list(merged.values()), col_info
 
 # ── 사이드바 ──────────────────────────────────────────────────
 st.sidebar.header("기본 설정")

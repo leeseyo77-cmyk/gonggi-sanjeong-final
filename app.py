@@ -584,7 +584,7 @@ with tab2:
     uploaded = st.file_uploader("설계내역서 엑셀 (.xlsx)", type=["xlsx","xls"])
 
     if uploaded:
-        try:
+try:
             with st.spinner("파싱 및 품셈 적용 중..."):
                 all_rows, col_info = parse_by_keyword(uploaded)
 
@@ -601,33 +601,26 @@ with tab2:
                 df_m["금액(억원)"]   = (df_m["amount"].fillna(0)/1e8).round(2)
                 df_m["노무비(억원)"] = (df_m["labor"].fillna(0)/1e8).round(2)
                 df_m["주야간"]       = df_m["is_night"].map({True:"🌙야간",False:"☀️주간"})
+                df_m["작업일수"]     = df_m["work_days"].apply(lambda x: f"{x}일" if x else "")
+                df_m["1일작업량"]    = df_m["daily_prod"]
+                df_m["조수"]         = df_m["crews"].apply(lambda x: f"{x}조" if x else "")
                 df_m["Man-day"]      = df_m["manday"].apply(lambda x: round(x,1) if x else "")
-                df_m["품셈단가"]     = df_m.apply(lambda r:
-                    f"{r['labor_rate']} {r['labor_unit']}" if r.get("labor_rate") else "", axis=1)
                 df_m["토질/관경"]    = df_m["soil_info"]
-                df_m = df_m.sort_values("노무비(억원)",ascending=False).reset_index(drop=True)
 
                 # 요약
                 ca,cb,cc,cd,ce = st.columns(5)
                 ca.metric("인식 공종",f"{len(matched)}건")
                 cb.metric("총 금액",f"{df_m['금액(억원)'].sum():.1f}억")
                 cc.metric("총 노무비",f"{df_m['노무비(억원)'].sum():.1f}억")
-                cd.metric("품셈적용",f"{df_m['Man-day'].apply(lambda x: x!='').sum()}건")
+                cd.metric("품셈적용",f"{df_m['작업일수'].apply(lambda x: x!='').sum()}건")
                 ce.metric("야간공종",f"{df_m['is_night'].sum()}건")
 
-                st.markdown("#### 인식된 공종 목록 (2025 표준품셈 적용)")
+                st.markdown("#### 인식된 공종 목록 (작업일수 내림차순)")
                 all_groups = sorted(df_m["group"].unique().tolist())
                 sel = st.multiselect("공종그룹 필터",all_groups,default=all_groups,key="t2f")
-                fm = df_m[df_m["group"].isin(sel)]
 
-df_m["작업일수"]  = df_m["work_days"].apply(lambda x: f"{x}일" if x else "")
-                df_m["1일작업량"] = df_m["daily_prod"]
-                df_m["조수"]      = df_m["crews"].apply(lambda x: f"{x}조" if x else "")
-                df_m["Man-day"]   = df_m["manday"].apply(lambda x: round(x,1) if x else "")
-                df_m["토질/관경"] = df_m["soil_info"]
-
-                # 작업일수 내림차순 정렬 (CP 순서대로)
-                df_m_sorted = df_m.copy()
+                # 작업일수 내림차순 정렬
+                df_m_sorted = df_m[df_m["group"].isin(sel)].copy()
                 df_m_sorted["_sort"] = df_m_sorted["work_days"].fillna(0)
                 df_m_sorted = df_m_sorted.sort_values("_sort", ascending=False).reset_index(drop=True)
 
@@ -640,7 +633,7 @@ df_m["작업일수"]  = df_m["work_days"].apply(lambda x: f"{x}일" if x else ""
                                    "Man-day(인일)","토질/관경",
                                    "금액(억원)","노무비(억원)","주야간"]
 
-                top10 = set(fm.nlargest(10,"노무비(억원)").index)
+                top10 = set(range(min(10, len(show_df))))
                 def hl(row):
                     return ["background-color:#3a3000;color:#FFD700"]*len(row) if row.name in top10 else [""]*len(row)
 
@@ -670,69 +663,60 @@ df_m["작업일수"]  = df_m["work_days"].apply(lambda x: f"{x}일" if x else ""
             # Man-day 기반 공기 산출
             st.markdown("---")
             st.subheader("Man-day 기반 공기 산출")
-            st.caption("2025년 표준품셈 자동 적용 | 토질·관경별 세분화 품셈")
+            st.caption("가이드라인 부록1,2 1일작업량 기준 | 2025년 표준품셈 Man-day 병행")
 
             if matched:
                 df_md = pd.DataFrame(matched)
 
-                # 공종그룹별 Man-day 집계
                 md_summary = {}
+                wd_summary = {}
                 for _, row in df_md.iterrows():
                     grp = row.get("group","기타")
                     md  = row.get("manday",0) or 0
-                    if grp not in md_summary:
-                        md_summary[grp] = 0
-                    md_summary[grp] += md
+                    wd  = row.get("work_days",0) or 0
+                    md_summary[grp] = md_summary.get(grp,0) + md
+                    wd_summary[grp] = wd_summary.get(grp,0) + wd
 
-                # 조수 입력
-                st.markdown("**공종별 투입 인원 설정**")
+                st.markdown("**공종별 투입 조수 설정**")
                 target_groups = ["굴착공","관부설공","되메우기","포장복구","맨홀공","배수설비","추진공"]
-                defaults_map  = {"굴착공":6,"관부설공":4,"되메우기":4,"포장복구":4,
-                                 "맨홀공":4,"배수설비":4,"추진공":4}
+                defaults_map  = {"굴착공":5,"관부설공":3,"되메우기":5,"포장복구":5,
+                                 "맨홀공":3,"배수설비":3,"추진공":1}
                 crew_cols = st.columns(len(target_groups))
                 crew = {}
                 for i,grp in enumerate(target_groups):
                     with crew_cols[i]:
                         crew[grp] = st.number_input(
-                            f"{grp}(명)", min_value=1, max_value=30,
-                            value=defaults_map.get(grp,4), key=f"crew_{grp}"
+                            f"{grp}(조)", min_value=1, max_value=30,
+                            value=defaults_map.get(grp,3), key=f"crew_{grp}"
                         )
 
-                # 공기 계산 테이블
                 result_rows=[]
                 for grp in target_groups:
-                    md   = md_summary.get(grp,0)
-                    wrk  = crew.get(grp,4)
-                    days = math.ceil(md/wrk) if md>0 else 0
-                    result_rows.append({
-for grp in target_groups:
                     grp_items = [r for r in matched if r.get("group")==grp]
-                    md   = sum(r.get("manday",0) or 0 for r in grp_items)
-                    days_from_wd = sum(r.get("work_days",0) or 0 for r in grp_items)
-                    wrk  = crew.get(grp,4)
+                    md   = md_summary.get(grp,0)
+                    wd   = wd_summary.get(grp,0)
+                    wrk  = crew.get(grp,3)
                     days_from_md = math.ceil(md/wrk) if md>0 else 0
-                    # 작업일수: 1일작업량 기준 우선, 없으면 Man-day 기준
-                    final_days = days_from_wd if days_from_wd > 0 else days_from_md
+                    final_days   = round(wd,1) if wd>0 else days_from_md
                     result_rows.append({
-                        "공종":          grp,
-                        "Man-day(인일)": round(md,1),
-                        "투입인원(명)":  wrk,
-                        "작업일수_품셈": days_from_md,
-                        "작업일수_1일기준": days_from_wd,
-                        "최종작업일수(일)": final_days,
-                        "비고": "✅ 1일기준" if days_from_wd>0 else ("✅ Man-day기준" if md>0 else "⚠️ 없음"),
+                        "공종":              grp,
+                        "Man-day(인일)":     round(md,1),
+                        "투입조수":          wrk,
+                        "작업일수_1일기준":  round(wd,1),
+                        "작업일수_Manday":   days_from_md,
+                        "최종작업일수(일)":  final_days,
+                        "비고": "✅ 1일기준" if wd>0 else ("✅ Man-day" if md>0 else "⚠️ 없음"),
                     })
 
                 st.dataframe(pd.DataFrame(result_rows),hide_index=True,use_container_width=True)
 
+                total_wd   = sum(r["최종작업일수(일)"] for r in result_rows)
                 total_md   = sum(r["Man-day(인일)"] for r in result_rows)
-                total_days = sum(r["작업일수(일)"] for r in result_rows)
                 ca,cb,cc = st.columns(3)
                 ca.metric("총 Man-day",f"{total_md:.0f} 인일")
-                cb.metric("순 작업일수",f"{total_days} 일")
-                cc.metric("품셈 적용 공종",f"{sum(1 for r in result_rows if r['Man-day(인일)']>0)}개")
+                cb.metric("총 작업일수",f"{total_wd:.0f} 일")
+                cc.metric("품셈 적용",f"{sum(1 for r in result_rows if r['최종작업일수(일)']>0)}개 공종")
 
-                # 공기산정 탭 적용
                 st.markdown("---")
                 if st.button("공기산정 탭에 물량 적용", type="primary"):
                     df_a = pd.DataFrame(matched)
@@ -764,7 +748,8 @@ for grp in target_groups:
         st.markdown("""
 **지원 파일:** 설계내역서(도급), 공사비내역서, 사급내역서
 **자동 제외:** 1식 항목, 재료비만인 항목, 관급자재, 계층코드 행
-**품셈 자동 적용:** 터파기(토질·용수·심도별), 관부설(관종·관경별) — 2025년 표준품셈 기준
+**품셈 자동 적용:** 터파기(토질·용수별), 관부설(관종·관경별) — 2025년 표준품셈 기준
+**작업일수:** 가이드라인 부록1,2 1일작업량 기준, 작업일수 내림차순 정렬
         """)
 
 # ══════════════════════════════════════════════════════════════

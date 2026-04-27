@@ -697,38 +697,47 @@ with tab2:
 
                 result_rows=[]
                 for grp in target_groups:
-                    wd   = wd_summary.get(grp,0)
                     md   = md_summary.get(grp,0)
                     wrk  = crew.get(grp,3)
                     days_from_md = math.ceil(md/wrk) if md>0 else 0
 
-                    # 작업일수 = 물량 ÷ (1일작업량 × 투입조수)
-                    # wd_summary는 기본조수로 계산된 값 → 조수 반영해서 재계산
                     grp_items = [r for r in matched if r.get("group")==grp]
 
-                    # 1일작업량 기준 재계산
+                    # 1일작업량 × 투입조수 기준 재계산
                     days_from_wd = 0
-                    daily_repr = "-"
+                    daily_repr   = "-"
+                    total_qty    = 0
+
                     for item in grp_items:
                         item_qty  = item.get("qty") or 0
                         item_name = item.get("name","")
                         item_spec = item.get("spec","")
-                        wd_info   = calc_work_days(item_name, item_spec, item_qty, crews=wrk)
+                        total_qty += item_qty
+
+                        wd_info = calc_work_days(item_name, item_spec, item_qty, crews=wrk)
                         if wd_info:
-                            days_from_wd += wd_info.get("work_days_ceil", 0)
-                            if not daily_repr or daily_repr=="-":
-                                daily_repr = f"{wd_info.get('daily','')}{wd_info.get('unit','')}/일"
+                            # 터파기: 조수 = 굴착기 대수 → 1일작업량 × 조수
+                            if any(kw in item_name for kw in ["터파기","굴착"]):
+                                base_daily = wd_info.get("daily", 300)
+                                adjusted_days = item_qty / (base_daily * wrk) if base_daily*wrk > 0 else 0
+                                days_from_wd += math.ceil(adjusted_days)
+                            else:
+                                days_from_wd += wd_info.get("work_days_ceil", 0)
+
+                            if daily_repr == "-":
+                                d = wd_info.get("daily","")
+                                u = wd_info.get("unit","")
+                                daily_repr = f"{d}{u}/일×{wrk}조"
 
                     final_days = int(days_from_wd) if days_from_wd > 0 else days_from_md
-
                     qty_val, unit_val = grp_qty_dict.get(grp,(0,""))
 
                     result_rows.append({
-                        "공종":       grp,
-                        "물량":       f"{qty_val:,.0f}" if qty_val else "-",
-                        "단위":       unit_val,
-                        "1일작업량":  daily_repr,
-                        "투입조수":   f"{wrk}조",
+                        "공종":         grp,
+                        "물량":         f"{qty_val:,.0f}" if qty_val else "-",
+                        "단위":         unit_val,
+                        "1일작업량":    daily_repr,
+                        "투입조수":     f"{wrk}조",
                         "작업일수(일)": final_days,
                         "비고": "✅ 1일기준" if days_from_wd>0 else ("✅ Man-day" if md>0 else "⚠️ 없음"),
                     })
@@ -741,17 +750,36 @@ with tab2:
                         return ["background-color:#3d0000;color:#ff6b6b"]*len(row)
                     return [""]*len(row)
 
+                # 합계 행 추가
+                total_row = {
+                    "공종":         "[ 합  계 ]",
+                    "물량":         "-",
+                    "단위":         "-",
+                    "1일작업량":    "-",
+                    "투입조수":     "-",
+                    "작업일수(일)": sum(r["작업일수(일)"] for r in result_rows),
+                    "비고":         "",
+                }
+                display_rows = result_rows_sorted + [total_row]
+
+                def hl_result2(row):
+                    if row["공종"] == "[ 합  계 ]":
+                        return ["background-color:#1a1a3a;color:#7F77DD;font-weight:bold"]*len(row)
+                    if row["작업일수(일)"] == max_days and max_days > 0:
+                        return ["background-color:#3d0000;color:#ff6b6b"]*len(row)
+                    return [""]*len(row)
+
                 st.dataframe(
-                    pd.DataFrame(result_rows_sorted).style.apply(hl_result, axis=1),
+                    pd.DataFrame(display_rows).style.apply(hl_result2, axis=1),
                     hide_index=True, use_container_width=True
                 )
-                st.caption("🔴 최장 작업일수 공종 = 주공정 (크리티컬패스)")
+                st.caption("🔴 최장 작업일수 공종 = 주공정 (크리티컬패스) | 🔵 합계")
 
-                total_wd = sum(r["작업일수(일)"] for r in result_rows)
-                ca,cb,cc = st.columns(3)
+                total_wd  = sum(r["작업일수(일)"] for r in result_rows)
+                ca,cb,cc  = st.columns(3)
                 ca.metric("🔴 주공정 (최장)",
                           f"{max_days}일",
-                          delta=max((r['공종'] for r in result_rows_sorted if r['작업일수(일)']==max_days),default=""))
+                          delta=max((r['공종'] for r in result_rows_sorted if r['작업일수(일)']==max_days), default=""))
                 cb.metric("총 순작업일수", f"{total_wd}일")
                 cc.metric("산출 공종", f"{sum(1 for r in result_rows if r['작업일수(일)']>0)}개")
 

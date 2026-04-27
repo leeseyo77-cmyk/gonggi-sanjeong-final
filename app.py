@@ -289,7 +289,6 @@ def apply_labor_rate(item):
         spec = str(item.get("spec") or "")
         qty  = float(item.get("qty") or 0)
 
-        # 기본값 초기화
         item.setdefault("manday", 0)
         item.setdefault("labor_rate", None)
         item.setdefault("labor_unit", "")
@@ -300,14 +299,12 @@ def apply_labor_rate(item):
         item.setdefault("work_key", "")
         item.setdefault("condition", "")
 
-        # 노무비 역산용 헬퍼
         def labor_fallback(unit_str="인/개소"):
             labor = float(item.get("labor") or 0)
             if labor > 0 and qty > 0:
-                item["manday"]    = round(labor / 200000, 1)
+                item["manday"]    = round(labor / 380000, 1)
                 item["soil_info"] = f"노무비역산({unit_str})"
 
-        # 1일 작업량 기반 작업일수
         try:
             wd = calc_work_days(name, spec, qty)
             if wd and isinstance(wd, dict):
@@ -319,7 +316,6 @@ def apply_labor_rate(item):
         except Exception:
             pass
 
-        # 터파기
         if any(kw in name for kw in ["터파기","굴착","줄파기"]) and "운반" not in name:
             try:
                 info = get_excavation_labor_detail(spec)
@@ -334,7 +330,6 @@ def apply_labor_rate(item):
                 labor_fallback("인/m3")
             return item
 
-        # 관 부설
         pipe_kws = ["관 부설","관부설","이중벽관","주철관","흄관","콘크리트관",
                     "GRP관","유리섬유복합관","파형강관","PE다중벽","고강성PVC","강관부설"]
         if any(kw in name for kw in pipe_kws):
@@ -355,33 +350,22 @@ def apply_labor_rate(item):
                 labor_fallback("인/본")
             return item
 
-        # 맨홀
         if any(kw in name for kw in ["맨홀"]):
             labor_fallback("인/개소")
             return item
-
-        # 되메우기
         if any(kw in name for kw in ["되메우기","모래기초","모래,관기초","모래부설"]):
             labor_fallback("인/m3")
             return item
-
-        # 포장복구
-        if any(kw in name for kw in ["아스팔트포장","아스콘포장","보조기층","콘크리트포장",
-                                      "포장복구","포장깨기","포장절단"]):
+        if any(kw in name for kw in ["아스팔트포장","아스콘포장","보조기층","콘크리트포장","포장복구","포장깨기","포장절단"]):
             labor_fallback("인/m2")
             return item
-
-        # 배수설비
         if any(kw in name for kw in ["배수설비","오수받이","우수받이","연결관"]):
             labor_fallback("인/개소")
             return item
 
-        # 기타 공종
         labor_fallback("인/일")
-
-    except Exception as e:
-        pass  # 오류나도 item 그대로 반환
-
+    except Exception:
+        pass
     return item
 
 SKIP_NAMES = [
@@ -397,40 +381,31 @@ def parse_by_keyword(file):
     target_sheet = None
     for p in priority:
         if p in wb.sheetnames:
-            target_sheet = p
-            break
+            target_sheet = p; break
     if not target_sheet:
         for sname in wb.sheetnames:
-            if any(sk in sname for sk in skip_sheets):
-                continue
-            if "내역" in sname:
-                target_sheet = sname
-                break
+            if any(sk in sname for sk in skip_sheets): continue
+            if "내역" in sname: target_sheet = sname; break
     if not target_sheet:
         for sname in wb.sheetnames:
             if not any(sk in sname for sk in skip_sheets):
-                target_sheet = sname
-                break
+                target_sheet = sname; break
     if not target_sheet:
         target_sheet = wb.sheetnames[0]
 
     ws = wb[target_sheet]
     all_rows = list(ws.iter_rows(values_only=True))
 
-    header_row_idx = None
-    name_col=1; qty_col=3; unit_col=4; amount_col=6; labor_col=8
+    header_row_idx=None; name_col=1; qty_col=3; unit_col=4; amount_col=6; labor_col=8
 
     for i, row in enumerate(all_rows[:10]):
         row_strs = [str(c).strip() if c else "" for c in row]
         for j, cell in enumerate(row_strs):
             if cell in ["명      칭","명칭","공종명","품명","작업명"]:
                 header_row_idx=i; name_col=j
-            if cell in ["수   량","수량","물량"] and header_row_idx==i:
-                qty_col=j
-            if cell in ["단위","규격단위"] and header_row_idx==i:
-                unit_col=j
-        if header_row_idx is not None:
-            break
+            if cell in ["수   량","수량","물량"] and header_row_idx==i: qty_col=j
+            if cell in ["단위","규격단위"] and header_row_idx==i: unit_col=j
+        if header_row_idx is not None: break
 
     if header_row_idx is not None and header_row_idx+1 < len(all_rows):
         sub = [str(c).strip() if c else "" for c in all_rows[header_row_idx+1]]
@@ -447,31 +422,23 @@ def parse_by_keyword(file):
 
     results = []
     for row in all_rows[data_start:]:
-        if not row or len(row)<=name_col:
-            continue
+        if not row or len(row)<=name_col: continue
         name = str(row[name_col]).strip() if row[name_col] else ""
-        if not name or name=="None":
-            continue
+        if not name or name=="None": continue
         code = str(row[0]).strip() if row[0] else ""
-        if re.match(r'^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]', code):
-            continue
-        if re.match(r'^\d+(\.\d+)*\.?\s*$', code):
-            continue
-        if re.match(r'^\s*\(\d+\)', code):
-            continue
-        if any(sk in name for sk in SKIP_NAMES):
-            continue
+        if re.match(r'^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]', code): continue
+        if re.match(r'^\d+(\.\d+)*\.?\s*$', code): continue
+        if re.match(r'^\s*\(\d+\)', code): continue
+        if any(sk in name for sk in SKIP_NAMES): continue
         unit = str(row[unit_col]).strip() if unit_col<len(row) and row[unit_col] else ""
-        if unit in ["식","1식","LS","ls","LOT","lot"]:
-            continue
+        if unit in ["식","1식","LS","ls","LOT","lot"]: continue
         try:    qty = float(row[qty_col]) if qty_col<len(row) and isinstance(row[qty_col],(int,float)) else None
         except: qty = None
         try:    amount = float(row[amount_col]) if amount_col<len(row) and isinstance(row[amount_col],(int,float)) else None
         except: amount = None
         try:    labor = float(row[labor_col]) if labor_col<len(row) and isinstance(row[labor_col],(int,float)) else None
         except: labor = None
-        if (labor is None or labor==0) and amount is not None and amount>0:
-            continue
+        if (labor is None or labor==0) and amount is not None and amount>0: continue
         spec  = str(row[2]).strip() if len(row)>2 and row[2] else ""
         group = map_group_detail(name)
         results.append({
@@ -484,10 +451,10 @@ def parse_by_keyword(file):
 
     wb.close()
 
-# ── 품셈 먼저 적용 (spec 합산 전) ────────────────────────
+    # 품셈 먼저 적용
     results = [apply_labor_rate(r) for r in results]
 
-# ── 같은 공종명 물량·작업일수 합산 ───────────────────────
+    # 같은 공종명 합산
     merged = {}
     for r in results:
         key = (r["group"], r["name"].split("(")[0].strip())
@@ -495,11 +462,11 @@ def parse_by_keyword(file):
             merged[key] = dict(r)
             merged[key]["name"] = r["name"].split("(")[0].strip()
         else:
-            merged[key]["qty"]       = (merged[key].get("qty")       or 0) + (r.get("qty")       or 0)
-            merged[key]["amount"]    = (merged[key].get("amount")    or 0) + (r.get("amount")    or 0)
-            merged[key]["labor"]     = (merged[key].get("labor")     or 0) + (r.get("labor")     or 0)
-            merged[key]["manday"]    = (merged[key].get("manday")    or 0) + (r.get("manday")    or 0)
-            merged[key]["work_days"] = (merged[key].get("work_days") or 0) + (r.get("work_days") or 0)
+            merged[key]["qty"]       = (merged[key].get("qty")       or 0)+(r.get("qty")       or 0)
+            merged[key]["amount"]    = (merged[key].get("amount")    or 0)+(r.get("amount")    or 0)
+            merged[key]["labor"]     = (merged[key].get("labor")     or 0)+(r.get("labor")     or 0)
+            merged[key]["manday"]    = (merged[key].get("manday")    or 0)+(r.get("manday")    or 0)
+            merged[key]["work_days"] = (merged[key].get("work_days") or 0)+(r.get("work_days") or 0)
 
     return list(merged.values()), col_info
 
@@ -510,9 +477,7 @@ st.sidebar.markdown("---")
 st.sidebar.caption("공종별 투입 조수는 엑셀 내역서 인식 탭에서 설정하세요.")
 
 if "workers" not in st.session_state:
-    st.session_state.workers = {
-        "준비공":4,"굴착공":6,"관부설공":4,"되메우기공":4,"포장복구공":4
-    }
+    st.session_state.workers = {"준비공":4,"굴착공":6,"관부설공":4,"되메우기공":4,"포장복구공":4}
 w = st.session_state.workers
 
 st.title("상하수도 관로공사 공기산정 시스템")
@@ -526,6 +491,7 @@ tab1,tab2,tab3,tab4 = st.tabs(["📋 공기산정","📂 엑셀 내역서 인식
 with tab1:
     st.subheader("공종별 물량 입력")
     pipe_dia = st.selectbox("관경 선택", ["200mm","300mm"], key="tab1_pipe")
+
     col1,col2 = st.columns(2)
     with col1:
         st.markdown("**준비공**")
@@ -555,7 +521,7 @@ with tab1:
     result_df=pd.DataFrame({
         "대공종":["준비공","굴착공","관부설공","되메우기공","포장복구공"],
         "투입인원(명)":[w["준비공"],w["굴착공"],w["관부설공"],w["되메우기공"],w["포장복구공"]],
-        "Man-day(인일)":[md_준비,md_굴착,md_관부설,md_되메우기,md_포장],
+        "Man-day(인일)":[round(md_준비,1),round(md_굴착,1),round(md_관부설,1),round(md_되메우기,1),round(md_포장,1)],
         "작업일수(일)":[d_준비,d_굴착,d_관부설,d_되메우기,d_포장],
         "CP":["🔴","🔴","🔴","🔴","🔴"],
     })
@@ -667,7 +633,6 @@ with tab2:
                                    "Man-day(인일)","토질/관경",
                                    "금액(억원)","노무비(억원)","주야간"]
 
-                # 작업일수 상위 10개 강조
                 top10 = set(range(min(10, len(show_df))))
                 def hl(row):
                     return ["background-color:#1a3a1a;color:#4CAF50"]*len(row) if row.name in top10 else [""]*len(row)
@@ -697,28 +662,32 @@ with tab2:
                 if manual:
                     matched=matched+manual
 
+            # ── 공종별 작업일수 산출 ──────────────────────────
             st.markdown("---")
-            st.subheader("공종별 작업일수 산출 (1일작업량 기준)")
-            st.caption("가이드라인 부록1,2 기준 | 1일작업량이 없으면 Man-day 기준으로 대체")
+            st.subheader("공종별 작업일수 산출")
+            st.caption("가이드라인 부록1,2 기준 | 작업일수 내림차순 정렬")
 
             if matched:
                 df_md = pd.DataFrame(matched)
 
-                wd_summary = {}
-                md_summary = {}
+                wd_summary={}; md_summary={}
                 for _, row in df_md.iterrows():
                     grp = row.get("group","기타")
-                    wd  = row.get("work_days",0) or 0
-                    md  = row.get("manday",0) or 0
-                    wd_summary[grp] = wd_summary.get(grp,0) + wd
-                    md_summary[grp] = md_summary.get(grp,0) + md
+                    wd_summary[grp] = wd_summary.get(grp,0)+(row.get("work_days",0) or 0)
+                    md_summary[grp] = md_summary.get(grp,0)+(row.get("manday",0) or 0)
+
+                # 물량 합산
+                grp_qty = df_md.groupby("group").agg(
+                    물량=("qty","sum"), 단위=("unit","first")
+                ).reset_index()
+                grp_qty_dict = {r["group"]:(r["물량"],r["단위"]) for _,r in grp_qty.iterrows()}
 
                 st.markdown("**공종별 투입 조수 설정**")
                 target_groups = ["굴착공","관부설공","되메우기","포장복구","맨홀공","배수설비","추진공"]
                 defaults_map  = {"굴착공":5,"관부설공":3,"되메우기":5,"포장복구":5,
                                  "맨홀공":3,"배수설비":3,"추진공":1}
                 crew_cols = st.columns(len(target_groups))
-                crew = {}
+                crew={}
                 for i,grp in enumerate(target_groups):
                     with crew_cols[i]:
                         crew[grp] = st.number_input(
@@ -732,26 +701,43 @@ with tab2:
                     md   = md_summary.get(grp,0)
                     wrk  = crew.get(grp,3)
                     days_from_md = math.ceil(md/wrk) if md>0 else 0
-                    final_days   = round(wd,1) if wd>0 else days_from_md
+                    final_days   = int(round(wd)) if wd>0 else days_from_md
+
+                    qty_val, unit_val = grp_qty_dict.get(grp,(0,""))
+                    grp_items = [r for r in matched if r.get("group")==grp]
+                    daily_repr = grp_items[0].get("daily_prod","") if grp_items else ""
+
                     result_rows.append({
-                        "공종":             grp,
-                        "Man-day(인일)":    round(md,1),
-                        "투입조수":         wrk,
-                        "작업일수_1일기준": round(wd,1),
-                        "작업일수_Manday":  days_from_md,
-                        "최종작업일수(일)": final_days,
+                        "공종":       grp,
+                        "물량":       f"{qty_val:,.0f}" if qty_val else "-",
+                        "단위":       unit_val,
+                        "1일작업량":  daily_repr if daily_repr else "-",
+                        "투입조수":   f"{wrk}조",
+                        "작업일수(일)": final_days,
                         "비고": "✅ 1일기준" if wd>0 else ("✅ Man-day" if md>0 else "⚠️ 없음"),
                     })
 
-                result_rows_sorted = sorted(result_rows, key=lambda x: -x["최종작업일수(일)"])
-                st.dataframe(pd.DataFrame(result_rows_sorted),hide_index=True,use_container_width=True)
+                result_rows_sorted = sorted(result_rows, key=lambda x: -x["작업일수(일)"])
+                max_days = max((r["작업일수(일)"] for r in result_rows_sorted), default=0)
 
-                total_wd = sum(r["최종작업일수(일)"] for r in result_rows)
-                total_md = sum(r["Man-day(인일)"] for r in result_rows)
+                def hl_result(row):
+                    if row["작업일수(일)"] == max_days and max_days > 0:
+                        return ["background-color:#3d0000;color:#ff6b6b"]*len(row)
+                    return [""]*len(row)
+
+                st.dataframe(
+                    pd.DataFrame(result_rows_sorted).style.apply(hl_result, axis=1),
+                    hide_index=True, use_container_width=True
+                )
+                st.caption("🔴 최장 작업일수 공종 = 주공정 (크리티컬패스)")
+
+                total_wd = sum(r["작업일수(일)"] for r in result_rows)
                 ca,cb,cc = st.columns(3)
-                ca.metric("총 Man-day",f"{total_md:.0f} 인일")
-                cb.metric("총 작업일수",f"{total_wd:.0f} 일")
-                cc.metric("산출 공종",f"{sum(1 for r in result_rows if r['최종작업일수(일)']>0)}개")
+                ca.metric("🔴 주공정 (최장)",
+                          f"{max_days}일",
+                          delta=max((r['공종'] for r in result_rows_sorted if r['작업일수(일)']==max_days),default=""))
+                cb.metric("총 순작업일수", f"{total_wd}일")
+                cc.metric("산출 공종", f"{sum(1 for r in result_rows if r['작업일수(일)']>0)}개")
 
                 st.markdown("---")
                 if st.button("공기산정 탭에 물량 적용", type="primary"):
@@ -762,6 +748,10 @@ with tab2:
                     st.session_state["_q_관부설"]   = float(gq.get("관부설공", 120.0))
                     st.session_state["_q_되메우기"] = float(gq.get("되메우기", 180.0))
                     st.session_state["_q_포장"]     = float(gq.get("포장복구", 60.0))
+                    st.session_state.workers["굴착공"]     = crew.get("굴착공",  5)
+                    st.session_state.workers["관부설공"]   = crew.get("관부설공",3)
+                    st.session_state.workers["되메우기공"] = crew.get("되메우기",5)
+                    st.session_state.workers["포장복구공"] = crew.get("포장복구",5)
                     st.success("적용 완료! 공기산정 탭으로 이동하세요.")
 
         except Exception as e:

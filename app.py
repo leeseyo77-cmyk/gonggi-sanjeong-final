@@ -8,6 +8,7 @@ from datetime import date, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from labor_rates_2025 import get_excavation_labor_detail, get_pipe_labor
+from daily_work_rates import calc_work_days
 
 st.set_page_config(page_title="상하수도 공기산정", layout="wide")
 
@@ -300,7 +301,22 @@ def apply_labor_rate(item):
     spec = item.get("spec","")
     qty  = item.get("qty") or 0
 
-    # 터파기
+    # 1일 작업량 기반 작업일수 계산 (부록1,2 기준)
+    wd = calc_work_days(name, spec, qty)
+    if wd:
+        item["work_days"]  = wd["work_days_ceil"]
+        item["daily_prod"] = f"{wd['daily']}{wd['unit']}/일"
+        item["crews"]      = wd["crews"]
+        item["work_key"]   = wd["key"]
+        item["condition"]  = wd["condition"]
+    else:
+        item["work_days"]  = None
+        item["daily_prod"] = ""
+        item["crews"]      = 0
+        item["work_key"]   = ""
+        item["condition"]  = ""
+
+    # 표준품셈 Man-day 계산 (기존 유지)
     if any(kw in name for kw in ["터파기","굴착","줄파기"]) and "운반" not in name:
         info = get_excavation_labor_detail(spec)
         rate = info.get("인/m3")
@@ -309,9 +325,7 @@ def apply_labor_rate(item):
             item["labor_rate"] = rate
             item["labor_unit"] = "인/m3"
             item["soil_info"]  = f"{info['토질']}{' '+'/'.join(info['보정조건']) if info['보정조건'] else ''}"
-        return item
 
-    # 관 부설
     pipe_kws = ["관 부설","관부설","이중벽관","주철관","흄관","콘크리트관",
                 "GRP관","유리섬유복합관","파형강관","PE다중벽","고강성PVC","강관부설"]
     if any(kw in name for kw in pipe_kws):
@@ -327,7 +341,6 @@ def apply_labor_rate(item):
                     item["soil_info"]  = f"D={dia}mm"
             except Exception:
                 pass
-        return item
 
     return item
 
@@ -607,11 +620,24 @@ with tab2:
                 sel = st.multiselect("공종그룹 필터",all_groups,default=all_groups,key="t2f")
                 fm = df_m[df_m["group"].isin(sel)]
 
-                show_df = fm[["group","name","spec","qty","unit",
-                              "Man-day","품셈단가","토질/관경",
-                              "금액(억원)","노무비(억원)","주야간"]].copy()
+df_m["작업일수"]  = df_m["work_days"].apply(lambda x: f"{x}일" if x else "")
+                df_m["1일작업량"] = df_m["daily_prod"]
+                df_m["조수"]      = df_m["crews"].apply(lambda x: f"{x}조" if x else "")
+                df_m["Man-day"]   = df_m["manday"].apply(lambda x: round(x,1) if x else "")
+                df_m["토질/관경"] = df_m["soil_info"]
+
+                # 작업일수 내림차순 정렬 (CP 순서대로)
+                df_m_sorted = df_m.copy()
+                df_m_sorted["_sort"] = df_m_sorted["work_days"].fillna(0)
+                df_m_sorted = df_m_sorted.sort_values("_sort", ascending=False).reset_index(drop=True)
+
+                show_df = df_m_sorted[["group","name","spec","qty","unit",
+                                       "작업일수","1일작업량","조수",
+                                       "Man-day","토질/관경",
+                                       "금액(억원)","노무비(억원)","주야간"]].copy()
                 show_df.columns = ["공종그룹","공종명","규격","수량","단위",
-                                   "Man-day(인일)","품셈단가","토질/관경",
+                                   "작업일수","1일작업량","조수",
+                                   "Man-day(인일)","토질/관경",
                                    "금액(억원)","노무비(억원)","주야간"]
 
                 top10 = set(fm.nlargest(10,"노무비(억원)").index)
@@ -679,11 +705,22 @@ with tab2:
                     wrk  = crew.get(grp,4)
                     days = math.ceil(md/wrk) if md>0 else 0
                     result_rows.append({
-                        "공종":     grp,
+for grp in target_groups:
+                    grp_items = [r for r in matched if r.get("group")==grp]
+                    md   = sum(r.get("manday",0) or 0 for r in grp_items)
+                    days_from_wd = sum(r.get("work_days",0) or 0 for r in grp_items)
+                    wrk  = crew.get(grp,4)
+                    days_from_md = math.ceil(md/wrk) if md>0 else 0
+                    # 작업일수: 1일작업량 기준 우선, 없으면 Man-day 기준
+                    final_days = days_from_wd if days_from_wd > 0 else days_from_md
+                    result_rows.append({
+                        "공종":          grp,
                         "Man-day(인일)": round(md,1),
                         "투입인원(명)":  wrk,
-                        "작업일수(일)":  days,
-                        "비고": "✅ 품셈 적용" if md>0 else "⚠️ 내역서 없음",
+                        "작업일수_품셈": days_from_md,
+                        "작업일수_1일기준": days_from_wd,
+                        "최종작업일수(일)": final_days,
+                        "비고": "✅ 1일기준" if days_from_wd>0 else ("✅ Man-day기준" if md>0 else "⚠️ 없음"),
                     })
 
                 st.dataframe(pd.DataFrame(result_rows),hide_index=True,use_container_width=True)

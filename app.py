@@ -508,22 +508,13 @@ st.sidebar.header("기본 설정")
 pipe_dia   = st.sidebar.selectbox("관경", ["200mm","300mm"])
 start_date = st.sidebar.date_input("착공 예정일", value=date.today())
 st.sidebar.markdown("---")
-st.sidebar.header("공종별 투입 인원 (명/일)")
+st.sidebar.caption("투입 인원은 각 탭에서 설정하세요.")
 
+w = {
+    "준비공":4,"굴착공":6,"관부설공":4,"되메우기공":4,"포장복구공":4
+}
 if "workers" not in st.session_state:
-    st.session_state.workers = {"준비공":4,"굴착공":6,"관부설공":4,"되메우기공":4,"포장복구공":4}
-
-for 공종 in ["준비공","굴착공","관부설공","되메우기공","포장복구공"]:
-    ca,cb,cc = st.sidebar.columns([1,2,1])
-    with ca:
-        if st.button("－",key=f"m_{공종}"):
-            st.session_state.workers[공종]=max(1,st.session_state.workers[공종]-1)
-    with cb:
-        st.markdown(f"<div style='text-align:center;padding-top:6px'><b>{공종}</b><br>{st.session_state.workers[공종]}명</div>",unsafe_allow_html=True)
-    with cc:
-        if st.button("＋",key=f"p_{공종}"):
-            st.session_state.workers[공종]=min(50,st.session_state.workers[공종]+1)
-
+    st.session_state.workers = w
 w = st.session_state.workers
 
 st.title("상하수도 관로공사 공기산정 시스템")

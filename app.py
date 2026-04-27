@@ -436,8 +436,7 @@ def parse_by_keyword(file):
     wb.close()
 
 # ── 품셈 먼저 적용 (spec 합산 전) ────────────────────────
-    for r in results:
-        r = apply_labor_rate(r)
+    results = [apply_labor_rate(r) for r in results]
 
     # ── 같은 공종명 물량·작업일수 합산 ───────────────────────
     merged = {}

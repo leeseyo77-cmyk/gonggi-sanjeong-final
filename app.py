@@ -446,24 +446,23 @@ with tab2:
 
             if unmatched:
                 st.markdown("---")
-                # expander를 사용하여 미인식 항목을 기본적으로 접어둡니다.
                 with st.expander(f"⚠️ 미인식 항목 수동 분류하기 ({len(unmatched)}건) - 클릭하여 펼치기"):
                     st.caption("인식되지 않은 항목을 수동으로 공종 그룹에 매핑할 수 있습니다.")
                     공종목록 = ["(선택안함)"]+list(KEYWORD_MAP_DETAIL.keys())+["기타"]
                     manual=[]
-                for idx,item in enumerate(unmatched[:30]):
-                    ca,cb,cc,cd,ce=st.columns([3,1,1,1,2])
-                    ca.markdown(f"<span style='color:#FFA500'>{item['name'][:30]}</span>",unsafe_allow_html=True)
-                    cb.write(item.get("spec","")[:10])
-                    cc.write(str(item["qty"]) if item["qty"] else "-")
-                    cd.write(item["unit"])
-                    sel2=ce.selectbox("공종",공종목록,key=f"mn_{idx}")
-                    if sel2!="(선택안함)":
-                        manual.append({**item,"group":sel2})
-                if len(unmatched)>30:
-                    st.caption(f"... 외 {len(unmatched)-30}건 더 있음")
-                if manual:
-                    matched=matched+manual
+                    for idx,item in enumerate(unmatched[:30]):
+                        ca,cb,cc,cd,ce=st.columns([3,1,1,1,2])
+                        ca.markdown(f"<span style='color:#FFA500'>{item['name'][:30]}</span>",unsafe_allow_html=True)
+                        cb.write(item.get("spec","")[:10])
+                        cc.write(str(item["qty"]) if item["qty"] else "-")
+                        cd.write(item["unit"])
+                        sel2=ce.selectbox("공종",공종목록,key=f"mn_{idx}")
+                        if sel2!="(선택안함)":
+                            manual.append({**item,"group":sel2})
+                    if len(unmatched)>30:
+                        st.caption(f"... 외 {len(unmatched)-30}건 더 있음")
+                    if manual:
+                        matched=matched+manual
 
             # ── 조수 설정 + 작업일수 계산 ────────────────────
             st.markdown("---")

@@ -789,15 +789,17 @@ with tab2:
                     st.info("👆 화면 상단의 **📋 공기산정** 탭을 클릭하세요.")
                     st.markdown("""
 <div style='text-align:center;margin-top:10px'>
-<a href='#상하수도-관로공사-공기산정-시스템' style='
+<button onclick="window.parent.document.querySelector('.main').scrollTo({top:0, behavior:'smooth'});"
+style='
     background-color:#378ADD;
     color:white;
     padding:12px 30px;
+    border:none;
     border-radius:8px;
-    text-decoration:none;
     font-size:16px;
     font-weight:bold;
-'>⬆️ 상단으로 이동 (탭 선택)</a>
+    cursor:pointer;
+'>⬆️ 상단으로 이동 (탭 선택)</button>
 </div>
 """, unsafe_allow_html=True)
 

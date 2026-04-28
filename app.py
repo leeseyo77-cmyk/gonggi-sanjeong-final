@@ -785,7 +785,21 @@ with tab2:
                     st.session_state.workers["관부설공"]   = crew.get("관부설공",3)
                     st.session_state.workers["되메우기공"] = crew.get("되메우기",5)
                     st.session_state.workers["포장복구공"] = crew.get("포장복구",5)
-                    st.success("적용 완료! 공기산정 탭으로 이동하세요.")
+                    st.success("✅ 적용 완료!")
+                    st.info("👆 화면 상단의 **📋 공기산정** 탭을 클릭하세요.")
+                    st.markdown("""
+<div style='text-align:center;margin-top:10px'>
+<a href='#상하수도-관로공사-공기산정-시스템' style='
+    background-color:#378ADD;
+    color:white;
+    padding:12px 30px;
+    border-radius:8px;
+    text-decoration:none;
+    font-size:16px;
+    font-weight:bold;
+'>⬆️ 상단으로 이동 (탭 선택)</a>
+</div>
+""", unsafe_allow_html=True)
 
         except Exception as e:
             st.error(f"파싱 오류: {e}")

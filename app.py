@@ -1062,8 +1062,8 @@ with tab4:
         use_cold=st.checkbox("동절기 (0도 이하)",value=True)
         use_heat=st.checkbox("혹서기 (35도 이상)",value=False)
         use_wind=st.checkbox("강풍 (15m/s 이상)",value=False)
-        prep_days    = st.number_input("준비기간 (일)",min_value=0, key="sync_prep")
-        cleanup_days = st.number_input("정리기간 (일)",min_value=0, key="sync_clean")
+        prep_days    = st.number_input("준비기간 (일)",value=60,min_value=0)
+        cleanup_days = st.number_input("정리기간 (일)",value=30,min_value=0)
 
     st.markdown("---")
     corr_rows=[]; total_applied=0.0

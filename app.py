@@ -666,9 +666,51 @@ with tab1:
                 prep_end = get_work_end_date(start_date, total_wd)
                 st.info(f"**착공: {start_date} → 순공사 완료 예정: {prep_end}** (순작업일수 {total_wd}일 기준)")
 
-        # 조수 변경 안내
         st.markdown("---")
-        st.info("💡 조수를 바꾸려면 **📂 엑셀 내역서 인식** 탭에서 조수를 수정하세요. 자동으로 반영됩니다.")
+        st.subheader("총 공사기간 산출")
+        st.caption("공사기간 = 준비기간 + 비작업일수 + 순작업일수 + 정리기간")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            t1_proj     = st.selectbox("공사 종류", list(PREP_PERIOD.keys()), index=0, key="t1_proj")
+            t1_prep     = st.number_input("준비기간 (일)", value=PREP_PERIOD.get(t1_proj,60), min_value=0, key="t1_prep")
+            t1_cleanup  = st.number_input("정리기간 (일)", value=20, min_value=0, key="t1_cleanup")
+        with col_b:
+            t1_city     = st.selectbox("공사 지역", CITY_LIST,
+                                       index=CITY_LIST.index("서울") if "서울" in CITY_LIST else 0,
+                                       key="t1_city")
+            t1_months   = st.number_input("작업 개월수", min_value=1, max_value=60, value=6, key="t1_months")
+            t1_year     = st.selectbox("착공 연도", list(range(2025,2034)), index=0, key="t1_year")
+            t1_month    = st.selectbox("착공 월", list(range(1,13)), index=0,
+                                       format_func=lambda x:f"{x}월", key="t1_month")
+
+        # 비작업일수 자동 계산
+        t1_nonwork = 0.0
+        for i in range(int(t1_months)):
+            cm = ((t1_month-1+i)%12)+1
+            cy = t1_year+(t1_month-1+i)//12
+            A  = (WEATHER_DB["rain5"].get(t1_city,[0]*12)[cm-1] +
+                  WEATHER_DB["cold"].get(t1_city,[0]*12)[cm-1])
+            B  = HOLIDAYS_DB.get(cy, HOLIDAYS_DB[2025]).get(cm, 5)
+            C  = round(A*B/30, 0)
+            t1_nonwork += max(8.0, round(A+B-C, 1))
+
+        t1_total = t1_prep + int(t1_nonwork) + total_wd + t1_cleanup
+
+        ca,cb,cc,cd,ce = st.columns(5)
+        ca.metric("준비기간",    f"{t1_prep}일")
+        cb.metric("비작업일수",  f"{int(t1_nonwork)}일",
+                  help="강우+동절기 기준, 월 최소 8일 적용")
+        cc.metric("순 작업일수", f"{total_wd}일")
+        cd.metric("정리기간",    f"{t1_cleanup}일")
+        ce.metric("총 공사기간", f"{t1_total}일",
+                  delta=f"약 {round(t1_total/30,1)}개월")
+
+        st.info(f"**{t1_prep}일(준비) + {int(t1_nonwork)}일(비작업) + {total_wd}일(작업) + {t1_cleanup}일(정리) = {t1_total}일 (약 {round(t1_total/30,1)}개월)**")
+        st.caption(f"비작업일수: {t1_city} 기준, 강우(5mm이상)+동절기(0도이하) 적용 | 상세 설정은 🌧 비작업일수 계산기 탭 참고")
+
+        st.markdown("---")
+        st.info("💡 조수를 바꾸려면 **📂 엑셀 내역서 인식** 탭에서 조수를 수정하세요.")
 
     else:
         # ── 내역서 없을 때 수동 입력 ─────────────────────────

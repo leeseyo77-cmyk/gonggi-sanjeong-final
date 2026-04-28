@@ -637,56 +637,238 @@ with tab1:
         cc.metric("착공 예정일",      str(start_date))
 
         st.markdown("---")
-        st.subheader("간트차트")
+        st.subheader("예정공정표")
+        st.caption("하수관로 시공 특성 반영 | 굴착·관부설·되메우기 동시진행 | S-curve 포함")
 
-        # 간트차트용 시작/종료일 계산 (당일 병행시공 기준)
-        gantt_data = []
-        # ... (색상 매핑 코드는 그대로 유지) ...
-        for r in rows_ordered:
-            days = r["작업일수(일)"]
-            if days <= 0:
-                continue
-            # 모든 관로 공종은 착공일과 동시에 진행되는 것으로 간주
-            end = get_work_end_date(start_date, days)
-            gantt_data.append({
-                "Task":    r["공종"],
-                "Start":   str(start_date),
-                "Finish":  str(end),
-                "투입조수": r["투입조수"],
-                "작업일수": f"{days}일",
-                "1일작업량": r["1일작업량"],
+        # ── 하수관로 공정 그룹화 ─────────────────────────────
+        # Group 1: 연동공종 (굴착+관부설+되메우기 = 같은 기간)
+        # Group 2: 병행공종 (맨홀 = 관부설과 동시)
+        # Group 3: 후속공종 (배수설비 = 관부설 완료 후)
+        # Group 4: 마지막공종 (포장복구 = 전체 완료 후)
+        # 추진공: 독립 (관부설 전 선행)
+
+        result_dict = {r["공종"]: r for r in result_rows}
+
+        def get_days(grp):
+            return result_dict.get(grp, {}).get("작업일수(일)", 0)
+
+        # 주공정 기간 = 굴착·관부설·되메우기 중 최대값 (동시진행이므로)
+        main_days = max(
+            get_days("굴착공"),
+            get_days("관부설공"),
+            get_days("되메우기"),
+        )
+
+        # 추진공: 관부설 전 선행
+        추진_days = get_days("추진공")
+        추진_start = start_date
+        추진_end   = get_work_end_date(추진_start, 추진_days) if 추진_days > 0 else start_date
+
+        # 주공정 시작일 (추진공 완료 후)
+        main_start = 추진_end + timedelta(days=1) if 추진_days > 0 else start_date
+        main_end   = get_work_end_date(main_start, main_days) if main_days > 0 else main_start
+
+        # 맨홀: 주공정과 동시
+        맨홀_start = main_start
+        맨홀_end   = get_work_end_date(맨홀_start, get_days("맨홀공")) if get_days("맨홀공") > 0 else main_end
+
+        # 배수설비: 주공정 완료 후
+        배수_days  = get_days("배수설비")
+        배수_start = main_end + timedelta(days=1) if 배수_days > 0 else main_end
+        배수_end   = get_work_end_date(배수_start, 배수_days) if 배수_days > 0 else 배수_start
+
+        # 포장복구: 배수설비 완료 후
+        포장_days  = get_days("포장복구")
+        포장_start = 배수_end + timedelta(days=1) if 포장_days > 0 else 배수_end
+        포장_end   = get_work_end_date(포장_start, 포장_days) if 포장_days > 0 else 포장_start
+
+        준공_date = max(main_end, 맨홀_end, 배수_end, 포장_end)
+
+        # ── 공정표 데이터 구성 ───────────────────────────────
+        schedule = []
+
+        if 추진_days > 0:
+            schedule.append({
+                "공종":"추진공", "그룹":"선행공종",
+                "Start":str(추진_start), "Finish":str(추진_end),
+                "작업일수":추진_days,
+                "투입조수":result_dict.get("추진공",{}).get("투입조수","-"),
+                "1일작업량":result_dict.get("추진공",{}).get("1일작업량","-"),
+                "비고":"선행"
             })
 
-        if gantt_data:
-            gantt_df = pd.DataFrame(gantt_data)
-            colors_map = {
-                "굴착공":"#378ADD","관부설공":"#D85A30","되메우기":"#EF9F27",
-                "맨홀공":"#E67E22","포장복구":"#27AE60","배수설비":"#9B59B6",
-                "추진공":"#E74C3C","기타":"#888888"
-            }
-            fig = px.timeline(
-                gantt_df, x_start="Start", x_end="Finish", y="Task", color="Task",
-                color_discrete_map=colors_map,
-                hover_data={"투입조수":True,"작업일수":True,"1일작업량":True,"Task":False}
-            )
-            fig.update_yaxes(autorange="reversed")
-            fig.update_layout(height=400, showlegend=False,
-                              margin=dict(l=10,r=10,t=30,b=10))
-            fig.update_traces(marker_line_color="red", marker_line_width=2)
-            st.plotly_chart(fig, use_container_width=True)
+        # 연동공종 (굴착·관부설·되메우기)
+        for grp, label in [("굴착공","연동"),("관부설공","연동"),("되메우기","연동")]:
+            d = get_days(grp)
+            if d > 0:
+                end = get_work_end_date(main_start, d)
+                schedule.append({
+                    "공종":grp, "그룹":"연동공종(동시진행)",
+                    "Start":str(main_start), "Finish":str(end),
+                    "작업일수":d,
+                    "투입조수":result_dict.get(grp,{}).get("투입조수","-"),
+                    "1일작업량":result_dict.get(grp,{}).get("1일작업량","-"),
+                    "비고":"매일 동시진행"
+                })
 
-            # 일정 상세
-            gantt_df["착수일"] = gantt_df["Start"]
-            gantt_df["완료일"] = gantt_df["Finish"]
+        if get_days("맨홀공") > 0:
+            schedule.append({
+                "공종":"맨홀공", "그룹":"병행공종",
+                "Start":str(맨홀_start), "Finish":str(맨홀_end),
+                "작업일수":get_days("맨홀공"),
+                "투입조수":result_dict.get("맨홀공",{}).get("투입조수","-"),
+                "1일작업량":result_dict.get("맨홀공",{}).get("1일작업량","-"),
+                "비고":"관부설과 병행"
+            })
+
+        if 배수_days > 0:
+            schedule.append({
+                "공종":"배수설비", "그룹":"후속공종",
+                "Start":str(배수_start), "Finish":str(배수_end),
+                "작업일수":배수_days,
+                "투입조수":result_dict.get("배수설비",{}).get("투입조수","-"),
+                "1일작업량":result_dict.get("배수설비",{}).get("1일작업량","-"),
+                "비고":"관부설 완료 후"
+            })
+
+        if 포장_days > 0:
+            schedule.append({
+                "공종":"포장복구", "그룹":"마무리공종",
+                "Start":str(포장_start), "Finish":str(포장_end),
+                "작업일수":포장_days,
+                "투입조수":result_dict.get("포장복구",{}).get("투입조수","-"),
+                "1일작업량":result_dict.get("포장복구",{}).get("1일작업량","-"),
+                "비고":"전체 완료 후 일괄"
+            })
+
+        if schedule:
+            sch_df = pd.DataFrame(schedule)
+
+            # ── 예정공정표 바차트 ──────────────────────────────
+            color_map = {
+                "선행공종":      "#E74C3C",
+                "연동공종(동시진행)":"#378ADD",
+                "병행공종":      "#E67E22",
+                "후속공종":      "#9B59B6",
+                "마무리공종":    "#27AE60",
+            }
+            fig_sch = px.timeline(
+                sch_df,
+                x_start="Start", x_end="Finish", y="공종",
+                color="그룹",
+                color_discrete_map=color_map,
+                hover_data={"작업일수":True,"투입조수":True,"1일작업량":True,"비고":True,"그룹":False},
+                title=""
+            )
+            fig_sch.update_yaxes(autorange="reversed", title="")
+            fig_sch.update_xaxes(title="", dtick="M1",
+                                 tickformat="%y.%m", tickangle=0)
+            fig_sch.update_layout(
+                height=350,
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                margin=dict(l=10,r=10,t=40,b=10),
+            )
+            fig_sch.update_traces(marker_line_color="white", marker_line_width=1)
+
+            # 준공선 표시
+            fig_sch.add_vline(
+                x=str(준공_date), line_dash="dash",
+                line_color="red", line_width=2,
+                annotation_text=f"준공 {준공_date}",
+                annotation_position="top right"
+            )
+            st.plotly_chart(fig_sch, use_container_width=True)
+
+            # ── 공정표 상세 테이블 ────────────────────────────
+            tbl = sch_df[["공종","작업일수","Start","Finish","투입조수","1일작업량","비고"]].copy()
+            tbl.columns = ["공종","작업일수(일)","착수일","완료일","투입조수","1일작업량","비고"]
+
+            def hl_sch(row):
+                if "연동" in str(row.get("비고","")):
+                    return ["background-color:#1a2a3a;color:#378ADD"]*len(row)
+                if "일괄" in str(row.get("비고","")):
+                    return ["background-color:#1a3a1a;color:#27AE60"]*len(row)
+                return [""]*len(row)
+
             st.dataframe(
-                gantt_df[["Task","착수일","완료일","작업일수","투입조수","1일작업량"]].rename(
-                    columns={"Task":"공종"}),
+                tbl.style.apply(hl_sch, axis=1),
                 hide_index=True, use_container_width=True
             )
 
-            if gantt_data:
-                prep_end = get_work_end_date(start_date, total_wd)
-                st.info(f"**착공: {start_date} → 순공사 완료 예정: {prep_end}** (순작업일수 {total_wd}일 기준)")
+            # ── S-curve ───────────────────────────────────────
+            st.markdown("#### 공정률 S-Curve")
+            st.caption("연동공종 기준 월별 누적 공정률")
+
+            # 전체 공사 기간을 월별로 나눠서 공정률 계산
+            total_days_all = (준공_date - start_date).days + 1
+            if total_days_all > 0:
+                # 월별 날짜 리스트 생성
+                months = []
+                cur = start_date.replace(day=1)
+                while cur <= 준공_date:
+                    months.append(cur)
+                    if cur.month == 12:
+                        cur = cur.replace(year=cur.year+1, month=1)
+                    else:
+                        cur = cur.replace(month=cur.month+1)
+                months.append(준공_date)
+
+                # 각 공종의 일별 공정 기여도 계산
+                scurve_data = []
+                for month_end in months:
+                    completed_days = 0
+                    total_work     = 0
+                    for row in schedule:
+                        s = date.fromisoformat(row["Start"])
+                        e = date.fromisoformat(row["Finish"])
+                        d = row["작업일수"]
+                        total_work += d
+                        # 해당 월까지 완료된 작업일수
+                        if month_end >= e:
+                            completed_days += d
+                        elif month_end >= s:
+                            ratio = (month_end - s).days / max((e-s).days,1)
+                            completed_days += d * ratio
+
+                    progress = round(completed_days / total_work * 100, 1) if total_work > 0 else 0
+                    scurve_data.append({
+                        "날짜":    str(month_end),
+                        "누적공정률(%)": min(progress, 100.0)
+                    })
+
+                sc_df = pd.DataFrame(scurve_data)
+                fig_sc = go.Figure()
+                fig_sc.add_trace(go.Scatter(
+                    x=sc_df["날짜"], y=sc_df["누적공정률(%)"],
+                    mode="lines+markers",
+                    name="계획공정률",
+                    line=dict(color="#378ADD", width=3),
+                    marker=dict(size=6),
+                    fill="tozeroy",
+                    fillcolor="rgba(55,138,221,0.15)"
+                ))
+                fig_sc.add_hline(y=100, line_dash="dash",
+                                 line_color="red", line_width=1,
+                                 annotation_text="100%")
+                fig_sc.update_layout(
+                    height=280,
+                    xaxis_title="",
+                    yaxis_title="누적 공정률 (%)",
+                    yaxis=dict(range=[0,110], ticksuffix="%"),
+                    xaxis=dict(tickformat="%y.%m", tickangle=0),
+                    margin=dict(l=10,r=10,t=20,b=10),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_sc, use_container_width=True)
+
+            # 공사기간 요약
+            total_cal_days = (준공_date - start_date).days + 1
+            st.info(f"""
+**착공: {start_date} → 준공: {준공_date}**
+순작업일수 {total_wd}일 | 달력일수 {total_cal_days}일 (약 {round(total_cal_days/30,1)}개월)
+연동공종(굴착·관부설·되메우기) {main_days}일 → 포장복구 후 준공
+            """)
 
         st.markdown("---")
         st.subheader("총 공사기간 산출")

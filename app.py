@@ -651,6 +651,11 @@ with tab1:
 
         if gantt_data:
             gantt_df = pd.DataFrame(gantt_data)
+            colors_map = {
+                "굴착공":"#378ADD","관부설공":"#D85A30","되메우기":"#EF9F27",
+                "맨홀공":"#E67E22","포장복구":"#27AE60","배수설비":"#9B59B6",
+                "추진공":"#E74C3C","기타":"#888888"
+            }
             fig = px.timeline(
                 gantt_df, x_start="Start", x_end="Finish", y="Task", color="Task",
                 color_discrete_map=colors_map,

@@ -32,16 +32,16 @@ if not check_password():
     st.stop()
 
 # ══════════════════════════════════════════════════════════════
-# [추가] 탭 간 상태 공유(동기화)를 위한 초기화
+# [추가] 탭 간 상태 동기화용 초기값 세팅
 # ══════════════════════════════════════════════════════════════
 if "sync_proj" not in st.session_state:
     st.session_state.update({
-        "sync_proj": "상하수도공사", 
+        "sync_proj": "하수도공사", 
         "sync_city": "서울",
         "sync_prep": 60, 
-        "sync_clean": 20,
-        "sync_year": date.today().year, 
-        "sync_month": date.today().month,
+        "sync_clean": 30,
+        "sync_year": 2025, 
+        "sync_month": 1,
         "sync_months": 6
     })
 
@@ -692,6 +692,7 @@ with tab1:
         t1_months = st.session_state.sync_months
         t1_year   = st.session_state.sync_year
         t1_month  = st.session_state.sync_month
+        st.info(f"📍 **산출 기준 (🌧비작업일수 탭과 연동됨):** {t1_proj} | {t1_city} | {t1_year}년 {t1_month}월 착공 | 작업 {t1_months}개월")
 
         # 비작업일수 자동 계산
         t1_nonwork = 0.0

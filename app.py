@@ -771,9 +771,10 @@ with tab1:
             )
             fig_sch.update_traces(marker_line_color="white", marker_line_width=1)
 
-            # 준공선 표시
+            # 준공선 표시 (timeline은 timestamp ms 단위로 변환 필요)
+            준공_ts = pd.Timestamp(str(준공_date)).value / 1e6
             fig_sch.add_vline(
-                x=str(준공_date), line_dash="dash",
+                x=준공_ts, line_dash="dash",
                 line_color="red", line_width=2,
                 annotation_text=f"준공 {준공_date}",
                 annotation_position="top right"

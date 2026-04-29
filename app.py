@@ -395,10 +395,52 @@ def parse_by_keyword(file):
 # ══════════════════════════════════════════════════════════════
 # 사이드바
 # ══════════════════════════════════════════════════════════════
-st.sidebar.header("기본 설정")
-start_date = st.sidebar.date_input("착공 예정일", value=date.today())
+st.sidebar.header("⚙️ 기본 설정")
+
+# 공사 유형 선택 배너
+st.sidebar.markdown("""
+<div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            padding: 20px; 
+            border-radius: 10px; 
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);'>
+    <h3 style='color: white; margin: 0 0 10px 0; font-size: 18px;'>🚧 공사 유형 선택</h3>
+    <p style='color: #e0e7ff; margin: 0; font-size: 14px;'>현재: <strong style='color: #fbbf24;'>하수관로</strong></p>
+    <p style='color: #9ca3af; margin: 5px 0 0 0; font-size: 11px;'>※ 향후 하수처리시설, 복합공사 추가 예정</p>
+</div>
+""", unsafe_allow_html=True)
+
+# 공사 유형 선택 (향후 확장용)
+project_type = st.sidebar.selectbox(
+    "공사 유형",
+    ["하수관로", "하수처리시설 (준비중)", "하수관로+하수처리시설 (준비중)"],
+    disabled=False,
+    help="현재는 하수관로만 지원합니다. 다른 유형은 개발 중입니다."
+)
+
+# 안내 메시지 (착공일은 TAB 4에서 설정)
+st.sidebar.info("📅 **공사 시작일**은\n\nTAB 4(비작업일수)에서 설정합니다.")
+
 st.sidebar.markdown("---")
-st.sidebar.caption("내역서를 업로드하면 공기산정 탭에 자동 반영됩니다.")
+
+# 사용 가이드
+st.sidebar.markdown("### 💡 사용 가이드")
+st.sidebar.markdown("""
+1️⃣ **TAB 1**: 공기산정 간편입력
+
+2️⃣ **TAB 2**: 엑셀 내역서 인식 & 부록1
+
+3️⃣ **TAB 3**: CP 분석
+
+4️⃣ **TAB 4**: 비작업일수 & 총 공기
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("💼 상하수도 관로공사 전문 공기산정 시스템 v2.0")
+
+# start_date는 TAB 4에서 설정하므로 여기서는 제거
+# (TAB 4의 착공일 입력을 활용)
+start_date = date.today()  # 기본값만 설정
 
 st.title("상하수도 관로공사 공기산정 시스템")
 st.markdown("---")

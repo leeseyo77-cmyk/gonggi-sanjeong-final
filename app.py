@@ -1329,7 +1329,7 @@ with tab5:
             total_work_days = st.session_state.get("total_work_days", 0)
             st.metric("총 작업일수", f"{total_work_days}일")
         else:
-            st.warning("⚠️ TAB 1에서 내역서를 업로드하세요")
+            st.warning("⚠️ TAB 2에서 내역서를 업로드하세요")
     
     # TAB 4 데이터 확인
     has_tab4_data = "final_duration" in st.session_state

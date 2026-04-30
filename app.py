@@ -445,11 +445,11 @@ start_date = date.today()  # 기본값만 설정
 st.title("상하수도 관로공사 공기산정 시스템")
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1,tab2,tab3,tab4,tab5 = st.tabs([
     "📋 공기산정",
-    "📊 엑셀 내역서 인식", 
+    "📂 엑셀 내역서 인식",
     "🔍 주요공종 CP 분석",
-    "📅 비작업일수 계산기",
+    "🌧 비작업일수 계산기",
     "📄 공기산정 보고서"
 ])
 
@@ -530,7 +530,7 @@ with tab2:
                 # 조수 설정
                 st.markdown("**공종별 투입 조수 설정**")
                 target_groups = ["굴착공","관부설공","되메우기","포장복구","맨홀공","배수설비","추진공"]
-                defaults_map  = {"굴착공":3,"관부설공":3,"되메우기":3,"포장복구":3,
+                defaults_map  = {"굴착공":5,"관부설공":3,"되메우기":5,"포장복구":5,
                                  "맨홀공":3,"배수설비":3,"추진공":1}
                 crew_cols = st.columns(len(target_groups))
                 crew={}
@@ -639,7 +639,9 @@ padding:16px;text-align:center;margin-top:8px'>
                 st.error(f"미리보기 실패: {e2}")
     else:
         st.info("도급(사급) 설계내역서 엑셀을 업로드해주세요.")
-if 'sch_df' in locals() and len(sch_df) > 0:
+
+# session_state에 저장 (TAB 5 보고서용)
+if 'sch_df' in locals() and 'sch_df' in dir() and len(sch_df) > 0:
     st.session_state["has_excel_data"] = True
     st.session_state["total_work_days"] = int(sch_df["작업일수"].sum())
     st.session_state["excel_schedule_df"] = sch_df
@@ -984,10 +986,10 @@ with tab1:
             q_포장     = st.number_input("포장 면적 (m2)",      min_value=0.0, value=60.0,  step=5.0)
 
         c1,c2,c3,c4 = st.columns(4)
-        w_굴착    = c1.number_input("굴착공(조)", min_value=1, value=3)
+        w_굴착    = c1.number_input("굴착공(조)", min_value=1, value=5)
         w_관부설  = c2.number_input("관부설공(조)", min_value=1, value=3)
-        w_되메우기= c3.number_input("되메우기(조)", min_value=1, value=3)
-        w_포장    = c4.number_input("포장복구(조)", min_value=1, value=3)
+        w_되메우기= c3.number_input("되메우기(조)", min_value=1, value=5)
+        w_포장    = c4.number_input("포장복구(조)", min_value=1, value=5)
 
         # 1일작업량 기준 계산
         d_굴착    = math.ceil(q_터파기  / (420 * w_굴착))    if q_터파기  else 0
@@ -1296,9 +1298,8 @@ with tab4:
     fn.update_layout(height=300,margin=dict(l=10,r=10,t=20,b=10))
     st.plotly_chart(fn,use_container_width=True)
     st.caption(f"지역: {city} | 2014~2023년 10개년 평균 | 출처: 국토교통부 가이드라인(2025.01.)")
-
 # ══════════════════════════════════════════════════════════════
-# TAB 5: 공기산정 보고서 생성 (전체 코드)
+# TAB 5: 공기산정 보고서 생성
 # ══════════════════════════════════════════════════════════════
 with tab5:
     st.subheader("📄 공기산정 근거 보고서")
@@ -1336,18 +1337,20 @@ with tab5:
             st.warning("⚠️ TAB 2에서 내역서를 업로드하세요")
     
     # TAB 4 데이터 확인
-    has_tab4_data = st.session_state.get("final_duration") is not None
+    work_result = st.session_state.get("work_result")
+    has_work_data = work_result is not None and len(work_result.get("rows", [])) > 0
+    
     with col2:
-        if has_tab4_data:
+        if has_work_data:
             st.success("✅ 비작업일수 계산")
-            total_duration = st.session_state.get("final_duration", 0)
-            st.metric("총 공사기간", f"{total_duration}일")
+            total_work  = sum(r["작업일수(일)"] for r in work_result["rows"])
+            st.metric("총 작업일수", f"{total_work}일")
         else:
             st.warning("⚠️ TAB 4에서 비작업일수를 계산하세요")
     
     # 투입조수 정보
     with col3:
-        if has_excel_data:
+        if has_excel_data or has_work_data:
             st.success("✅ 투입조수 설정")
             st.caption("공종별 투입조수 반영됨")
         else:
@@ -1357,10 +1360,8 @@ with tab5:
     
     # 보고서 생성 버튼
     if st.button("📥 공기산정 보고서 생성", type="primary", use_container_width=True):
-        if not has_excel_data:
-            st.error("❌ TAB 2에서 내역서를 먼저 업로드하세요!")
-        elif not has_tab4_data:
-            st.error("❌ TAB 4에서 비작업일수를 먼저 계산하세요!")
+        if not has_excel_data and not has_work_data:
+            st.error("❌ TAB 2에서 내역서를 먼저 업로드하거나 TAB 4에서 작업일수를 계산하세요!")
         else:
             with st.spinner("📊 보고서를 생성하는 중입니다..."):
                 try:
@@ -1372,13 +1373,10 @@ with tab5:
                     
                     wb = Workbook()
                     
-                    # ═══════════════════════════════════════════
                     # 시트 1: 표지
-                    # ═══════════════════════════════════════════
                     ws_cover = wb.active
                     ws_cover.title = "표지"
                     
-                    # 표지 내용
                     ws_cover.merge_cells('A5:J5')
                     ws_cover['A5'] = project_name
                     ws_cover['A5'].font = Font(size=20, bold=True)
@@ -1397,9 +1395,7 @@ with tab5:
                     ws_cover.row_dimensions[5].height = 40
                     ws_cover.row_dimensions[7].height = 30
                     
-                    # ═══════════════════════════════════════════
                     # 시트 2: 공사기간 산정
-                    # ═══════════════════════════════════════════
                     ws_summary = wb.create_sheet("2. 공사기간 산정")
                     
                     row = 1
@@ -1407,12 +1403,17 @@ with tab5:
                     ws_summary[f'A{row}'].font = Font(size=14, bold=True)
                     row += 2
                     
+                    # 작업일수 계산
+                    if has_work_data:
+                        total_work_days_final = sum(r["작업일수(일)"] for r in work_result["rows"])
+                    else:
+                        total_work_days_final = st.session_state.get("total_work_days", 0)
+                    
                     # 2.1 준비기간
                     ws_summary[f'B{row}'] = "2.1 준비기간"
                     ws_summary[f'B{row}'].font = Font(size=12, bold=True)
                     row += 1
-                    
-                    prep_days = st.session_state.get("prep_period", 60)
+                    prep_days = st.session_state.get("sync_prep", 60)
                     ws_summary[f'C{row}'] = "준비기간"
                     ws_summary[f'H{row}'] = prep_days
                     ws_summary[f'I{row}'] = "일"
@@ -1422,57 +1423,38 @@ with tab5:
                     ws_summary[f'B{row}'] = "2.2 순작업일수"
                     ws_summary[f'B{row}'].font = Font(size=12, bold=True)
                     row += 1
-                    
-                    work_days = st.session_state.get("total_work_days", 0)
                     ws_summary[f'C{row}'] = "공종별 작업일수 합계"
-                    ws_summary[f'H{row}'] = work_days
+                    ws_summary[f'H{row}'] = total_work_days_final
                     ws_summary[f'I{row}'] = "일"
                     row += 2
                     
-                    # 2.3 비작업일수
-                    ws_summary[f'B{row}'] = "2.3 비작업일수"
+                    # 2.3 정리기간
+                    ws_summary[f'B{row}'] = "2.3 정리기간"
                     ws_summary[f'B{row}'].font = Font(size=12, bold=True)
                     row += 1
-                    
-                    non_work_days = st.session_state.get("total_non_work_days", 0)
-                    ws_summary[f'C{row}'] = "기후 및 법정공휴일 비작업일수"
-                    ws_summary[f'H{row}'] = non_work_days
-                    ws_summary[f'I{row}'] = "일"
-                    row += 2
-                    
-                    # 2.4 정리기간
-                    ws_summary[f'B{row}'] = "2.4 정리기간"
-                    ws_summary[f'B{row}'].font = Font(size=12, bold=True)
-                    row += 1
-                    
-                    clean_days = st.session_state.get("clean_period", 30)
+                    clean_days = st.session_state.get("sync_clean", 30)
                     ws_summary[f'C{row}'] = "정리기간"
                     ws_summary[f'H{row}'] = clean_days
                     ws_summary[f'I{row}'] = "일"
                     row += 2
                     
-                    # 2.5 총 공사기간
-                    ws_summary[f'B{row}'] = "2.5 총 공사기간"
+                    # 2.4 총 공사기간
+                    ws_summary[f'B{row}'] = "2.4 총 공사기간"
                     ws_summary[f'B{row}'].font = Font(size=12, bold=True, color="FF0000")
                     row += 1
-                    
-                    total_days = st.session_state.get("final_duration", 0)
+                    total_days = prep_days + total_work_days_final + clean_days
                     ws_summary[f'C{row}'] = "총 공사기간"
                     ws_summary[f'H{row}'] = total_days
                     ws_summary[f'I{row}'] = "일"
                     ws_summary[f'H{row}'].font = Font(bold=True, size=12, color="FF0000")
                     
-                    # ═══════════════════════════════════════════
                     # 시트 3: 부록1. 작업일수 산정
-                    # ═══════════════════════════════════════════
                     ws_detail = wb.create_sheet("부록1. 작업일수 산정")
                     
-                    # 헤더
                     ws_detail['A1'] = "◈ 부록1. 작업일수 산정"
                     ws_detail['A1'].font = Font(size=14, bold=True)
                     ws_detail.merge_cells('A1:K1')
                     
-                    # 테이블 헤더
                     headers = ["공종", "세부공종", "규격", "수량", "단위", "1일작업량", "투입조수", "작업일수", "비고"]
                     for col_idx, header in enumerate(headers, 1):
                         cell = ws_detail.cell(row=3, column=col_idx)
@@ -1488,19 +1470,30 @@ with tab5:
                         )
                     
                     # 데이터 삽입
+                    row_idx = 4
                     if has_excel_data and "excel_schedule_df" in st.session_state:
                         sch_df = st.session_state["excel_schedule_df"]
-                        row_idx = 4
-                        
                         for _, row_data in sch_df.iterrows():
                             ws_detail.cell(row=row_idx, column=1).value = row_data.get("공종", "")
-                            ws_detail.cell(row=row_idx, column=2).value = row_data.get("세부공종", "")
-                            ws_detail.cell(row=row_idx, column=3).value = row_data.get("규격", "")
-                            ws_detail.cell(row=row_idx, column=4).value = row_data.get("물량", 0)
-                            ws_detail.cell(row=row_idx, column=5).value = row_data.get("단위", "")
+                            ws_detail.cell(row=row_idx, column=2).value = row_data.get("세부공종", row_data.get("name", ""))
+                            ws_detail.cell(row=row_idx, column=3).value = row_data.get("규격", row_data.get("spec", ""))
+                            ws_detail.cell(row=row_idx, column=4).value = row_data.get("물량", row_data.get("qty", 0))
+                            ws_detail.cell(row=row_idx, column=5).value = row_data.get("단위", row_data.get("unit", ""))
                             ws_detail.cell(row=row_idx, column=6).value = row_data.get("1일작업량", "")
                             ws_detail.cell(row=row_idx, column=7).value = row_data.get("투입조수", "")
                             ws_detail.cell(row=row_idx, column=8).value = row_data.get("작업일수", 0)
+                            ws_detail.cell(row=row_idx, column=9).value = ""
+                            row_idx += 1
+                    elif has_work_data:
+                        for item in work_result["rows"]:
+                            ws_detail.cell(row=row_idx, column=1).value = item.get("공종", "")
+                            ws_detail.cell(row=row_idx, column=2).value = item.get("세부공종", "")
+                            ws_detail.cell(row=row_idx, column=3).value = item.get("규격", "")
+                            ws_detail.cell(row=row_idx, column=4).value = item.get("물량", 0)
+                            ws_detail.cell(row=row_idx, column=5).value = item.get("단위", "")
+                            ws_detail.cell(row=row_idx, column=6).value = item.get("1일작업량", "")
+                            ws_detail.cell(row=row_idx, column=7).value = item.get("투입조수(조)", "")
+                            ws_detail.cell(row=row_idx, column=8).value = item.get("작업일수(일)", 0)
                             ws_detail.cell(row=row_idx, column=9).value = ""
                             row_idx += 1
                     
@@ -1515,14 +1508,11 @@ with tab5:
                     ws_detail.column_dimensions['H'].width = 12
                     ws_detail.column_dimensions['I'].width = 15
                     
-                    # ═══════════════════════════════════════════
                     # 파일 저장 및 다운로드
-                    # ═══════════════════════════════════════════
                     buffer = io.BytesIO()
                     wb.save(buffer)
                     buffer.seek(0)
                     
-                    # 파일명 생성
                     filename = f"공사기간_산정_검토서_{datetime.now().strftime('%Y%m%d')}.xlsx"
                     
                     st.success("✅ 보고서가 생성되었습니다!")
@@ -1537,15 +1527,16 @@ with tab5:
                     
                 except Exception as e:
                     st.error(f"❌ 보고서 생성 중 오류가 발생했습니다: {str(e)}")
-                    st.exception(e)
+                    import traceback
+                    st.code(traceback.format_exc())
     
     # 안내사항
     st.markdown("---")
     st.info("""
     ### 📌 사용 방법
     1. **TAB 2**에서 내역서를 업로드하고 공종별 작업일수를 계산하세요
-    2. 투입조수를 조정하세요
-    3. **TAB 4**에서 비작업일수를 계산하세요
+    2. 투입조수를 조정하세요 (선택사항)
+    3. **TAB 4**에서 비작업일수를 계산하세요 (선택사항)
     4. 프로젝트 정보를 입력하고 **보고서 생성** 버튼을 클릭하세요
     
     ### 📄 보고서 구성

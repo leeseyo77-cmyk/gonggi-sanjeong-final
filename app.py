@@ -641,10 +641,11 @@ padding:16px;text-align:center;margin-top:8px'>
         st.info("도급(사급) 설계내역서 엑셀을 업로드해주세요.")
 
 # session_state에 저장 (TAB 5 보고서용)
-if 'sch_df' in locals() and 'sch_df' in dir() and len(sch_df) > 0:
+work_result = st.session_state.get("work_result")
+if work_result and "rows" in work_result and len(work_result["rows"]) > 0:
     st.session_state["has_excel_data"] = True
-    st.session_state["total_work_days"] = int(sch_df["작업일수"].sum())
-    st.session_state["excel_schedule_df"] = sch_df
+    total_days = sum(r.get("작업일수(일)", 0) for r in work_result["rows"])
+    st.session_state["total_work_days"] = int(total_days)
 
 # ══════════════════════════════════════════════════════════════
 # TAB 1: 공기산정 (TAB2 결과 사용)

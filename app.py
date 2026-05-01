@@ -1564,33 +1564,47 @@ with tab5:
                             bottom=Side(style='thin')
                         )
                     
-                    # 데이터 삽입
-                    row_idx = 4
-                    if has_excel_data and "excel_schedule_df" in st.session_state:
-                        sch_df = st.session_state["excel_schedule_df"]
-                        for _, row_data in sch_df.iterrows():
-                            ws_detail.cell(row=row_idx, column=1).value = row_data.get("공종", "")
-                            ws_detail.cell(row=row_idx, column=2).value = row_data.get("세부공종", row_data.get("name", ""))
-                            ws_detail.cell(row=row_idx, column=3).value = row_data.get("규격", row_data.get("spec", ""))
-                            ws_detail.cell(row=row_idx, column=4).value = row_data.get("물량", row_data.get("qty", 0))
-                            ws_detail.cell(row=row_idx, column=5).value = row_data.get("단위", row_data.get("unit", ""))
-                            ws_detail.cell(row=row_idx, column=6).value = row_data.get("1일작업량", "")
-                            ws_detail.cell(row=row_idx, column=7).value = row_data.get("투입조수", "")
-                            ws_detail.cell(row=row_idx, column=8).value = row_data.get("작업일수", 0)
-                            ws_detail.cell(row=row_idx, column=9).value = ""
-                            row_idx += 1
-                    elif has_work_data:
-                        for item in work_result["rows"]:
-                            ws_detail.cell(row=row_idx, column=1).value = item.get("공종", "")
-                            ws_detail.cell(row=row_idx, column=2).value = item.get("세부공종", "")
-                            ws_detail.cell(row=row_idx, column=3).value = item.get("규격", "")
-                            ws_detail.cell(row=row_idx, column=4).value = item.get("물량", 0)
-                            ws_detail.cell(row=row_idx, column=5).value = item.get("단위", "")
-                            ws_detail.cell(row=row_idx, column=6).value = item.get("1일작업량", "")
-                            ws_detail.cell(row=row_idx, column=7).value = item.get("투입조수(조)", "")
-                            ws_detail.cell(row=row_idx, column=8).value = item.get("작업일수(일)", 0)
-                            ws_detail.cell(row=row_idx, column=9).value = ""
-                            row_idx += 1
+                    # 데이터 삽입 (규격별 상세)
+row_idx = 4
+if "detail_rows" in st.session_state and st.session_state["detail_rows"]:
+    # TAB 2에서 생성한 규격별 상세 데이터 사용
+    detail_data = st.session_state["detail_rows"]
+    
+    for item in detail_data:
+        # 공종 헤더인 경우
+        if item.get("공종") and not item.get("세부공종"):
+            cell = ws_detail.cell(row=row_idx, column=1)
+            cell.value = item["공종"]
+            cell.font = Font(bold=True, size=11)
+            cell.fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
+            ws_detail.merge_cells(f'A{row_idx}:I{row_idx}')
+        else:
+            # 세부 항목
+            ws_detail.cell(row=row_idx, column=1).value = ""
+            ws_detail.cell(row=row_idx, column=2).value = item.get("세부공종", "")
+            ws_detail.cell(row=row_idx, column=3).value = item.get("규격", "")
+            ws_detail.cell(row=row_idx, column=4).value = item.get("수량", "")
+            ws_detail.cell(row=row_idx, column=5).value = item.get("단위", "")
+            ws_detail.cell(row=row_idx, column=6).value = item.get("1일작업량", "")
+            ws_detail.cell(row=row_idx, column=7).value = item.get("투입조수", "")
+            ws_detail.cell(row=row_idx, column=8).value = item.get("작업일수", 0)
+            ws_detail.cell(row=row_idx, column=9).value = item.get("출처", "")
+        
+        row_idx += 1
+        
+elif has_work_data:
+    # work_result 사용 (기존 방식)
+    for item in work_result["rows"]:
+        ws_detail.cell(row=row_idx, column=1).value = item.get("공종", "")
+        ws_detail.cell(row=row_idx, column=2).value = item.get("세부공종", "")
+        ws_detail.cell(row=row_idx, column=3).value = item.get("규격", "")
+        ws_detail.cell(row=row_idx, column=4).value = item.get("물량", 0)
+        ws_detail.cell(row=row_idx, column=5).value = item.get("단위", "")
+        ws_detail.cell(row=row_idx, column=6).value = item.get("1일작업량", "")
+        ws_detail.cell(row=row_idx, column=7).value = item.get("투입조수(조)", "")
+        ws_detail.cell(row=row_idx, column=8).value = item.get("작업일수(일)", 0)
+        ws_detail.cell(row=row_idx, column=9).value = ""
+        row_idx += 1
                     
                     # 열 너비 조정
                     ws_detail.column_dimensions['A'].width = 15

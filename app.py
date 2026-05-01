@@ -491,13 +491,20 @@ with tab2:
                 st.subheader("📂 내역서 기반 공종 분류")
                 
                 import re
+                import openpyxl
+                
+                # 원본 엑셀에서 계층 구조 파싱
                 hierarchy = []
                 current_category = None
                 
-                for row in all_rows:
+                wb = openpyxl.load_workbook(uploaded, data_only=True)
+                ws = wb['설계내역서'] if '설계내역서' in wb.sheetnames else wb.active
+                
+                for row in ws.iter_rows(min_row=1, values_only=True):
                     gong_jong = str(row[0]).strip() if row[0] else ""
                     name = str(row[1]).strip() if len(row) > 1 and row[1] else ""
                     
+                    # 1.1.1, 1.1.2 형태 인식
                     if re.match(r'^\d+\.\d+\.\d+$', gong_jong):
                         if current_category and current_category.get('items'):
                             hierarchy.append(current_category)
@@ -509,12 +516,14 @@ with tab2:
                         }
                         continue
                     
+                    # 세부 항목 추가
                     if current_category and not gong_jong and name:
                         for item in matched:
                             if item['name'] == name:
                                 current_category['items'].append(item)
                                 break
                 
+                # 마지막 카테고리 추가
                 if current_category and current_category.get('items'):
                     hierarchy.append(current_category)
                 

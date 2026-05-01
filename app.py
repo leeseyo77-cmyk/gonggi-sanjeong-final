@@ -473,20 +473,19 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs([
 with tab2:
     st.subheader("📂 엑셀 내역서 자동 인식 (내역서 기반)")
     st.caption("도급 설계내역서 업로드 → 계층 구조 자동 파싱 → 공종별 투입조수 조정")
- 
+
     uploaded = st.file_uploader("설계내역서 엑셀 (.xlsx)", type=["xlsx","xls"])
- 
+
     if uploaded:
         try:
             with st.spinner("파싱 중..."):
                 all_rows, col_info = parse_by_keyword(uploaded)
- 
+
             matched   = [r for r in all_rows if r["group"]!="기타" and r["qty"] is not None]
             unmatched = [r for r in all_rows if r["group"]=="기타"  and r["qty"] is not None]
- 
+
             st.success(f"시트 **{col_info['시트명']}** | 인식 **{len(matched)}건** | 미인식 **{len(unmatched)}건**")
- 
-            # ── 내역서 계층 구조 파싱 ────────────────────
+
             if matched:
                 st.markdown("---")
                 st.subheader("📂 내역서 기반 공종 분류")
@@ -495,12 +494,10 @@ with tab2:
                 hierarchy = []
                 current_category = None
                 
-                # 계층 구조 파싱
                 for row in all_rows:
                     gong_jong = str(row[0]).strip() if row[0] else ""
                     name = str(row[1]).strip() if len(row) > 1 and row[1] else ""
                     
-                    # 1.1.1, 1.1.2 형태 인식
                     if re.match(r'^\d+\.\d+\.\d+$', gong_jong):
                         if current_category and current_category.get('items'):
                             hierarchy.append(current_category)
@@ -512,21 +509,18 @@ with tab2:
                         }
                         continue
                     
-                    # 세부 항목 추가
                     if current_category and not gong_jong and name:
                         for item in matched:
                             if item['name'] == name:
                                 current_category['items'].append(item)
                                 break
                 
-                # 마지막 카테고리 추가
                 if current_category and current_category.get('items'):
                     hierarchy.append(current_category)
                 
                 if hierarchy:
                     st.info(f"✅ {len(hierarchy)}개 공종 자동 인식: " + ", ".join([f"{h['level']} {h['name']}" for h in hierarchy]))
                     
-                    # ── 투입조수 설정 ────────────────────
                     st.markdown("### 🔧 공종별 투입조수 설정")
                     
                     if 'crew_by_category' not in st.session_state:
@@ -550,7 +544,6 @@ with tab2:
                             crew_settings[cat_name] = crew_val
                             st.session_state['crew_by_category'][cat_name] = crew_val
                     
-                    # ── 작업일수 계산 ────────────────────
                     st.markdown("---")
                     st.markdown("### 📊 공종별 작업일수 계산 결과")
                     
@@ -583,12 +576,10 @@ with tab2:
                             "계산방식": f"{len(cat_items)}개 항목 합계"
                         })
                     
-                    # 결과 테이블
                     result_rows_sorted = sorted(result_rows, key=lambda x: x["작업일수(일)"], reverse=True)
                     max_days = max((r["작업일수(일)"] for r in result_rows_sorted), default=0)
                     total_wd = max_days
                     
-                    # 합계행
                     total_row = {
                         "공종": "[ 합  계 ]",
                         "물량": "-",
@@ -620,7 +611,6 @@ with tab2:
                     cb.metric("총 순작업일수", f"{total_wd}일")
                     cc.metric("산출 공종", f"{len(result_rows)}개")
                     
-                    # ── 폴더 탐색기 스타일 상세 보기 ────────────────────
                     st.markdown("---")
                     st.markdown("### 📂 공종별 세부 항목 (폴더 탐색기 스타일)")
                     
@@ -683,7 +673,6 @@ with tab2:
                                 with col_c:
                                     st.metric("👷 투입조수", f"{cat_crew}조")
                     
-                    # session_state에 저장
                     st.session_state["work_result"] = {
                         "rows": result_rows,
                         "hierarchy": hierarchy,

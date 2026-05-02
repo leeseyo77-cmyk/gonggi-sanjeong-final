@@ -164,41 +164,29 @@ def calc_days_priority(name, spec, qty, crews=3):
         # GUIDELINE_APPENDIX_FULL 우선 사용 (확장판)
         guideline_data = GUIDELINE_APPENDIX_FULL if GUIDELINE_APPENDIX_FULL else GUIDELINE_APPENDIX
         
-        # 내역서 항목에서 괄호 안 키워드 추출 (예: "아스팔트포장(표층)" → "표층")
-        name_in_parens = ""
-        if "(" in name and ")" in name:
-            name_in_parens = re.search(r'\(([^)]+)\)', name)
-            if name_in_parens:
-                name_in_parens = name_in_parens.group(1).strip()
+        # 띄어쓰기 제거한 버전도 준비 (매칭 향상)
+        full_name_no_space = full_name.replace(" ", "")
+        name_no_space = name.replace(" ", "")
         
         for key, val in guideline_data.items():
-            # 키워드 추출 (괄호 앞부분)
-            key_base = key.split("(")[0].strip()
-            
-            # 가이드라인 키워드도 괄호 안 추출
-            key_in_parens = ""
-            if "(" in key and ")" in key:
-                key_parens_match = re.search(r'\(([^)]+)\)', key)
-                if key_parens_match:
-                    key_in_parens = key_parens_match.group(1).strip()
+            matched = False
+            key_no_space = key.replace(" ", "")
             
             # 매칭 조건 (우선순위)
-            matched = False
+            # 1. 정확한 전체 매칭 (띄어쓰기 무시)
+            if key_no_space == full_name_no_space or key_no_space == name_no_space:
+                matched = True
             
-            # 1. 괄호 앞 부분 + 괄호 안 키워드 모두 일치
-            if key_base and name_in_parens and key_in_parens:
-                if key_base in name and (name_in_parens in key_in_parens or key_in_parens in name_in_parens):
-                    matched = True
+            # 2. 가이드라인 키가 항목명에 포함 (띄어쓰기 무시)
+            elif key_no_space in full_name_no_space or key_no_space in name_no_space:
+                matched = True
             
-            # 2. 괄호 앞 부분만 일치하고 괄호 안 키워드도 포함
-            if not matched and key_base in name and name_in_parens:
-                # 가이드라인 전체 키에 내역서 괄호 안 키워드 포함 여부
-                if name_in_parens in key or any(kw in name_in_parens for kw in ["표층", "기층", "중간층", "택코팅", "프라임코팅", "보조기층", "동상방지층"]):
-                    if name_in_parens in key:
-                        matched = True
+            # 3. 항목명이 가이드라인 키에 포함 (띄어쓰기 무시)
+            elif name_no_space in key_no_space:
+                matched = True
             
-            # 3. 전체 문자열 매칭 (기존 로직)
-            if not matched and (key in full_name or key in name or key_base in name or key_base in full_name):
+            # 4. 원본 문자열 매칭 (띄어쓰기 있는 버전)
+            elif key == full_name or key == name or key in full_name or key in name:
                 matched = True
             
             if matched:

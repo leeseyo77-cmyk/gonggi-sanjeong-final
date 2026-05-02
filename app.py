@@ -106,14 +106,14 @@ def extract_diameter(spec_str):
 def calc_days_priority(name, spec, qty, crews=3):
     """
     우선순위:
-    1. 가이드라인 부록 1일 작업량
+    1. 가이드라인 부록
     2. 표준품셈 Man-day
     3. 단가산출근거 Q값
     """
     if not qty or qty <= 0:
         return 0, "-", "-"
 
-    # 1순위: 가이드라인 부록
+    # 1순위: 가이드라인
     try:
         for key, val in GUIDELINE_APPENDIX.items():
             if key in name or key in spec:
@@ -128,7 +128,6 @@ def calc_days_priority(name, spec, qty, crews=3):
                         label = f"{base_daily}{unit}×{crews}조"
                     return days, label, "가이드라인"
         
-        # 관부설 직경별
         if any(kw in name for kw in ["관 부설","관부설","고강성PVC","PE다중벽","이중벽관"]):
             dia = extract_diameter(spec)
             if dia:
@@ -447,13 +446,12 @@ with tab2:
                 if hierarchy:
                     st.info(f"✅ {len(hierarchy)}개 주공종 인식")
                     
-                    # 투입조수 설정 (주공종만, 중복 제거)
+                    # 투입조수 설정
                     st.markdown("### 🔧 주공종 투입조수 설정")
                     
                     if 'crew_by_main' not in st.session_state:
                         st.session_state['crew_by_main'] = {}
                     
-                    # 같은 이름 중복 제거
                     unique_main_cats = {}
                     for cat in hierarchy:
                         cat_name = cat['name']
@@ -487,12 +485,10 @@ with tab2:
                         cat_level = cat['level']
                         cat_crew = crew_settings[cat_name]
                         
-                        # 모든 항목 수집 (직접 항목 + 하위 카테고리 항목)
                         all_cat_items = list(cat.get('items', []))
                         for sub in cat.get('sub_categories', []):
                             all_cat_items.extend(sub.get('items', []))
                         
-                        # 총 작업일수 계산
                         cat_total_days = sum(
                             calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), cat_crew)[0]
                             for item in all_cat_items
@@ -500,44 +496,105 @@ with tab2:
                         
                         if all_cat_items:
                             result_rows.append({
+                                "level": cat_level,
                                 "공종": f"{cat_level} {cat_name}",
                                 "물량": f"{len(all_cat_items)}개 항목",
                                 "투입조수": f"{cat_crew}조",
                                 "작업일수(일)": int(cat_total_days),
+                                "세부항목": all_cat_items,
+                                "하위카테고리": cat.get('sub_categories', []),
+                                "crew": cat_crew,
                             })
                     
-                    # 결과 테이블
-                    result_rows_sorted = sorted(result_rows, key=lambda x: x["작업일수(일)"], reverse=True)
+                    # 1.1.1 → 1.1.2 순서로 정렬
+                    def sort_key(row):
+                        level = row['level']
+                        parts = level.split('.')
+                        return tuple(int(p) for p in parts)
+                    
+                    result_rows_sorted = sorted(result_rows, key=sort_key)
                     max_days = max((r["작업일수(일)"] for r in result_rows_sorted), default=0)
                     
-                    total_row = {
-                        "공종": "[ 합  계 ]",
-                        "물량": "-",
-                        "투입조수": "-",
-                        "작업일수(일)": max_days,
-                    }
-                    display_rows = result_rows_sorted + [total_row]
-                    
-                    def hl_result(row):
-                        if row["공종"] == "[ 합  계 ]":
-                            return ["background-color:#1a1a3a;color:#7F77DD;font-weight:bold"] * len(row)
-                        if row["작업일수(일)"] == max_days and max_days > 0:
-                            return ["background-color:#3d0000;color:#ff6b6b"] * len(row)
-                        return [""] * len(row)
-                    
-                    st.dataframe(
-                        pd.DataFrame(display_rows).style.apply(hl_result, axis=1),
-                        hide_index=True,
-                        use_container_width=True
-                    )
+                    # 테이블 표시
+                    for idx, row in enumerate(result_rows_sorted):
+                        is_max = (row["작업일수(일)"] == max_days and max_days > 0)
+                        
+                        with st.expander(
+                            f"{'🔴' if is_max else '▶'} **{row['공종']}** - {row['작업일수(일)']}일 ({row['투입조수']})",
+                            expanded=False
+                        ):
+                            # 하위 카테고리별 표시
+                            if row['하위카테고리']:
+                                for sub in row['하위카테고리']:
+                                    sub_name = sub['name']
+                                    sub_items = sub['items']
+                                    sub_days = sum(
+                                        calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'])[0]
+                                        for item in sub_items
+                                    )
+                                    
+                                    st.markdown(f"#### {sub['level']} {sub_name} ({sub_days}일)")
+                                    
+                                    detail_items = []
+                                    for item in sub_items:
+                                        d, label, method = calc_days_priority(
+                                            item['name'],
+                                            item.get('spec', ''),
+                                            item.get('qty', 0),
+                                            row['crew']
+                                        )
+                                        detail_items.append({
+                                            "세부공종": item['name'],
+                                            "규격": item.get('spec', ''),
+                                            "수량": f"{item.get('qty', 0):,.1f}",
+                                            "단위": item.get('unit', ''),
+                                            "1일작업량": label,
+                                            "작업일수": int(d),
+                                            "출처": method
+                                        })
+                                    
+                                    if detail_items:
+                                        st.dataframe(
+                                            pd.DataFrame(detail_items),
+                                            hide_index=True,
+                                            use_container_width=True
+                                        )
+                            
+                            # 직접 항목도 있으면 표시
+                            direct_items = [item for item in row['세부항목'] if item not in sum([sub['items'] for sub in row['하위카테고리']], [])]
+                            if direct_items:
+                                detail_items = []
+                                for item in direct_items:
+                                    d, label, method = calc_days_priority(
+                                        item['name'],
+                                        item.get('spec', ''),
+                                        item.get('qty', 0),
+                                        row['crew']
+                                    )
+                                    detail_items.append({
+                                        "세부공종": item['name'],
+                                        "규격": item.get('spec', ''),
+                                        "수량": f"{item.get('qty', 0):,.1f}",
+                                        "단위": item.get('unit', ''),
+                                        "1일작업량": label,
+                                        "작업일수": int(d),
+                                        "출처": method
+                                    })
+                                
+                                if detail_items:
+                                    st.dataframe(
+                                        pd.DataFrame(detail_items),
+                                        hide_index=True,
+                                        use_container_width=True
+                                    )
                     
                     ca, cb = st.columns(2)
                     ca.metric("🔴 주공정 (최장)", f"{max_days}일")
-                    cb.metric("총 공종", f"{len(result_rows)}개")
+                    cb.metric("총 공종", f"{len(result_rows_sorted)}개")
                     
                     # session_state 저장
                     st.session_state["work_result"] = {
-                        "rows": result_rows,
+                        "rows": result_rows_sorted,
                         "hierarchy": hierarchy,
                         "crew_settings": crew_settings,
                     }
@@ -569,10 +626,18 @@ with tab3:
     work_result = st.session_state.get("work_result")
     if work_result:
         result_rows = work_result["rows"]
-        df_cp = pd.DataFrame(result_rows)
+        
+        display_data = []
+        for r in result_rows:
+            display_data.append({
+                "공종": r["공종"],
+                "물량": r["물량"],
+                "투입조수": r["투입조수"],
+                "작업일수(일)": r["작업일수(일)"]
+            })
+        
+        df_cp = pd.DataFrame(display_data)
         df_cp = df_cp[df_cp["작업일수(일)"] > 0].copy()
-        df_cp = df_cp.sort_values("작업일수(일)", ascending=False).reset_index(drop=True)
-        df_cp.index += 1
         max_days = df_cp["작업일수(일)"].max() if len(df_cp) > 0 else 0
 
         def hl_cp(row):
@@ -580,7 +645,7 @@ with tab3:
                 return ["background-color:#3d0000;color:#ff6b6b"] * len(row)
             return [""] * len(row)
 
-        st.dataframe(df_cp.style.apply(hl_cp, axis=1), hide_index=False, use_container_width=True)
+        st.dataframe(df_cp.style.apply(hl_cp, axis=1), hide_index=True, use_container_width=True)
         
         fig_bar = px.bar(df_cp, x="작업일수(일)", y="공종", orientation="h", text="작업일수(일)",
                          color="작업일수(일)", color_continuous_scale=["#27AE60","#F39C12","#E74C3C"])

@@ -34,18 +34,28 @@ PIPE_EXCLUDE = ["절단","이형관","하차비","단관","마감캡","추진관
 MACHINE_BASED = ["터파기","굴착","되메우기","모래기초","모래부설","모래,관기초"]
 
 # ══════════════════════════════════════════════════════════════
-# 가이드라인 부록 데이터
+# 가이드라인 부록 데이터 (대폭 확장)
 # ══════════════════════════════════════════════════════════════
 GUIDELINE_APPENDIX = {
+    # 포장공
     "아스팔트포장 절단": {"daily": 1000, "unit": "m"},
     "아스팔트포장깨기 (B.H0.4㎥)": {"daily": 515, "unit": "㎡"},
     "아스팔트포장깨기 (B.H0.7㎥)": {"daily": 1047, "unit": "㎡"},
+    "콘크리트포장 절단": {"daily": 500, "unit": "m"},
+    "콘크리트포장 깨기": {"daily": 300, "unit": "㎡"},
+    
+    # 터파기
     "터파기(토사:육상) B/H 0.4㎥": {"daily": 260, "unit": "㎥"},
     "터파기(토사:육상) B/H 0.7㎥": {"daily": 530, "unit": "㎥"},
     "터파기(암:육상) B/H 0.4㎥": {"daily": 130, "unit": "㎥"},
     "터파기(암:육상) B/H 0.7㎥": {"daily": 265, "unit": "㎥"},
+    
+    # 되메우기
     "되메우기(진동롤러) 2.5ton": {"daily": 600, "unit": "㎥"},
     "되메우기(진동롤러) 4.0ton": {"daily": 950, "unit": "㎥"},
+    "되메우기(진동콤팩터)": {"daily": 400, "unit": "㎥"},
+    
+    # 관부설
     "관부설(D200)": {"daily": 5, "unit": "본/일"},
     "관부설(D300)": {"daily": 4, "unit": "본/일"},
     "관부설(D450)": {"daily": 3, "unit": "본/일"},
@@ -53,10 +63,22 @@ GUIDELINE_APPENDIX = {
     "관부설(D800)": {"daily": 2, "unit": "본/일"},
     "관부설(D1000)": {"daily": 1.5, "unit": "본/일"},
     "관부설(D1200)": {"daily": 1.2, "unit": "본/일"},
+    
+    # 맨홀공
     "원형맨홀 Φ1200": {"daily": 2.5, "unit": "개소/일"},
     "원형맨홀 Φ1500": {"daily": 2.5, "unit": "개소/일"},
     "각형맨홀 1800×2400": {"daily": 1.5, "unit": "개소/일"},
     "우수받이": {"daily": 5, "unit": "개소/일"},
+    "조립식 PC맨홀": {"daily": 3, "unit": "개소/일"},
+    "GRP맨홀": {"daily": 2, "unit": "개소/일"},
+    
+    # 가시설공
+    "조립식 간이 흙막이": {"daily": 50, "unit": "㎡/일"},
+    "H-PILE 항타": {"daily": 8, "unit": "본/일"},
+    
+    # 기타
+    "보조기층": {"daily": 500, "unit": "㎡/일"},
+    "모래기초": {"daily": 400, "unit": "㎥/일"},
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -115,8 +137,15 @@ def calc_days_priority(name, spec, qty, crews=3):
 
     # 1순위: 가이드라인
     try:
+        # 정확한 매칭 시도
+        full_name = f"{name} {spec}".strip()
+        
         for key, val in GUIDELINE_APPENDIX.items():
-            if key in name or key in spec:
+            # 키워드 추출 (괄호 앞부분)
+            key_base = key.split("(")[0].strip()
+            
+            # 정확 매칭 또는 키워드 포함 체크
+            if key in full_name or key in name or key_base in name or key_base in full_name:
                 base_daily = val.get("daily", 0)
                 unit = val.get("unit", "")
                 if base_daily > 0:
@@ -128,7 +157,8 @@ def calc_days_priority(name, spec, qty, crews=3):
                         label = f"{base_daily}{unit}×{crews}조"
                     return days, label, "가이드라인"
         
-        if any(kw in name for kw in ["관 부설","관부설","고강성PVC","PE다중벽","이중벽관"]):
+        # 관부설 직경별 매칭
+        if any(kw in name for kw in ["관 부설","관부설","고강성PVC","PE다중벽","이중벽관","주철관","GRP관"]):
             dia = extract_diameter(spec)
             if dia:
                 pipe_rates = {200:5, 300:4, 450:3, 600:2.5, 800:2, 1000:1.5, 1200:1.2}
@@ -168,8 +198,22 @@ def calc_days_priority(name, spec, qty, crews=3):
     try:
         if "dangagun_cache" in st.session_state:
             cache = st.session_state["dangagun_cache"]
+            
+            # 항목명 + 규격으로 매칭 시도
+            full_name = f"{name} {spec}".strip()
+            
             for cached_name, info in cache.items():
-                if cached_name in name or name in cached_name:
+                # 정확한 매칭 우선
+                if cached_name == full_name or cached_name in full_name or full_name in cached_name:
+                    hourly_val = info.get("hourly", 0)
+                    unit = info.get("unit", "")
+                    if hourly_val > 0:
+                        daily_val = hourly_val * 8
+                        days = math.ceil(qty / (daily_val * crews))
+                        return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}×{crews}조", "단가산출근거"
+                
+                # 항목명만으로도 매칭 시도
+                if name in cached_name or cached_name in name:
                     hourly_val = info.get("hourly", 0)
                     unit = info.get("unit", "")
                     if hourly_val > 0:
@@ -367,17 +411,23 @@ with tab2:
                 wb = openpyxl.load_workbook(uploaded, data_only=True)
                 ws = wb['설계내역서'] if '설계내역서' in wb.sheetnames else wb.active
                 
-                # 단가산출근거 캐싱
+                # 단가산출근거 캐싱 (개선: 규격 포함)
                 dangagun_cache = {}
                 if '단가산출근거' in wb.sheetnames:
                     ws_danga = wb['단가산출근거']
                     current_item = None
+                    
                     for row in ws_danga.iter_rows(min_row=1, values_only=True):
                         row_text = " ".join([str(c) for c in row if c])
+                        
+                        # 항목명 추출 (규격 포함)
                         if row[1] and "/" in str(row[1]):
                             item_text = str(row[1]).strip()
                             if "/" in item_text:
+                                # "품명 / 단위" 전체를 사용
                                 current_item = item_text.split("/")[0].strip()
+                        
+                        # Q 값 추출
                         if current_item and "Q =" in row_text:
                             match = re.search(r'=\s*([\d.]+)\s*([^\s]+/HR)', row_text, re.IGNORECASE)
                             if match:
@@ -386,6 +436,9 @@ with tab2:
                                 dangagun_cache[current_item] = {"hourly": hourly_val, "unit": unit}
                 
                 st.session_state["dangagun_cache"] = dangagun_cache
+                
+                if dangagun_cache:
+                    st.info(f"✅ 단가산출근거에서 {len(dangagun_cache)}개 항목 Q값 추출")
                 
                 # 계층 구조 파싱
                 hierarchy = []

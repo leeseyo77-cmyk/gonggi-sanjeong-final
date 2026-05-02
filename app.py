@@ -499,34 +499,33 @@ with tab2:
                 if hierarchy:
                     st.info(f"✅ {len(hierarchy)}개 주공종 인식")
                     
-                    # 투입조수 설정
+                    # 투입조수 설정 (level 포함)
                     st.markdown("### 🔧 주공종 투입조수 설정")
                     
                     if 'crew_by_main' not in st.session_state:
                         st.session_state['crew_by_main'] = {}
                     
-                    unique_main_cats = {}
-                    for cat in hierarchy:
-                        cat_name = cat['name']
-                        if cat_name not in unique_main_cats:
-                            unique_main_cats[cat_name] = cat
-                    
+                    # level + name을 키로 사용 (중복 방지)
                     crew_settings = {}
-                    cols = st.columns(min(len(unique_main_cats), 4))
+                    cols = st.columns(min(len(hierarchy), 4))
                     
-                    for idx, (cat_name, cat) in enumerate(unique_main_cats.items()):
-                        default_crew = st.session_state['crew_by_main'].get(cat_name, 3)
+                    for idx, cat in enumerate(hierarchy):
+                        cat_level = cat['level']
+                        cat_name = cat['name']
+                        cat_full = f"{cat_level} {cat_name}"
+                        
+                        default_crew = st.session_state['crew_by_main'].get(cat_full, 3)
                         
                         with cols[idx % len(cols)]:
                             crew_val = st.number_input(
-                                f"{cat_name}(조)",
+                                f"{cat_full}(조)",
                                 min_value=1,
                                 max_value=30,
                                 value=default_crew,
-                                key=f"crew_main_{cat_name.replace(' ', '_')}"
+                                key=f"crew_{cat_level.replace('.', '_')}"
                             )
                             crew_settings[cat_name] = crew_val
-                            st.session_state['crew_by_main'][cat_name] = crew_val
+                            st.session_state['crew_by_main'][cat_full] = crew_val
                     
                     st.markdown("---")
                     st.markdown("### 📊 공종별 작업일수 계산 결과")

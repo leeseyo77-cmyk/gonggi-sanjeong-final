@@ -535,35 +535,64 @@ with tab2:
                         hierarchy.append(current_category)
                 
                 if hierarchy:
-                    st.info(f"✅ {len(hierarchy)}개 주공종 인식")
+                    # 대공종별 그룹핑
+                    major_groups = {}
+                    for cat in hierarchy:
+                        level = cat['level']
+                        # 대공종 번호 추출 (1.1.1 → 1)
+                        major_num = level.split('.')[0]
+                        if major_num not in major_groups:
+                            major_groups[major_num] = []
+                        major_groups[major_num].append(cat)
                     
-                    # 투입조수 설정 (level 포함)
-                    st.markdown("### 🔧 주공종 투입조수 설정")
+                    st.info(f"✅ {len(major_groups)}개 대공종, {len(hierarchy)}개 주공종 인식")
                     
-                    if 'crew_by_main' not in st.session_state:
-                        st.session_state['crew_by_main'] = {}
+                    # 대공종별 탭 생성
+                    major_names = {
+                        "1": "토목공사",
+                        "2": "기계설비",
+                        "3": "전기공사",
+                        "4": "건축공사",
+                        "5": "조경공사",
+                    }
                     
-                    # level + name을 키로 사용 (중복 방지)
-                    crew_settings = {}
-                    cols = st.columns(min(len(hierarchy), 4))
+                    tab_labels = [f"📁 {num}. {major_names.get(num, f'{num}번 공종')}" 
+                                  for num in sorted(major_groups.keys(), key=lambda x: int(x))]
                     
-                    for idx, cat in enumerate(hierarchy):
-                        cat_level = cat['level']
-                        cat_name = cat['name']
-                        cat_full = f"{cat_level} {cat_name}"
-                        
-                        default_crew = st.session_state['crew_by_main'].get(cat_full, 3)
-                        
-                        with cols[idx % len(cols)]:
-                            crew_val = st.number_input(
-                                f"{cat_full}(조)",
-                                min_value=1,
-                                max_value=30,
-                                value=default_crew,
-                                key=f"crew_idx_{idx}"  # idx로 고유성 보장
-                            )
-                            crew_settings[cat_name] = crew_val
-                            st.session_state['crew_by_main'][cat_full] = crew_val
+                    major_tabs = st.tabs(tab_labels)
+                    
+                    all_crew_settings = {}
+                    
+                    for tab_idx, (major_num, major_tab) in enumerate(zip(sorted(major_groups.keys(), key=lambda x: int(x)), major_tabs)):
+                        with major_tab:
+                            cats_in_major = major_groups[major_num]
+                            
+                            st.markdown(f"### 🔧 {major_names.get(major_num, f'{major_num}번 공종')} 투입조수 설정")
+                            
+                            if 'crew_by_main' not in st.session_state:
+                                st.session_state['crew_by_main'] = {}
+                            
+                            cols = st.columns(min(len(cats_in_major), 4))
+                            
+                            for idx, cat in enumerate(cats_in_major):
+                                cat_level = cat['level']
+                                cat_name = cat['name']
+                                cat_full = f"{cat_level} {cat_name}"
+                                
+                                default_crew = st.session_state['crew_by_main'].get(cat_full, 3)
+                                
+                                with cols[idx % len(cols)]:
+                                    crew_val = st.number_input(
+                                        f"{cat_full}(조)",
+                                        min_value=1,
+                                        max_value=30,
+                                        value=default_crew,
+                                        key=f"crew_{major_num}_{idx}"
+                                    )
+                                    all_crew_settings[cat_name] = crew_val
+                                    st.session_state['crew_by_main'][cat_full] = crew_val
+                    
+                    crew_settings = all_crew_settings
                     
                     st.markdown("---")
                     st.markdown("### 📊 공종별 작업일수 계산 결과")

@@ -205,21 +205,39 @@ def calc_days_priority(name, spec, qty, crews=3):
             for cached_name, info in cache.items():
                 # 정확한 매칭 우선
                 if cached_name == full_name or cached_name in full_name or full_name in cached_name:
-                    hourly_val = info.get("hourly", 0)
-                    unit = info.get("unit", "")
-                    if hourly_val > 0:
-                        daily_val = hourly_val * 8
-                        days = math.ceil(qty / (daily_val * crews))
-                        return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}×{crews}조", "단가산출근거"
+                    # hourly 값 (시간당)
+                    if "hourly" in info:
+                        hourly_val = info.get("hourly", 0)
+                        unit = info.get("unit", "")
+                        if hourly_val > 0:
+                            daily_val = hourly_val * 8
+                            days = math.ceil(qty / (daily_val * crews))
+                            return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}×{crews}조", "단가산출근거"
+                    
+                    # daily 값 (1일 작업량)
+                    elif "daily" in info:
+                        daily_val = info.get("daily", 0)
+                        unit = info.get("unit", "")
+                        if daily_val > 0:
+                            days = math.ceil(qty / (daily_val * crews))
+                            return days, f"{daily_val:.1f}{unit}×{crews}조", "단가산출근거"
                 
                 # 항목명만으로도 매칭 시도
                 if name in cached_name or cached_name in name:
-                    hourly_val = info.get("hourly", 0)
-                    unit = info.get("unit", "")
-                    if hourly_val > 0:
-                        daily_val = hourly_val * 8
-                        days = math.ceil(qty / (daily_val * crews))
-                        return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}×{crews}조", "단가산출근거"
+                    if "hourly" in info:
+                        hourly_val = info.get("hourly", 0)
+                        unit = info.get("unit", "")
+                        if hourly_val > 0:
+                            daily_val = hourly_val * 8
+                            days = math.ceil(qty / (daily_val * crews))
+                            return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}×{crews}조", "단가산출근거"
+                    
+                    elif "daily" in info:
+                        daily_val = info.get("daily", 0)
+                        unit = info.get("unit", "")
+                        if daily_val > 0:
+                            days = math.ceil(qty / (daily_val * crews))
+                            return days, f"{daily_val:.1f}{unit}×{crews}조", "단가산출근거"
     except Exception:
         pass
 
@@ -411,7 +429,7 @@ with tab2:
                 wb = openpyxl.load_workbook(uploaded, data_only=True)
                 ws = wb['설계내역서'] if '설계내역서' in wb.sheetnames else wb.active
                 
-                # 단가산출근거 캐싱 (개선: 규격 포함)
+                # 단가산출근거 캐싱 (개선: 다양한 패턴 인식)
                 dangagun_cache = {}
                 if '단가산출근거' in wb.sheetnames:
                     ws_danga = wb['단가산출근거']
@@ -424,16 +442,36 @@ with tab2:
                         if row[1] and "/" in str(row[1]):
                             item_text = str(row[1]).strip()
                             if "/" in item_text:
-                                # "품명 / 단위" 전체를 사용
                                 current_item = item_text.split("/")[0].strip()
                         
-                        # Q 값 추출
+                        # Q 값 추출 (다양한 패턴)
                         if current_item and "Q =" in row_text:
-                            match = re.search(r'=\s*([\d.]+)\s*([^\s]+/HR)', row_text, re.IGNORECASE)
-                            if match:
-                                hourly_val = float(match.group(1))
-                                unit = match.group(2).replace("HR", "Hr")
+                            # 패턴 1: Q = 숫자 단위/HR
+                            match1 = re.search(r'Q\s*=\s*([\d.]+)\s*([^\s]+/HR)', row_text, re.IGNORECASE)
+                            if match1:
+                                hourly_val = float(match1.group(1))
+                                unit = match1.group(2).replace("HR", "Hr").replace("hr", "Hr")
                                 dangagun_cache[current_item] = {"hourly": hourly_val, "unit": unit}
+                                continue
+                            
+                            # 패턴 2: Q = 숫자/일 /8 Hr = 숫자 단위/Hr
+                            match2 = re.search(r'=\s*([\d.]+)\s*([^\s/]+)/Hr', row_text, re.IGNORECASE)
+                            if match2:
+                                hourly_val = float(match2.group(1))
+                                unit = match2.group(2) + "/Hr"
+                                dangagun_cache[current_item] = {"hourly": hourly_val, "unit": unit}
+                                continue
+                        
+                        # 1세트 = N일 패턴
+                        if current_item and "세트" in row_text and "일" in row_text:
+                            match3 = re.search(r'(\d+)\s*세트\s*=\s*([\d.]+)\s*일', row_text)
+                            if match3:
+                                sets = float(match3.group(1))
+                                days = float(match3.group(2))
+                                # 1일 = sets/days 세트
+                                daily_val = sets / days
+                                dangagun_cache[current_item] = {"daily": daily_val, "unit": "세트/일"}
+                                continue
                 
                 st.session_state["dangagun_cache"] = dangagun_cache
                 
@@ -522,7 +560,7 @@ with tab2:
                                 min_value=1,
                                 max_value=30,
                                 value=default_crew,
-                                key=f"crew_{cat_level.replace('.', '_')}"
+                                key=f"crew_idx_{idx}"  # idx로 고유성 보장
                             )
                             crew_settings[cat_name] = crew_val
                             st.session_state['crew_by_main'][cat_full] = crew_val

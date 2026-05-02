@@ -649,9 +649,10 @@ with tab2:
                                 "세부항목": all_cat_items,
                                 "하위카테고리": cat.get('sub_categories', []),
                                 "crew": cat_crew,
+                                "major_key": '.'.join(cat_level.split('.')[:2])  # "1.1", "2.1" 등
                             })
                     
-                    # 1.1.1 → 1.1.2 순서로 정렬
+                    # 정렬
                     def sort_key(row):
                         level = row['level']
                         parts = level.split('.')
@@ -660,78 +661,99 @@ with tab2:
                     result_rows_sorted = sorted(result_rows, key=sort_key)
                     max_days = max((r["작업일수(일)"] for r in result_rows_sorted), default=0)
                     
-                    # 테이블 표시
-                    for idx, row in enumerate(result_rows_sorted):
-                        is_max = (row["작업일수(일)"] == max_days and max_days > 0)
+                    # 그룹별로 표시
+                    grouped_results = {}
+                    for row in result_rows_sorted:
+                        major_key = row['major_key']
+                        if major_key not in grouped_results:
+                            grouped_results[major_key] = []
+                        grouped_results[major_key].append(row)
+                    
+                    # 그룹명
+                    group_names = {
+                        "1.1": "🏗️ 하수관로공사",
+                        "1.2": "🔧 관로 부대공사",
+                        "2.1": "💧 배수설비공사",
+                        "2.2": "⚙️ 기계설비",
+                    }
+                    
+                    # 그룹별 expander
+                    for major_key in sorted(grouped_results.keys(), key=lambda x: tuple(int(p) for p in x.split('.'))):
+                        group_name = group_names.get(major_key, f"📁 {major_key}")
+                        rows_in_group = grouped_results[major_key]
                         
-                        with st.expander(
-                            f"{'🔴' if is_max else '▶'} **{row['공종']}** - {row['작업일수(일)']}일 ({row['투입조수']})",
-                            expanded=False
-                        ):
-                            # 하위 카테고리별 표시
-                            if row['하위카테고리']:
-                                for sub in row['하위카테고리']:
-                                    sub_name = sub['name']
-                                    sub_items = sub['items']
-                                    sub_days = sum(
-                                        calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'])[0]
-                                        for item in sub_items
-                                    )
-                                    
-                                    st.markdown(f"#### {sub['level']} {sub_name} ({sub_days}일)")
-                                    
-                                    detail_items = []
-                                    for item in sub_items:
-                                        d, label, method = calc_days_priority(
-                                            item['name'],
-                                            item.get('spec', ''),
-                                            item.get('qty', 0),
-                                            row['crew']
-                                        )
-                                        detail_items.append({
-                                            "세부공종": item['name'],
-                                            "규격": item.get('spec', ''),
-                                            "수량": f"{item.get('qty', 0):,.1f}",
-                                            "단위": item.get('unit', ''),
-                                            "1일작업량": label,
-                                            "작업일수": int(d),
-                                            "출처": method
-                                        })
-                                    
-                                    if detail_items:
-                                        st.dataframe(
-                                            pd.DataFrame(detail_items),
-                                            hide_index=True,
-                                            use_container_width=True
-                                        )
-                            
-                            # 직접 항목도 있으면 표시
-                            direct_items = [item for item in row['세부항목'] if item not in sum([sub['items'] for sub in row['하위카테고리']], [])]
-                            if direct_items:
-                                detail_items = []
-                                for item in direct_items:
-                                    d, label, method = calc_days_priority(
-                                        item['name'],
-                                        item.get('spec', ''),
-                                        item.get('qty', 0),
-                                        row['crew']
-                                    )
-                                    detail_items.append({
-                                        "세부공종": item['name'],
-                                        "규격": item.get('spec', ''),
-                                        "수량": f"{item.get('qty', 0):,.1f}",
-                                        "단위": item.get('unit', ''),
-                                        "1일작업량": label,
-                                        "작업일수": int(d),
-                                        "출처": method
-                                    })
+                        with st.expander(f"**{group_name}** ({len(rows_in_group)}개 공종)", expanded=True):
+                            for idx, row in enumerate(rows_in_group):
+                                is_max = (row["작업일수(일)"] == max_days and max_days > 0)
                                 
-                                if detail_items:
-                                    st.dataframe(
-                                        pd.DataFrame(detail_items),
-                                        hide_index=True,
-                                        use_container_width=True
-                                    )
+                                with st.expander(
+                                    f"{'🔴' if is_max else '▶'} **{row['공종']}** - {row['작업일수(일)']}일 ({row['투입조수']})",
+                                    expanded=False
+                                ):
+                                    # 하위 카테고리별 표시
+                                    if row['하위카테고리']:
+                                        for sub in row['하위카테고리']:
+                                            sub_name = sub['name']
+                                            sub_items = sub['items']
+                                            sub_days = sum(
+                                                calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'])[0]
+                                                for item in sub_items
+                                            )
+                                            
+                                            st.markdown(f"#### {sub['level']} {sub_name} ({sub_days}일)")
+                                            
+                                            detail_items = []
+                                            for item in sub_items:
+                                                d, label, method = calc_days_priority(
+                                                    item['name'],
+                                                    item.get('spec', ''),
+                                                    item.get('qty', 0),
+                                                    row['crew']
+                                                )
+                                                detail_items.append({
+                                                    "세부공종": item['name'],
+                                                    "규격": item.get('spec', ''),
+                                                    "수량": f"{item.get('qty', 0):,.1f}",
+                                                    "단위": item.get('unit', ''),
+                                                    "1일작업량": label,
+                                                    "작업일수": int(d),
+                                                    "출처": method
+                                                })
+                                            
+                                            if detail_items:
+                                                st.dataframe(
+                                                    pd.DataFrame(detail_items),
+                                                    hide_index=True,
+                                                    use_container_width=True
+                                                )
+                                    
+                                    # 직접 항목도 있으면 표시
+                                    direct_items = [item for item in row['세부항목'] if item not in sum([sub['items'] for sub in row['하위카테고리']], [])]
+                                    if direct_items:
+                                        detail_items = []
+                                        for item in direct_items:
+                                            d, label, method = calc_days_priority(
+                                                item['name'],
+                                                item.get('spec', ''),
+                                                item.get('qty', 0),
+                                                row['crew']
+                                            )
+                                            detail_items.append({
+                                                "세부공종": item['name'],
+                                                "규격": item.get('spec', ''),
+                                                "수량": f"{item.get('qty', 0):,.1f}",
+                                                "단위": item.get('unit', ''),
+                                                "1일작업량": label,
+                                                "작업일수": int(d),
+                                                "출처": method
+                                            })
+                                        
+                                        if detail_items:
+                                            st.dataframe(
+                                                pd.DataFrame(detail_items),
+                                                hide_index=True,
+                                                use_container_width=True
+                                            )
                     
                     ca, cb = st.columns(2)
                     ca.metric("🔴 주공정 (최장)", f"{max_days}일")
@@ -804,6 +826,19 @@ with tab3:
 # ══════════════════════════════════════════════════════════════
 with tab4:
     st.subheader("비작업일수 계산기")
+    
+    st.markdown("### ⚙️ 비작업일 조건 설정")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        include_rain = st.checkbox("🌧️ 강우일 포함", value=True)
+    with col2:
+        include_cold = st.checkbox("❄️ 한파일 포함 (영하 5도 이하)", value=False)
+    with col3:
+        include_dust = st.checkbox("😷 미세먼지 포함", value=False)
+    
+    st.markdown("---")
+    
     col_a, col_b = st.columns(2)
     with col_a:
         start_date = st.date_input("착공일", datetime.now().date())
@@ -820,6 +855,13 @@ with tab4:
         col1.metric("총 공사기간", f"{total_days}일")
         col2.metric("순작업일수", f"{work_days}일")
         col3.metric("비작업일수", f"{non_work_days}일")
+        
+        st.info(f"""
+        **적용된 조건:**
+        - {'✅' if include_rain else '❌'} 강우일
+        - {'✅' if include_cold else '❌'} 한파일 (영하 5도 이하)
+        - {'✅' if include_dust else '❌'} 미세먼지
+        """)
 
 # ══════════════════════════════════════════════════════════════
 # TAB 5

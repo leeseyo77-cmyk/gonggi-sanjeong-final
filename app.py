@@ -31,13 +31,12 @@ SKIP_NAMES = [
 ]
 
 PIPE_EXCLUDE = ["절단","이형관","하차비","단관","마감캡","추진관"]
-
 MACHINE_BASED = ["터파기","굴착","되메우기","모래기초","모래부설","모래,관기초"]
 
 # ══════════════════════════════════════════════════════════════
 # 가이드라인 부록 데이터
 # ══════════════════════════════════════════════════════════════
-GUIDELINE_APPENDIX1 = {
+GUIDELINE_APPENDIX = {
     "아스팔트포장 절단": {"daily": 1000, "unit": "m"},
     "아스팔트포장깨기 (B.H0.4㎥)": {"daily": 515, "unit": "㎡"},
     "아스팔트포장깨기 (B.H0.7㎥)": {"daily": 1047, "unit": "㎡"},
@@ -47,19 +46,13 @@ GUIDELINE_APPENDIX1 = {
     "터파기(암:육상) B/H 0.7㎥": {"daily": 265, "unit": "㎥"},
     "되메우기(진동롤러) 2.5ton": {"daily": 600, "unit": "㎥"},
     "되메우기(진동롤러) 4.0ton": {"daily": 950, "unit": "㎥"},
-}
-
-GUIDELINE_APPENDIX2_PIPE = {
-    200: {"daily": 5, "unit": "본/일"},
-    300: {"daily": 4, "unit": "본/일"},
-    450: {"daily": 3, "unit": "본/일"},
-    600: {"daily": 2.5, "unit": "본/일"},
-    800: {"daily": 2, "unit": "본/일"},
-    1000: {"daily": 1.5, "unit": "본/일"},
-    1200: {"daily": 1.2, "unit": "본/일"},
-}
-
-GUIDELINE_APPENDIX2_MANHOLE = {
+    "관부설(D200)": {"daily": 5, "unit": "본/일"},
+    "관부설(D300)": {"daily": 4, "unit": "본/일"},
+    "관부설(D450)": {"daily": 3, "unit": "본/일"},
+    "관부설(D600)": {"daily": 2.5, "unit": "본/일"},
+    "관부설(D800)": {"daily": 2, "unit": "본/일"},
+    "관부설(D1000)": {"daily": 1.5, "unit": "본/일"},
+    "관부설(D1200)": {"daily": 1.2, "unit": "본/일"},
     "원형맨홀 Φ1200": {"daily": 2.5, "unit": "개소/일"},
     "원형맨홀 Φ1500": {"daily": 2.5, "unit": "개소/일"},
     "각형맨홀 1800×2400": {"daily": 1.5, "unit": "개소/일"},
@@ -67,46 +60,39 @@ GUIDELINE_APPENDIX2_MANHOLE = {
 }
 
 # ══════════════════════════════════════════════════════════════
-# 표준품셈 노무량 데이터
+# 표준품셈 노무량
 # ══════════════════════════════════════════════════════════════
-def get_excavation_labor_detail(spec_str):
-    """터파기 표준품셈 노무량"""
+def get_excavation_labor(spec_str):
     labor_table = {
         0.4: {"인/m3": 0.130},
         0.7: {"인/m3": 0.085},
         1.0: {"인/m3": 0.070},
     }
-    
     if "0.4" in spec_str or "B.H0.4" in spec_str or "B/H 0.4" in spec_str:
         return labor_table[0.4]
     elif "0.7" in spec_str or "B.H0.7" in spec_str or "B/H 0.7" in spec_str:
         return labor_table[0.7]
     elif "1.0" in spec_str or "B.H1.0" in spec_str or "B/H 1.0" in spec_str:
         return labor_table[1.0]
-    
     return {"인/m3": 0.085}
 
-def get_pipe_labor(name, diameter, grade="A"):
-    """관 부설 표준품셈 노무량"""
+def get_pipe_labor(diameter):
     pipe_labor = {
-        200: {"보통인부": 0.264, "특별인부": 0.066, "배관공": 0.066, "합계": 0.396},
-        300: {"보통인부": 0.330, "특별인부": 0.082, "배관공": 0.082, "합계": 0.494},
-        450: {"보통인부": 0.435, "특별인부": 0.109, "배관공": 0.109, "합계": 0.653},
-        600: {"보통인부": 0.528, "특별인부": 0.132, "배관공": 0.132, "합계": 0.792},
-        800: {"보통인부": 0.660, "특별인부": 0.165, "배관공": 0.165, "합계": 0.990},
-        1000: {"보통인부": 0.792, "특별인부": 0.198, "배관공": 0.198, "합계": 1.188},
-        1200: {"보통인부": 0.924, "특별인부": 0.231, "배관공": 0.231, "합계": 1.386},
+        200: {"합계": 0.396},
+        300: {"합계": 0.494},
+        450: {"합계": 0.653},
+        600: {"합계": 0.792},
+        800: {"합계": 0.990},
+        1000: {"합계": 1.188},
+        1200: {"합계": 1.386},
     }
-    
     closest = min(pipe_labor.keys(), key=lambda x: abs(x - diameter))
     return pipe_labor.get(closest, {"합계": 0.5})
 
 def is_machine_based(name):
-    """장비 기반 공종 여부"""
     return any(kw in name for kw in MACHINE_BASED)
 
 def extract_diameter(spec_str):
-    """규격에서 관경 추출"""
     patterns = [r'D\s*[=＝]?\s*(\d+)',r'Φ\s*(\d+)',r'φ\s*(\d+)',
                 r'(\d{2,4})\s*(?:mm|㎜)',r'[D=]?(\d{2,4})']
     for pat in patterns:
@@ -117,48 +103,40 @@ def extract_diameter(spec_str):
                 return val
     return None
 
-def calc_work_days(name, spec, qty, crews=3):
-    """가이드라인 부록 1일 작업량 조회"""
-    for key, val in GUIDELINE_APPENDIX1.items():
-        if key in name or key in spec:
-            return val
-    
-    if any(kw in name for kw in ["관 부설","관부설","고강성PVC","PE다중벽","이중벽관"]):
-        dia = extract_diameter(spec)
-        if dia:
-            closest = min(GUIDELINE_APPENDIX2_PIPE.keys(), key=lambda x: abs(x - dia))
-            return GUIDELINE_APPENDIX2_PIPE[closest]
-    
-    for key, val in GUIDELINE_APPENDIX2_MANHOLE.items():
-        if key in name:
-            return val
-    
-    return None
-
 def calc_days_priority(name, spec, qty, crews=3):
     """
-    작업일수 계산 우선순위
-    1순위: 가이드라인 부록1,2
-    2순위: 표준품셈 Man-day
-    3순위: 단가산출근거 Q
+    우선순위:
+    1. 가이드라인 부록 1일 작업량
+    2. 표준품셈 Man-day
+    3. 단가산출근거 Q값
     """
     if not qty or qty <= 0:
         return 0, "-", "-"
 
-    # 1순위: 가이드라인
+    # 1순위: 가이드라인 부록
     try:
-        wd = calc_work_days(name, spec, qty, crews=crews)
-        if wd and isinstance(wd, dict):
-            base_daily = wd.get("daily", 0)
-            unit = wd.get("unit", "")
-            if base_daily > 0:
-                if is_machine_based(name):
-                    days = math.ceil(qty / (base_daily * crews))
-                    label = f"{base_daily}{unit}/일×{crews}대"
-                else:
-                    days = math.ceil(qty / (base_daily * crews))
-                    label = f"{base_daily}{unit}/일×{crews}조"
-                return days, label, "가이드라인 부록"
+        for key, val in GUIDELINE_APPENDIX.items():
+            if key in name or key in spec:
+                base_daily = val.get("daily", 0)
+                unit = val.get("unit", "")
+                if base_daily > 0:
+                    if is_machine_based(name):
+                        days = math.ceil(qty / (base_daily * crews))
+                        label = f"{base_daily}{unit}×{crews}대"
+                    else:
+                        days = math.ceil(qty / (base_daily * crews))
+                        label = f"{base_daily}{unit}×{crews}조"
+                    return days, label, "가이드라인"
+        
+        # 관부설 직경별
+        if any(kw in name for kw in ["관 부설","관부설","고강성PVC","PE다중벽","이중벽관"]):
+            dia = extract_diameter(spec)
+            if dia:
+                pipe_rates = {200:5, 300:4, 450:3, 600:2.5, 800:2, 1000:1.5, 1200:1.2}
+                closest = min(pipe_rates.keys(), key=lambda x: abs(x - dia))
+                daily = pipe_rates[closest]
+                days = math.ceil(qty / (daily * crews))
+                return days, f"{daily}본/일×{crews}조", "가이드라인"
     except Exception:
         pass
 
@@ -166,8 +144,8 @@ def calc_days_priority(name, spec, qty, crews=3):
     try:
         manday = 0
         if any(kw in name for kw in ["터파기","굴착","줄파기"]) and "운반" not in name:
-            info = get_excavation_labor_detail(spec)
-            rate = info.get("인/m3") if info else None
+            info = get_excavation_labor(spec)
+            rate = info.get("인/m3")
             if rate:
                 manday = rate * qty
 
@@ -176,27 +154,25 @@ def calc_days_priority(name, spec, qty, crews=3):
         if any(kw in name for kw in pipe_kws) and not manday:
             dia = extract_diameter(spec)
             if dia:
-                info = get_pipe_labor(name, dia, "A")
-                rate = info.get("합계") if info and isinstance(info, dict) else None
+                info = get_pipe_labor(dia)
+                rate = info.get("합계")
                 if rate:
                     manday = rate * qty
 
         if manday > 0:
             days = math.ceil(manday / (8 * crews))
-            return days, f"{round(manday/qty,3)}인/단위×{crews}조", "표준품셈 Man-day"
+            return days, f"{round(manday/qty,3)}인/단위×{crews}조", "표준품셈"
     except Exception:
         pass
     
-    # 3순위: 단가산출근거 Q
+    # 3순위: 단가산출근거
     try:
         if "dangagun_cache" in st.session_state:
             cache = st.session_state["dangagun_cache"]
-            
             for cached_name, info in cache.items():
                 if cached_name in name or name in cached_name:
                     hourly_val = info.get("hourly", 0)
                     unit = info.get("unit", "")
-                    
                     if hourly_val > 0:
                         daily_val = hourly_val * 8
                         days = math.ceil(qty / (daily_val * crews))
@@ -207,14 +183,12 @@ def calc_days_priority(name, spec, qty, crews=3):
     return 0, "-", "-"
 
 # ══════════════════════════════════════════════════════════════
-# 비작업일수 데이터
+# 비작업일수
 # ══════════════════════════════════════════════════════════════
 HOLIDAYS_DB = {
     2025:{1:8,2:4,3:7,4:4,5:6,6:6,7:4,8:6,9:4,10:9,11:5,12:5},
     2026:{1:5,2:7,3:6,4:4,5:7,6:5,7:4,8:7,9:7,10:7,11:5,12:5},
-    2027:{1:6,2:7,3:5,4:4,5:7,6:4,7:4,8:6,9:7,10:8,11:4,12:6},
 }
-
 RAIN = {1:0,2:1,3:2,4:3,5:4,6:6,7:8,8:7,9:5,10:3,11:2,12:1}
 
 def get_kr_holidays(year):
@@ -268,7 +242,6 @@ def parse_by_keyword(file):
         target_sheet = wb.sheetnames[0]
 
     ws = wb[target_sheet]
-    
     col_info = {"시트명": target_sheet}
     header_row = None
     
@@ -282,13 +255,11 @@ def parse_by_keyword(file):
         header_row = 1
     
     col_info["헤더행"] = header_row
-    
     all_rows = list(ws.iter_rows(min_row=header_row, values_only=True))
     if not all_rows:
         return [], col_info
     
     results = []
-    
     for row in all_rows[1:]:
         if not row or all(c is None for c in row):
             continue
@@ -334,9 +305,9 @@ def parse_by_keyword(file):
             "unit": unit,
             "amount": row[5] if len(row) > 5 else 0,
             "labor": row[6] if len(row) > 6 else 0,
-            "is_night": "-야간" in name,
         })
     
+    # 중복 제거
     merged = {}
     for r in results:
         key = (r["name"], r["spec"])
@@ -351,30 +322,18 @@ def parse_by_keyword(file):
     return list(merged.values()), col_info
 
 # ══════════════════════════════════════════════════════════════
-# 사이드바 및 메인
+# UI
 # ══════════════════════════════════════════════════════════════
 st.sidebar.header("⚙️ 기본 설정")
-
 st.sidebar.markdown("""
 <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-            padding: 20px; 
-            border-radius: 10px; 
-            margin-bottom: 20px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);'>
-    <h3 style='color: white; margin: 0 0 10px 0; font-size: 18px;'>🚧 공사 유형 선택</h3>
+            padding: 20px; border-radius: 10px; margin-bottom: 20px;'>
+    <h3 style='color: white; margin: 0 0 10px 0; font-size: 18px;'>🚧 공사 유형</h3>
     <p style='color: #e0e7ff; margin: 0; font-size: 14px;'>현재: <strong style='color: #fbbf24;'>하수관로</strong></p>
 </div>
 """, unsafe_allow_html=True)
 
-project_type = st.sidebar.selectbox(
-    "공사 유형",
-    ["하수관로", "하수처리시설 (준비중)", "하수관로+하수처리시설 (준비중)"],
-    disabled=False,
-)
-
-st.sidebar.info("📅 **공사 시작일**은\n\nTAB 4(비작업일수)에서 설정합니다.")
-st.sidebar.markdown("---")
-
+st.sidebar.info("📅 **공사 시작일**은 TAB 4에서 설정")
 st.title("상하수도 관로공사 공기산정 시스템")
 st.markdown("---")
 
@@ -387,11 +346,11 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ══════════════════════════════════════════════════════════════
-# TAB 2: 엑셀 내역서 인식 (1), 2) 하위 구조 포함)
+# TAB 2
 # ══════════════════════════════════════════════════════════════
 with tab2:
     st.subheader("📂 엑셀 내역서 자동 인식")
-    st.caption("도급 설계내역서 업로드 → 계층 구조 자동 파싱 (1.1.1 + 1), 2) 하위 구조)")
+    st.caption("도급 설계내역서 업로드 → 계층 구조 자동 파싱")
 
     uploaded = st.file_uploader("설계내역서 엑셀 (.xlsx)", type=["xlsx","xls"])
 
@@ -400,37 +359,27 @@ with tab2:
             with st.spinner("파싱 중..."):
                 all_rows, col_info = parse_by_keyword(uploaded)
 
-            matched = [r for r in all_rows if r["group"] != "기타" and r["qty"] is not None]
-            unmatched = [r for r in all_rows if r["group"] == "기타" and r["qty"] is not None]
-
-            st.success(f"시트 **{col_info['시트명']}** | 인식 **{len(matched)}건** | 미인식 **{len(unmatched)}건**")
+            matched = [r for r in all_rows if r["group"] != "기타"]
+            st.success(f"시트 **{col_info['시트명']}** | 인식 **{len(matched)}건**")
 
             if matched:
                 st.markdown("---")
-                st.subheader("📂 내역서 기반 공종 분류")
                 
-                # 원본 엑셀 다시 열기
                 wb = openpyxl.load_workbook(uploaded, data_only=True)
                 ws = wb['설계내역서'] if '설계내역서' in wb.sheetnames else wb.active
                 
-                # 단가산출근거 Q 값 캐싱 (개선)
+                # 단가산출근거 캐싱
                 dangagun_cache = {}
                 if '단가산출근거' in wb.sheetnames:
                     ws_danga = wb['단가산출근거']
                     current_item = None
-                    
                     for row in ws_danga.iter_rows(min_row=1, values_only=True):
                         row_text = " ".join([str(c) for c in row if c])
-                        
-                        # 항목명 추출 (/ 포함된 행)
                         if row[1] and "/" in str(row[1]):
                             item_text = str(row[1]).strip()
                             if "/" in item_text:
                                 current_item = item_text.split("/")[0].strip()
-                        
-                        # Q 값 추출 (개선된 패턴)
                         if current_item and "Q =" in row_text:
-                            # 패턴: Q = ... = 숫자 단위/HR
                             match = re.search(r'=\s*([\d.]+)\s*([^\s]+/HR)', row_text, re.IGNORECASE)
                             if match:
                                 hourly_val = float(match.group(1))
@@ -438,10 +387,8 @@ with tab2:
                                 dangagun_cache[current_item] = {"hourly": hourly_val, "unit": unit}
                 
                 st.session_state["dangagun_cache"] = dangagun_cache
-                if dangagun_cache:
-                    st.info(f"✅ 단가산출근거에서 {len(dangagun_cache)}개 항목의 Q 값 추출 완료")
                 
-                # 계층 구조 파싱 (1.1.1 + 1), 2) 구조)
+                # 계층 구조 파싱
                 hierarchy = []
                 current_category = None
                 current_sub_category = None
@@ -452,15 +399,11 @@ with tab2:
                     name = str(row[1]).strip() if len(row) > 1 and row[1] else ""
                     spec = str(row[2]).strip() if len(row) > 2 and row[2] else ""
                     
-                    # 1.1.1, 1.1.2 형태 인식
                     if re.match(r'^\d+\.\d+\.\d+$', gong_jong):
-                        # 이전 카테고리 저장
                         if current_category:
-                            # 마지막 하위 카테고리 저장
                             if current_sub_category:
                                 current_category['sub_categories'].append(current_sub_category)
                                 current_sub_category = None
-                            
                             if current_category.get('items') or current_category.get('sub_categories'):
                                 hierarchy.append(current_category)
                         
@@ -473,12 +416,9 @@ with tab2:
                         current_sub_category = None
                         continue
                     
-                    # 1), 2), 3)... 형태 인식 (하위 구조)
                     if re.match(r'^\d+\)$', gong_jong) and current_category:
-                        # 이전 하위 카테고리 저장
                         if current_sub_category:
                             current_category['sub_categories'].append(current_sub_category)
-                        
                         current_sub_category = {
                             'level': gong_jong,
                             'name': name,
@@ -486,13 +426,11 @@ with tab2:
                         }
                         continue
                     
-                    # 세부 항목 추가 (중복 체크)
                     if current_category and not gong_jong and name:
                         item_key = (name, spec)
                         if item_key not in seen_items:
                             for item in matched:
                                 if item['name'] == name and item['spec'] == spec:
-                                    # 하위 카테고리가 있으면 거기에 추가
                                     if current_sub_category:
                                         current_sub_category['items'].append(item)
                                     else:
@@ -500,7 +438,6 @@ with tab2:
                                     seen_items.add(item_key)
                                     break
                 
-                # 마지막 카테고리 저장
                 if current_category:
                     if current_sub_category:
                         current_category['sub_categories'].append(current_sub_category)
@@ -508,36 +445,20 @@ with tab2:
                         hierarchy.append(current_category)
                 
                 if hierarchy:
-                    total_cats = len(hierarchy)
-                    total_subs = sum(len(cat.get('sub_categories', [])) for cat in hierarchy)
-                    st.info(f"✅ {total_cats}개 주공종 + {total_subs}개 하위공종 자동 인식")
+                    st.info(f"✅ {len(hierarchy)}개 주공종 인식")
                     
-                    # 투입조수 설정
-                    st.markdown("### 🔧 공종별 투입조수 설정")
+                    # 투입조수 설정 (주공종만)
+                    st.markdown("### 🔧 주공종 투입조수 설정")
                     
-                    if 'crew_by_category' not in st.session_state:
-                        st.session_state['crew_by_category'] = {}
-                    
-                    # 모든 카테고리명 수집 (중복 제거)
-                    unique_categories = {}
-                    for cat in hierarchy:
-                        cat_name = cat['name']
-                        if cat_name not in unique_categories:
-                            unique_categories[cat_name] = []
-                        unique_categories[cat_name].append(cat)
-                        
-                        # 하위 카테고리도 수집
-                        for sub in cat.get('sub_categories', []):
-                            sub_name = f"{cat_name} > {sub['name']}"
-                            if sub_name not in unique_categories:
-                                unique_categories[sub_name] = []
-                            unique_categories[sub_name].append(sub)
+                    if 'crew_by_main' not in st.session_state:
+                        st.session_state['crew_by_main'] = {}
                     
                     crew_settings = {}
-                    cols = st.columns(min(len(unique_categories), 4))
+                    cols = st.columns(min(len(hierarchy), 4))
                     
-                    for idx, (cat_name, cat_list) in enumerate(unique_categories.items()):
-                        default_crew = st.session_state['crew_by_category'].get(cat_name, 3)
+                    for idx, cat in enumerate(hierarchy):
+                        cat_name = cat['name']
+                        default_crew = st.session_state['crew_by_main'].get(cat_name, 3)
                         
                         with cols[idx % len(cols)]:
                             crew_val = st.number_input(
@@ -545,15 +466,14 @@ with tab2:
                                 min_value=1,
                                 max_value=30,
                                 value=default_crew,
-                                key=f"crew_{cat_name.replace(' ', '_').replace('>', '_')}"
+                                key=f"crew_main_{idx}"
                             )
                             crew_settings[cat_name] = crew_val
-                            st.session_state['crew_by_category'][cat_name] = crew_val
+                            st.session_state['crew_by_main'][cat_name] = crew_val
                     
                     st.markdown("---")
                     st.markdown("### 📊 공종별 작업일수 계산 결과")
                     
-                    # 작업일수 계산
                     result_rows = []
                     
                     for cat in hierarchy:
@@ -561,60 +481,34 @@ with tab2:
                         cat_level = cat['level']
                         cat_crew = crew_settings[cat_name]
                         
-                        # 하위 카테고리가 있으면 하위별로 계산
-                        if cat.get('sub_categories'):
-                            for sub in cat['sub_categories']:
-                                sub_name = f"{cat_name} > {sub['name']}"
-                                sub_crew = crew_settings.get(sub_name, cat_crew)
-                                sub_items = sub.get('items', [])
-                                
-                                sub_total_days = sum(
-                                    calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), sub_crew)[0]
-                                    for item in sub_items
-                                )
-                                
-                                if sub_items:
-                                    result_rows.append({
-                                        "공종": f"{cat_level}{sub['level']} {sub['name']}",
-                                        "물량": f"{len(sub_items)}개 항목",
-                                        "단위": "-",
-                                        "1일작업량": "-",
-                                        "투입조수": f"{sub_crew}조",
-                                        "작업일수(일)": int(sub_total_days),
-                                        "계산방식": f"{len(sub_items)}개 항목 합계"
-                                    })
+                        # 모든 항목 수집 (직접 항목 + 하위 카테고리 항목)
+                        all_cat_items = list(cat.get('items', []))
+                        for sub in cat.get('sub_categories', []):
+                            all_cat_items.extend(sub.get('items', []))
                         
-                        # 직접 항목도 있으면 추가
-                        cat_items = cat.get('items', [])
-                        if cat_items:
-                            cat_total_days = sum(
-                                calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), cat_crew)[0]
-                                for item in cat_items
-                            )
-                            
+                        # 총 작업일수 계산
+                        cat_total_days = sum(
+                            calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), cat_crew)[0]
+                            for item in all_cat_items
+                        )
+                        
+                        if all_cat_items:
                             result_rows.append({
                                 "공종": f"{cat_level} {cat_name}",
-                                "물량": f"{len(cat_items)}개 항목",
-                                "단위": "-",
-                                "1일작업량": "-",
+                                "물량": f"{len(all_cat_items)}개 항목",
                                 "투입조수": f"{cat_crew}조",
                                 "작업일수(일)": int(cat_total_days),
-                                "계산방식": f"{len(cat_items)}개 항목 합계"
                             })
                     
                     # 결과 테이블
                     result_rows_sorted = sorted(result_rows, key=lambda x: x["작업일수(일)"], reverse=True)
                     max_days = max((r["작업일수(일)"] for r in result_rows_sorted), default=0)
-                    total_wd = max_days
                     
                     total_row = {
                         "공종": "[ 합  계 ]",
                         "물량": "-",
-                        "단위": "-",
-                        "1일작업량": "-",
                         "투입조수": "-",
-                        "작업일수(일)": total_wd,
-                        "계산방식": "병렬작업 반영"
+                        "작업일수(일)": max_days,
                     }
                     display_rows = result_rows_sorted + [total_row]
                     
@@ -630,62 +524,49 @@ with tab2:
                         hide_index=True,
                         use_container_width=True
                     )
-                    st.caption("🔴 최장 작업일수 = 주공정 | 🔵 합계")
                     
-                    ca, cb, cc = st.columns(3)
-                    main_grp = next((r["공종"] for r in result_rows_sorted if r["작업일수(일)"] == max_days), "")
-                    ca.metric("🔴 주공정", f"{max_days}일", delta=main_grp)
-                    cb.metric("총 순작업일수", f"{total_wd}일")
-                    cc.metric("산출 공종", f"{len(result_rows)}개")
+                    ca, cb = st.columns(2)
+                    ca.metric("🔴 주공정 (최장)", f"{max_days}일")
+                    cb.metric("총 공종", f"{len(result_rows)}개")
                     
                     # session_state 저장
                     st.session_state["work_result"] = {
                         "rows": result_rows,
                         "hierarchy": hierarchy,
                         "crew_settings": crew_settings,
-                        "matched": matched,
                     }
-                    st.session_state["has_excel_data"] = True
-                    st.session_state["total_work_days"] = int(total_wd)
-                
-                else:
-                    st.warning("⚠️ 내역서에서 계층 구조를 찾을 수 없습니다.")
+                    st.session_state["total_work_days"] = int(max_days)
                     
         except Exception as e:
             st.error(f"파싱 실패: {e}")
             import traceback
             st.code(traceback.format_exc())
     else:
-        st.info("도급(사급) 설계내역서 엑셀을 업로드해주세요.")
+        st.info("도급 설계내역서 엑셀을 업로드해주세요.")
 
 # ══════════════════════════════════════════════════════════════
-# TAB 1: 공기산정
+# TAB 1
 # ══════════════════════════════════════════════════════════════
 with tab1:
     st.subheader("공기산정")
-    st.info("TAB 2에서 엑셀을 업로드하면 자동으로 공기가 계산됩니다.")
-    
     if "work_result" in st.session_state:
-        st.success("✅ TAB 2에서 계산된 결과가 있습니다!")
+        st.success("✅ TAB 2에서 계산 완료!")
         st.metric("총 순작업일수", f"{st.session_state.get('total_work_days', 0)}일")
     else:
         st.warning("TAB 2에서 엑셀을 먼저 업로드해주세요.")
 
 # ══════════════════════════════════════════════════════════════
-# TAB 3: CP 분석
+# TAB 3
 # ══════════════════════════════════════════════════════════════
 with tab3:
     st.subheader("주요공종 CP 분석")
-
     work_result = st.session_state.get("work_result")
-
     if work_result:
         result_rows = work_result["rows"]
         df_cp = pd.DataFrame(result_rows)
         df_cp = df_cp[df_cp["작업일수(일)"] > 0].copy()
         df_cp = df_cp.sort_values("작업일수(일)", ascending=False).reset_index(drop=True)
         df_cp.index += 1
-
         max_days = df_cp["작업일수(일)"].max() if len(df_cp) > 0 else 0
 
         def hl_cp(row):
@@ -693,41 +574,23 @@ with tab3:
                 return ["background-color:#3d0000;color:#ff6b6b"] * len(row)
             return [""] * len(row)
 
-        st.markdown("#### 작업일수 기준 CP 순위")
-        st.dataframe(
-            df_cp[["공종","물량","단위","1일작업량","투입조수","작업일수(일)","계산방식"]].style.apply(hl_cp, axis=1),
-            hide_index=False,
-            use_container_width=True
-        )
-
-        st.markdown("---")
-        st.markdown("#### 공종별 작업일수 시각화")
+        st.dataframe(df_cp.style.apply(hl_cp, axis=1), hide_index=False, use_container_width=True)
         
-        fig_bar = px.bar(
-            df_cp, x="작업일수(일)", y="공종",
-            orientation="h", text="작업일수(일)",
-            color="작업일수(일)",
-            color_continuous_scale=["#27AE60","#F39C12","#E74C3C"],
-        )
-        fig_bar.update_layout(height=350, showlegend=False,
-                              yaxis=dict(autorange="reversed"),
-                              margin=dict(l=10,r=10,t=20,b=10))
-        fig_bar.update_traces(textposition="outside")
+        fig_bar = px.bar(df_cp, x="작업일수(일)", y="공종", orientation="h", text="작업일수(일)",
+                         color="작업일수(일)", color_continuous_scale=["#27AE60","#F39C12","#E74C3C"])
+        fig_bar.update_layout(height=350, showlegend=False, yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig_bar, use_container_width=True)
     else:
         st.warning("TAB 2에서 엑셀을 먼저 업로드해주세요.")
 
 # ══════════════════════════════════════════════════════════════
-# TAB 4: 비작업일수 계산기
+# TAB 4
 # ══════════════════════════════════════════════════════════════
 with tab4:
     st.subheader("비작업일수 계산기")
-    
     col_a, col_b = st.columns(2)
-    
     with col_a:
         start_date = st.date_input("착공일", datetime.now().date())
-    
     with col_b:
         work_days = st.number_input("순작업일수", min_value=1, max_value=3650, 
                                      value=st.session_state.get("total_work_days", 100))
@@ -736,20 +599,17 @@ with tab4:
         completion = calc_completion_date(start_date, work_days)
         total_days = (completion - start_date).days + 1
         non_work_days = total_days - work_days
-        
         st.success(f"✅ 준공일: **{completion.strftime('%Y년 %m월 %d일')}**")
-        
         col1, col2, col3 = st.columns(3)
         col1.metric("총 공사기간", f"{total_days}일")
         col2.metric("순작업일수", f"{work_days}일")
         col3.metric("비작업일수", f"{non_work_days}일")
 
 # ══════════════════════════════════════════════════════════════
-# TAB 5: 보고서 생성
+# TAB 5
 # ══════════════════════════════════════════════════════════════
 with tab5:
     st.subheader("공기산정 보고서")
-    
     if "work_result" not in st.session_state:
         st.warning("TAB 2에서 엑셀을 먼저 업로드해주세요.")
     else:

@@ -449,38 +449,218 @@ with tab3:
     st.subheader("🔍 주요공종 CP 분석")
     st.info("🚧 준비중입니다")
 
-# ============================================================================
-# TAB 4: 비작업일수
-# ============================================================================
+# ============================================
+# TAB 4: 비작업일수 계산기
+# ============================================
 with tab4:
-    st.subheader("🌧 비작업일수 계산기")
+    st.header("☂️ 비작업일수 계산기")
     
+    st.markdown("""
+    공사 기간 중 기후 조건에 따른 비작업일수를 계산합니다.
+    - **강우일**: 일 강수량 기준 작업 불가일
+    - **한랭일**: 일 최저기온 -10°C 이하
+    - **폭염일**: 일 최고기온 33°C 이상
+    """)
+    
+    # 기본 설정
     col1, col2 = st.columns(2)
     
     with col1:
-        start_date = st.date_input("공사 시작일", datetime.now())
+        calc_start_date = st.date_input(
+            "공사 시작일",
+            value=datetime(2026, 12, 25),
+            help="공사가 시작되는 날짜를 선택하세요"
+        )
     
     with col2:
-        region = st.selectbox("지역 선택", REGIONS if REGIONS else ["서울"])
+        calc_region = st.selectbox(
+            "지역 선택",
+            options=list(REGION_MAPPING.keys()),
+            index=0,
+            help="공사 지역을 선택하세요"
+        )
     
-    work_days = st.number_input("순공기(작업일수)", min_value=1, value=100, step=1)
+    work_days_input = st.number_input(
+        "순공기(작업일수)",
+        min_value=1,
+        max_value=10000,
+        value=1200,
+        step=10,
+        help="실제 작업이 필요한 일수를 입력하세요"
+    )
     
-    if st.button("비작업일수 계산"):
-        end_date = start_date + timedelta(days=work_days)
-        
-        non_work_days = get_total_non_work_days(region, start_date, end_date) if callable(get_total_non_work_days) else 0
-        
-        total_days = work_days + non_work_days
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("순공기", f"{work_days}일")
-        with col2:
-            st.metric("비작업일수", f"{int(non_work_days)}일")
-        with col3:
-            st.metric("총 공기", f"{int(total_days)}일")
-        
-        st.success(f"📅 예상 준공일: {end_date.strftime('%Y년 %m월 %d일')}")
+    # ✅ 기후 조건 체크박스 추가
+    st.subheader("🌦️ 기후 조건 선택")
+    st.caption("제외할 기후 조건을 선택하세요")
+    
+    col_a, col_b, col_c = st.columns(3)
+    
+    with col_a:
+        check_rain = st.checkbox(
+            "💧 강우일 제외", 
+            value=True,
+            help="강수량 기준 작업 불가일을 포함합니다"
+        )
+    
+    with col_b:
+        check_cold = st.checkbox(
+            "❄️ 한랭일 제외", 
+            value=True,
+            help="일 최저기온 -10°C 이하인 날을 포함합니다"
+        )
+    
+    with col_c:
+        check_hot = st.checkbox(
+            "🌡️ 폭염일 제외", 
+            value=True,
+            help="일 최고기온 33°C 이상인 날을 포함합니다"
+        )
+    
+    st.divider()
+    
+    # 계산 버튼
+    if st.button("🔢 비작업일수 계산", type="primary", use_container_width=True):
+        try:
+            # 종료일 계산
+            calc_end_date = calc_start_date + timedelta(days=work_days_input)
+            
+            # 비작업일수 계산 (체크박스 값 전달)
+            non_work_days = get_total_non_work_days(
+                calc_region, 
+                calc_start_date, 
+                calc_end_date,
+                check_rain=check_rain,
+                check_cold=check_cold,
+                check_hot=check_hot
+            )
+            
+            # 실제 총공기
+            total_days = work_days_input + non_work_days
+            actual_end_date = calc_start_date + timedelta(days=total_days)
+            
+            # 결과 표시
+            st.success(f"✅ 계산 완료!")
+            
+            # 메트릭 표시
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            
+            with metric_col1:
+                st.metric(
+                    label="순공기",
+                    value=f"{work_days_input:,}일",
+                    help="실제 작업일수"
+                )
+            
+            with metric_col2:
+                st.metric(
+                    label="비작업일수",
+                    value=f"{non_work_days:,}일",
+                    delta=f"{(non_work_days/work_days_input*100):.1f}%",
+                    help="기후 조건으로 인한 작업 불가일"
+                )
+            
+            with metric_col3:
+                st.metric(
+                    label="총 공기",
+                    value=f"{total_days:,}일",
+                    help="순공기 + 비작업일수"
+                )
+            
+            with metric_col4:
+                st.metric(
+                    label="예상 완공일",
+                    value=actual_end_date.strftime('%y.%m.%d'),
+                    help="공사 종료 예정일"
+                )
+            
+            # 상세 정보
+            st.info(f"""
+            📅 **공사 기간**: {calc_start_date.strftime('%Y년 %m월 %d일')} ~ {actual_end_date.strftime('%Y년 %m월 %d일')}  
+            📍 **지역**: {calc_region}  
+            🌦️ **적용 조건**: {'강우일' if check_rain else ''} {'한랭일' if check_cold else ''} {'폭염일' if check_hot else ''}
+            """)
+            
+            # 월별 상세 내역
+            st.subheader("📊 월별 비작업일수 상세")
+            
+            monthly_data = get_monthly_breakdown(
+                calc_region,
+                calc_start_date,
+                calc_end_date,
+                check_rain=check_rain,
+                check_cold=check_cold,
+                check_hot=check_hot
+            )
+            
+            if monthly_data:
+                # 데이터프레임 생성
+                import pandas as pd
+                df_monthly = pd.DataFrame(monthly_data)
+                df_monthly.columns = ["월", "강우일", "한랭일", "폭염일", "합계"]
+                
+                # 표 표시
+                st.dataframe(
+                    df_monthly,
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # 차트 표시
+                import plotly.graph_objects as go
+                
+                fig = go.Figure()
+                
+                if check_rain:
+                    fig.add_trace(go.Bar(
+                        name='강우일',
+                        x=df_monthly['월'],
+                        y=df_monthly['강우일'],
+                        marker_color='#4A90E2'
+                    ))
+                
+                if check_cold:
+                    fig.add_trace(go.Bar(
+                        name='한랭일',
+                        x=df_monthly['월'],
+                        y=df_monthly['한랭일'],
+                        marker_color='#5BC0DE'
+                    ))
+                
+                if check_hot:
+                    fig.add_trace(go.Bar(
+                        name='폭염일',
+                        x=df_monthly['월'],
+                        y=df_monthly['폭염일'],
+                        marker_color='#F0AD4E'
+                    ))
+                
+                fig.update_layout(
+                    title='월별 비작업일수',
+                    xaxis_title='월',
+                    yaxis_title='일수',
+                    barmode='stack',
+                    height=400,
+                    hovermode='x unified'
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            
+        except Exception as e:
+            st.error(f"❌ 계산 중 오류 발생")
+            st.error(f"오류 내용: {str(e)}")
+            st.info("날짜와 지역을 다시 확인해주세요.")
+            
+            # 디버그 정보
+            with st.expander("🐛 디버그 정보"):
+                st.code(f"""
+시작일: {calc_start_date}
+지역: {calc_region}
+순공기: {work_days_input}
+강우일 체크: {check_rain}
+한랭일 체크: {check_cold}
+폭염일 체크: {check_hot}
+에러: {str(e)}
+                """)
 
 # ============================================================================
 # TAB 5: 보고서

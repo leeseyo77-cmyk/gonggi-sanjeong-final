@@ -13,12 +13,30 @@ st.set_page_config(page_title="상하수도 공기산정", layout="wide", initia
 # ============================================================================
 try:
     from guideline_data import PAVEMENT
-    from weather_data import REGION_MAPPING, get_total_non_work_days, get_monthly_breakdown
-    MODULES_LOADED = True
+    GUIDELINE_LOADED = True
 except ImportError as e:
-    st.error(f"⚠️ 필수 모듈 로드 실패: {e}")
-    st.error("weather_data.py와 guideline_data.py 파일을 확인해주세요.")
-    MODULES_LOADED = False
+    st.warning(f"⚠️ guideline_data.py: {e}")
+    PAVEMENT = {}
+    GUIDELINE_LOADED = False
+
+try:
+    from weather_data import REGION_MAPPING, get_total_non_work_days, get_monthly_breakdown
+    WEATHER_LOADED = True
+except ImportError as e:
+    st.warning(f"⚠️ weather_data.py: {e}")
+    REGION_MAPPING = {
+        "서울": "서울", "경기": "경기", "인천": "인천", "강원": "강원",
+        "충북": "충북", "충남": "충남", "대전": "대전", "세종": "세종",
+        "전북": "전북", "전남": "전남", "광주": "광주", "경북": "경북",
+        "경남": "경남", "대구": "대구", "울산": "울산", "부산": "부산", "제주": "제주"
+    }
+    def get_total_non_work_days(*args, **kwargs):
+        return 0
+    def get_monthly_breakdown(*args, **kwargs):
+        return []
+    WEATHER_LOADED = False
+
+MODULES_LOADED = GUIDELINE_LOADED and WEATHER_LOADED
 
 # ============================================================================
 # 상수 정의
@@ -50,18 +68,41 @@ DEFAULT_LABOR = {
 # 유틸리티 함수
 # ============================================================================
 
-def extract_district_roman(text):
+def extract_district_roman(num_val, name_val):
     """
-    텍스트에서 로마숫자 지구 번호 추출
-    예: "Ⅰ. 제1지구" → "Ⅰ"
-    """
-    if not isinstance(text, str):
-        return None
+    A열(번호)과 B열(공종명)에서 로마숫자 지구 추출
     
-    roman_pattern = r'^([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+)\.'
-    match = re.match(roman_pattern, text.strip())
-    if match:
-        return match.group(1)
+    패턴 1: A열에 "I", "II", "III" 등 (영문 로마숫자)
+    패턴 2: A열에 "Ⅰ", "Ⅱ", "Ⅲ" 등 (유니코드 로마숫자)
+    패턴 3: B열에 "Ⅰ. 제1지구" 형식
+    
+    Returns: "Ⅰ", "Ⅱ", "Ⅲ" 등 (유니코드로 통일)
+    """
+    # 영문 → 유니코드 로마숫자 변환
+    ROMAN_MAP = {
+        "I": "Ⅰ", "II": "Ⅱ", "III": "Ⅲ", "IV": "Ⅳ", "V": "Ⅴ",
+        "VI": "Ⅵ", "VII": "Ⅶ", "VIII": "Ⅷ", "IX": "Ⅸ", "X": "Ⅹ"
+    }
+    
+    # 패턴 1: A열에서 영문 로마숫자
+    if isinstance(num_val, str):
+        num_clean = num_val.strip().upper()
+        if num_clean in ROMAN_MAP:
+            return ROMAN_MAP[num_clean]
+    
+    # 패턴 2: A열에서 유니코드 로마숫자
+    if isinstance(num_val, str):
+        num_clean = num_val.strip()
+        if num_clean in ["Ⅰ", "Ⅱ", "Ⅲ", "Ⅳ", "Ⅴ", "Ⅵ", "Ⅶ", "Ⅷ", "Ⅸ", "Ⅹ"]:
+            return num_clean
+    
+    # 패턴 3: B열에서 "Ⅰ. 제1지구" 패턴
+    if isinstance(name_val, str):
+        roman_pattern = r'^([ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+)\.'
+        match = re.match(roman_pattern, name_val.strip())
+        if match:
+            return match.group(1)
+    
     return None
 
 
@@ -137,8 +178,8 @@ def parse_excel_tree(file_path):
         if not name_val:
             continue
         
-        # 로마숫자 지구 감지
-        district_roman = extract_district_roman(str(name_val))
+        # 로마숫자 지구 감지 (A열과 B열 모두 확인)
+        district_roman = extract_district_roman(num_val, name_val)
         if district_roman:
             # 새 지구 시작
             if current_district and current_tree:
@@ -268,18 +309,74 @@ def render_tree(tree, depth=0, labor_dict=None):
         indent = "　" * depth
         number = node["number"]
         name = node["name"]
+        spec = node.get("spec", "")
+        unit = node.get("unit", "")
+        quantity = node.get("quantity", 0)
+        daily_work = node.get("daily_work", 0)
         work_days = node["work_days"]
         work_type = node["work_type"]
         valid = node["valid"]
         
-        # 유효하지 않은 항목은 회색으로
+        # 상세 정보 구성
+        details = []
+        if spec:
+            details.append(f"규격: {spec}")
+        if unit:
+            details.append(f"단위: {unit}")
+        if quantity:
+            try:
+                qty_num = float(quantity)
+                details.append(f"수량: {qty_num:,.0f}")
+            except (ValueError, TypeError):
+                details.append(f"수량: {quantity}")
+        if daily_work:
+            try:
+                daily_num = float(daily_work)
+                details.append(f"일일작업량: {daily_num:,.1f}")
+            except (ValueError, TypeError):
+                details.append(f"일일작업량: {daily_work}")
+        
+        detail_str = " | ".join(details) if details else ""
+        
+        # 유효하지 않은 항목 (daily < 1 또는 quantity <= 0)
         if not valid:
-            st.markdown(f"{indent}`{number}` {name} <span style='color:gray'>({work_days}일 - 제외됨)</span>", unsafe_allow_html=True)
+            if detail_str:
+                st.markdown(
+                    f"{indent}`{number}` {name} <span style='color:gray'>({detail_str}) - 제외됨</span>", 
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    f"{indent}`{number}` {name} <span style='color:gray'>(데이터 없음)</span>", 
+                    unsafe_allow_html=True
+                )
         else:
+            # 유효한 항목
             labor = labor_dict.get(work_type, DEFAULT_LABOR.get(work_type, 5))
             adjusted_days = work_days / labor if labor > 0 else work_days
-            st.markdown(f"{indent}**{number}** {name} ({work_days}일 → {adjusted_days:.1f}일, 투입: {labor}조)")
+            
+            # 공종 배지
+            type_badge = {
+                "토공": "🟤",
+                "관로공": "🔵",
+                "구조물공": "🟢",
+                "포장공": "🟡",
+                "부대공": "🟠",
+                "기타": "⚪"
+            }.get(work_type, "⚪")
+            
+            if detail_str:
+                st.markdown(
+                    f"{indent}**{number}** {name} {type_badge} | {detail_str} | **{work_days}일 → {adjusted_days:.1f}일** (투입: {labor}조)",
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    f"{indent}**{number}** {name} {type_badge} | **{work_days}일 → {adjusted_days:.1f}일** (투입: {labor}조)",
+                    unsafe_allow_html=True
+                )
         
+        # 하위 항목 재귀 렌더링
         if node["children"]:
             render_tree(node["children"], depth + 1, labor_dict)
 
@@ -311,7 +408,13 @@ def main():
     
     # 파일 저장 및 파싱
     try:
-        file_path = f"/tmp/{uploaded_file.name}"
+        import tempfile
+        import os
+        
+        # Windows/Linux 호환 임시 디렉토리 사용
+        temp_dir = tempfile.gettempdir()
+        file_path = os.path.join(temp_dir, uploaded_file.name)
+        
         with open(file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
@@ -319,6 +422,35 @@ def main():
         
         if not districts_data:
             st.error("❌ 지구 정보를 찾을 수 없습니다. 엑셀 형식을 확인해주세요.")
+            
+            # 디버그: 엑셀 내용 미리보기
+            st.subheader("🔍 디버그 정보")
+            
+            try:
+                wb = openpyxl.load_workbook(file_path, data_only=True)
+                ws = wb.active
+                
+                st.write("**엑셀 첫 20줄:**")
+                preview_data = []
+                for idx, row in enumerate(ws.iter_rows(min_row=1, max_row=20, values_only=True), 1):
+                    if any(cell is not None for cell in row):
+                        preview_data.append({
+                            "줄": idx,
+                            "A(번호)": row[0],
+                            "B(공종명)": row[1],
+                            "C(규격)": row[2] if len(row) > 2 else None,
+                            "D(단위)": row[3] if len(row) > 3 else None,
+                        })
+                
+                df_preview = pd.DataFrame(preview_data)
+                st.dataframe(df_preview, use_container_width=True)
+                
+                st.info("💡 **로마숫자 지구 표기 확인:**\n- 'Ⅰ. 제1지구' 형식으로 되어있나요?\n- B열(공종명)에 로마숫자가 있나요?")
+                
+                wb.close()
+            except Exception as e:
+                st.error(f"미리보기 실패: {e}")
+            
             return
         
         st.success(f"✅ {len(districts_data)}개 지구 파싱 완료!")
@@ -428,8 +560,193 @@ def main():
         
         st.subheader(f"{tab_district}. {district_data['name']}")
         
-        # 트리 표시
-        render_tree(district_data["tree"], labor_dict=district_data["labor"])
+        # 표시 형식 선택
+        view_mode = st.radio(
+            "표시 형식",
+            options=["테이블", "트리"],
+            horizontal=True,
+            help="테이블: 데이터 그리드 형식 | 트리: 계층 구조 형식"
+        )
+        
+        if view_mode == "테이블":
+            # 계층별 확장 가능한 테이블
+            
+            def render_node_table(node, depth=0):
+                """
+                노드를 확장 가능한 테이블 형태로 렌더링
+                """
+                work_type = node["work_type"]
+                labor = district_data["labor"].get(work_type, DEFAULT_LABOR.get(work_type, 5))
+                
+                # 숫자 안전 변환
+                try:
+                    work_days_num = float(node["work_days"]) if node["work_days"] else 0
+                except:
+                    work_days_num = 0
+                
+                try:
+                    quantity = float(node.get("quantity", 0)) if node.get("quantity") else 0
+                except:
+                    quantity = 0
+                
+                try:
+                    daily_work = float(node.get("daily_work", 0)) if node.get("daily_work") else 0
+                except:
+                    daily_work = 0
+                
+                adjusted_days = work_days_num / labor if labor > 0 and work_days_num > 0 else work_days_num
+                
+                # 공종 배지
+                type_badge = {
+                    "토공": "🟤",
+                    "관로공": "🔵",
+                    "구조물공": "🟢",
+                    "포장공": "🟡",
+                    "부대공": "🟠",
+                    "기타": "⚪"
+                }.get(work_type, "⚪")
+                
+                # 노드 정보
+                has_children = len(node["children"]) > 0
+                
+                # Expander 또는 일반 표시
+                if has_children:
+                    # 하위 항목이 있으면 확장 가능
+                    with st.expander(
+                        f"{type_badge} **{node['number']}** {node['name']} — {work_days_num:.0f}일 → {adjusted_days:.1f}일",
+                        expanded=False
+                    ):
+                        # 현재 노드 상세 정보
+                        info_cols = st.columns([1, 1, 1, 1])
+                        with info_cols[0]:
+                            st.caption("**규격**")
+                            st.text(node.get("spec", "-") or "-")
+                        with info_cols[1]:
+                            st.caption("**수량**")
+                            st.text(f"{quantity:,.0f} {node.get('unit', '')}" if quantity > 0 else "-")
+                        with info_cols[2]:
+                            st.caption("**일일작업량**")
+                            st.text(f"{daily_work:,.1f}" if daily_work > 0 else "-")
+                        with info_cols[3]:
+                            st.caption("**투입조수**")
+                            st.text(f"{labor}조")
+                        
+                        st.divider()
+                        
+                        # 하위 항목 테이블
+                        children_data = []
+                        for child in node["children"]:
+                            child_work_type = child["work_type"]
+                            child_labor = district_data["labor"].get(child_work_type, DEFAULT_LABOR.get(child_work_type, 5))
+                            
+                            try:
+                                child_work_days = float(child["work_days"]) if child["work_days"] else 0
+                            except:
+                                child_work_days = 0
+                            
+                            try:
+                                child_qty = float(child.get("quantity", 0)) if child.get("quantity") else 0
+                            except:
+                                child_qty = 0
+                            
+                            try:
+                                child_daily = float(child.get("daily_work", 0)) if child.get("daily_work") else 0
+                            except:
+                                child_daily = 0
+                            
+                            child_adjusted = child_work_days / child_labor if child_labor > 0 and child_work_days > 0 else child_work_days
+                            
+                            children_data.append({
+                                "번호": child["number"],
+                                "공종명": child["name"],
+                                "규격": child.get("spec", "") or "",
+                                "단위": child.get("unit", "") or "",
+                                "수량": child_qty,
+                                "일일작업량": child_daily,
+                                "원공기": child_work_days,
+                                "투입조수": child_labor,
+                                "조정공기": round(child_adjusted, 1),
+                                "공종": child_work_type,
+                                "하위": "📁" if len(child["children"]) > 0 else ""
+                            })
+                        
+                        if children_data:
+                            df_children = pd.DataFrame(children_data)
+                            st.dataframe(
+                                df_children,
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    "번호": st.column_config.TextColumn("번호", width="small"),
+                                    "공종명": st.column_config.TextColumn("공종명", width="medium"),
+                                    "규격": st.column_config.TextColumn("규격", width="small"),
+                                    "단위": st.column_config.TextColumn("단위", width="small"),
+                                    "수량": st.column_config.NumberColumn("수량", format="%.0f"),
+                                    "일일작업량": st.column_config.NumberColumn("일일작업량", format="%.1f"),
+                                    "원공기": st.column_config.NumberColumn("원공기", format="%.0f"),
+                                    "투입조수": st.column_config.NumberColumn("투입조수", format="%d조"),
+                                    "조정공기": st.column_config.NumberColumn("조정공기", format="%.1f"),
+                                    "공종": st.column_config.TextColumn("공종", width="small"),
+                                    "하위": st.column_config.TextColumn("하위", width="small"),
+                                }
+                            )
+                        
+                        # 하위 항목 재귀 렌더링
+                        for child in node["children"]:
+                            if len(child["children"]) > 0:
+                                render_node_table(child, depth + 1)
+                else:
+                    # 하위 항목 없으면 일반 표시
+                    indent = "　" * depth
+                    detail_parts = []
+                    if node.get("spec"):
+                        detail_parts.append(f"규격: {node['spec']}")
+                    if quantity > 0:
+                        detail_parts.append(f"수량: {quantity:,.0f} {node.get('unit', '')}")
+                    if daily_work > 0:
+                        detail_parts.append(f"일일작업량: {daily_work:,.1f}")
+                    
+                    detail_str = " | ".join(detail_parts) if detail_parts else ""
+                    
+                    st.markdown(
+                        f"{indent}{type_badge} **{node['number']}** {node['name']} — "
+                        f"{detail_str} — **{work_days_num:.0f}일 → {adjusted_days:.1f}일** (투입: {labor}조)"
+                    )
+            
+            # 루트 노드들 렌더링
+            for root_node in district_data["tree"]:
+                render_node_table(root_node)
+            
+            # 전체 요약
+            st.divider()
+            st.subheader("📊 전체 요약")
+            
+            # 전체 데이터 수집
+            all_items = []
+            def collect_all(nodes):
+                for node in nodes:
+                    try:
+                        wd = float(node["work_days"]) if node["work_days"] else 0
+                    except:
+                        wd = 0
+                    all_items.append(wd)
+                    if node["children"]:
+                        collect_all(node["children"])
+            
+            collect_all(district_data["tree"])
+            
+            summary_cols = st.columns(3)
+            with summary_cols[0]:
+                st.metric("총 항목 수", f"{len(all_items)}개")
+            with summary_cols[1]:
+                st.metric("총 원공기", f"{sum(all_items):.0f}일")
+            with summary_cols[2]:
+                total_adjusted = calculate_total_days(district_data["tree"], district_data["labor"])
+                st.metric("총 조정공기", f"{total_adjusted}일")
+        
+        else:
+            # 트리 형식
+            render_tree(district_data["tree"], labor_dict=district_data["labor"])
     
     # ========================================================================
     # TAB 3: 종합 요약

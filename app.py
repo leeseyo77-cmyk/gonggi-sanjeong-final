@@ -58,6 +58,14 @@ GUIDELINE_APPENDIX = {
     "아스팔트포장깨기 (B.H0.7㎥)": {"daily": 1047, "unit": "㎡"},
     "콘크리트포장 절단": {"daily": 500, "unit": "m"},
     "콘크리트포장 깨기": {"daily": 300, "unit": "㎡"},
+    "아스팔트포장(기층)": {"daily": 800, "unit": "㎡"},
+    "아스팔트포장(택코팅)": {"daily": 2000, "unit": "㎡"},
+    "아스팔트포장(프라임코팅)": {"daily": 2000, "unit": "㎡"},
+    "아스팔트포장(표층)": {"daily": 1000, "unit": "㎡"},
+    "택코팅": {"daily": 2000, "unit": "㎡"},
+    "프라임코팅": {"daily": 2000, "unit": "㎡"},
+    "기층": {"daily": 800, "unit": "㎡"},
+    "표층": {"daily": 1000, "unit": "㎡"},
     
     # 터파기
     "터파기(토사:육상) B/H 0.4㎥": {"daily": 260, "unit": "㎥"},
@@ -65,10 +73,13 @@ GUIDELINE_APPENDIX = {
     "터파기(암:육상) B/H 0.4㎥": {"daily": 130, "unit": "㎥"},
     "터파기(암:육상) B/H 0.7㎥": {"daily": 265, "unit": "㎥"},
     
-    # 되메우기
+    # 되메우기 (폭별 추가)
     "되메우기(진동롤러) 2.5ton": {"daily": 600, "unit": "㎥"},
     "되메우기(진동롤러) 4.0ton": {"daily": 950, "unit": "㎥"},
     "되메우기(진동콤팩터)": {"daily": 400, "unit": "㎥"},
+    "되메우기(B=1.5~2.5m)": {"daily": 450, "unit": "㎥"},
+    "되메우기(B=2.5~4.0m)": {"daily": 650, "unit": "㎥"},
+    "되메우기(B=4.0m이상)": {"daily": 850, "unit": "㎥"},
     
     # 관부설
     "관부설(D200)": {"daily": 5, "unit": "본/일"},
@@ -79,19 +90,32 @@ GUIDELINE_APPENDIX = {
     "관부설(D1000)": {"daily": 1.5, "unit": "본/일"},
     "관부설(D1200)": {"daily": 1.2, "unit": "본/일"},
     
-    # 맨홀공
+    # 맨홀공 (대폭 확장)
     "원형맨홀 Φ1200": {"daily": 2.5, "unit": "개소/일"},
     "원형맨홀 Φ1500": {"daily": 2.5, "unit": "개소/일"},
     "각형맨홀 1800×2400": {"daily": 1.5, "unit": "개소/일"},
     "우수받이": {"daily": 5, "unit": "개소/일"},
     "조립식 PC맨홀": {"daily": 3, "unit": "개소/일"},
     "GRP맨홀": {"daily": 2, "unit": "개소/일"},
+    "조립식맨홀설치(소형)": {"daily": 8, "unit": "개소/일"},
+    "조립식맨홀 상부구체": {"daily": 10, "unit": "개소/일"},
+    "조립식맨홀 연직구체": {"daily": 12, "unit": "개소/일"},
+    "조립식맨홀 하부구체": {"daily": 8, "unit": "개소/일"},
+    "맨홀뚜껑설치": {"daily": 20, "unit": "개소/일"},
+    "맨홀뚜껑": {"daily": 20, "unit": "개소/일"},
     
     # 배수설비
     "빗물받이": {"daily": 5, "unit": "개소/일"},
     "집수받이": {"daily": 4, "unit": "개소/일"},
     "우수토실": {"daily": 3, "unit": "개소/일"},
     "배수설비": {"daily": 4, "unit": "개소/일"},
+    
+    # 추진공
+    "추진설비공": {"daily": 1, "unit": "개소/일"},
+    "사토": {"daily": 100, "unit": "㎥/일"},
+    "추진마감벽설치": {"daily": 3, "unit": "개소/일"},
+    "추진마감벽": {"daily": 3, "unit": "개소/일"},
+    "천공홀 되메우기": {"daily": 500, "unit": "m"},
     
     # 가시설공
     "조립식 간이 흙막이": {"daily": 50, "unit": "㎡/일"},
@@ -164,29 +188,38 @@ def calc_days_priority(name, spec, qty, crews=3):
         # GUIDELINE_APPENDIX_FULL 우선 사용 (확장판)
         guideline_data = GUIDELINE_APPENDIX_FULL if GUIDELINE_APPENDIX_FULL else GUIDELINE_APPENDIX
         
-        # 띄어쓰기 제거한 버전도 준비 (매칭 향상)
-        full_name_no_space = full_name.replace(" ", "")
-        name_no_space = name.replace(" ", "")
+        # 띄어쓰기 제거 및 괄호 제거한 버전 준비
+        full_name_no_space = full_name.replace(" ", "").replace("(", "").replace(")", "")
+        name_no_space = name.replace(" ", "").replace("(", "").replace(")", "")
         
         for key, val in guideline_data.items():
             matched = False
-            key_no_space = key.replace(" ", "")
+            key_no_space = key.replace(" ", "").replace("(", "").replace(")", "")
             
             # 매칭 조건 (우선순위)
-            # 1. 정확한 전체 매칭 (띄어쓰기 무시)
+            # 1. 정확한 전체 매칭 (띄어쓰기/괄호 무시)
             if key_no_space == full_name_no_space or key_no_space == name_no_space:
                 matched = True
             
-            # 2. 가이드라인 키가 항목명에 포함 (띄어쓰기 무시)
+            # 2. 가이드라인 키가 항목명에 포함 (띄어쓰기/괄호 무시)
             elif key_no_space in full_name_no_space or key_no_space in name_no_space:
                 matched = True
             
-            # 3. 항목명이 가이드라인 키에 포함 (띄어쓰기 무시)
+            # 3. 항목명이 가이드라인 키에 포함 (띄어쓰기/괄호 무시)
             elif name_no_space in key_no_space:
                 matched = True
             
             # 4. 원본 문자열 매칭 (띄어쓰기 있는 버전)
             elif key == full_name or key == name or key in full_name or key in name:
+                matched = True
+            
+            # 5. 핵심 키워드 매칭 (특수 케이스)
+            # "조립식맨홀설치" → "조립식맨홀" 매칭
+            elif "조립식맨홀" in key and "조립식맨홀" in name:
+                matched = True
+            elif "맨홀뚜껑" in key and "맨홀뚜껑" in name:
+                matched = True
+            elif "추진" in key and "추진" in name and len(key) > 2:
                 matched = True
             
             if matched:

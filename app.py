@@ -744,11 +744,48 @@ with tab2:
                         return tuple(int(p) for p in parts)
                     
                     result_rows_sorted = sorted(result_rows, key=sort_key)
-                    max_days = max((r["작업일수(일)"] for r in result_rows_sorted), default=0)
+                    
+                    # ═══════════════════════════════════════════════════════
+                    # 같은 공종명끼리 합산 (토공 + 토공 → 토공)
+                    # ═══════════════════════════════════════════════════════
+                    merged_rows = {}
+                    for row in result_rows_sorted:
+                        # 공종명 추출 (번호 제거: "1.1.1 토공" → "토공")
+                        cat_name = row['공종'].split()[-1] if len(row['공종'].split()) > 1 else row['공종']
+                        
+                        if cat_name not in merged_rows:
+                            merged_rows[cat_name] = {
+                                "level": row['level'],
+                                "공종": cat_name,
+                                "물량": 0,
+                                "투입조수": row['투입조수'],
+                                "작업일수(일)": 0,
+                                "세부항목": [],
+                                "하위카테고리": [],
+                                "crew": row['crew'],
+                                "major_key": row['major_key'],
+                                "원본_공종들": []
+                            }
+                        
+                        # 합산
+                        merged_rows[cat_name]["작업일수(일)"] += row["작업일수(일)"]
+                        merged_rows[cat_name]["세부항목"].extend(row["세부항목"])
+                        merged_rows[cat_name]["하위카테고리"].extend(row["하위카테고리"])
+                        merged_rows[cat_name]["원본_공종들"].append(row['공종'])
+                    
+                    # 물량 정보 업데이트
+                    for cat_name, row in merged_rows.items():
+                        total_items = len(row["세부항목"])
+                        row["물량"] = f"{total_items}개 항목"
+                        if len(row["원본_공종들"]) > 1:
+                            row["공종"] = f"{cat_name} (통합)"
+                    
+                    result_rows_merged = list(merged_rows.values())
+                    max_days = max((r["작업일수(일)"] for r in result_rows_merged), default=0)
                     
                     # 그룹별로 표시
                     grouped_results = {}
-                    for row in result_rows_sorted:
+                    for row in result_rows_merged:
                         major_key = row['major_key']
                         if major_key not in grouped_results:
                             grouped_results[major_key] = []
@@ -842,11 +879,11 @@ with tab2:
                     
                     ca, cb = st.columns(2)
                     ca.metric("🔴 주공정 (최장)", f"{max_days}일")
-                    cb.metric("총 공종", f"{len(result_rows_sorted)}개")
+                    cb.metric("총 공종", f"{len(result_rows_merged)}개")
                     
                     # session_state 저장
                     st.session_state["work_result"] = {
-                        "rows": result_rows_sorted,
+                        "rows": result_rows_merged,
                         "hierarchy": hierarchy,
                         "crew_settings": crew_settings,
                     }
@@ -943,7 +980,8 @@ with tab2:
                                     "단위": item.get("unit", ""),
                                     "일당": label,
                                     "조수": crew,
-                                    "일수": int(days)
+                                    "일수": int(days),
+                                    "출처": method
                                 })
                             
                             if display_items:
@@ -961,6 +999,7 @@ with tab2:
                                         "일당": st.column_config.TextColumn("일당", width="medium"),
                                         "조수": st.column_config.NumberColumn("조수", width="small"),
                                         "일수": st.column_config.NumberColumn("일수", width="small"),
+                                        "출처": st.column_config.TextColumn("출처", width="medium"),
                                     }
                                 )
                                 

@@ -1253,44 +1253,142 @@ with tab5:
                 ws_calc[f'A{total_row+2}'].font = Font(bold=True, color="C00000")
                 
                 # ═══════════════════════════════════════════════════════
-                # Sheet 3: 부록1. 작업일수 산정 (TAB2 데이터)
+                # Sheet 3: 부록1. 작업일수 산정 (계층 구조)
                 # ═══════════════════════════════════════════════════════
-                ws_appendix = wb.create_sheet("부록1. 작업일수 산정")
+                ws_appendix = wb.create_sheet("부록1. 작업일수 산정근거")
                 
-                ws_appendix['A1'] = "◈ 부록1. 작업일수 산정"
+                ws_appendix['A1'] = "◈ 부록1. 작업일수 산정근거"
                 ws_appendix['A1'].font = Font(size=14, bold=True)
                 
-                # 지구별 데이터가 있으면 추가
-                if "districts" in st.session_state:
-                    district_data = st.session_state.get("districts", {})
+                # 헤더 행
+                headers_detail = ["공종명", "규격", "수량", "단위", "1일 작업량", "조", "작업시간(HR)", "적업일수(일)", "비 고"]
+                ws_appendix.merge_cells('A3:A3')
+                for col_idx, header in enumerate(headers_detail, 1):
+                    cell = ws_appendix.cell(row=3, column=col_idx, value=header)
+                    cell.font = Font(bold=True, size=10)
+                    cell.fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.border = Border(
+                        left=Side(style='thin'),
+                        right=Side(style='thin'),
+                        top=Side(style='thin'),
+                        bottom=Side(style='thin')
+                    )
+                
+                current_row = 4
+                
+                # hierarchy 데이터로 계층 구조 생성
+                hierarchy = work_result.get("hierarchy", [])
+                crew_settings = work_result.get("crew_settings", {})
+                
+                # 전체 합계 계산
+                total_all_days = sum(
+                    sum(calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), 
+                        crew_settings.get(cat['name'], 3))[0]
+                        for item in (cat.get('items', []) + 
+                                    sum([sub.get('items', []) for sub in cat.get('sub_categories', [])], [])))
+                    for cat in hierarchy
+                )
+                
+                # 지구명 (있으면)
+                district_name = "전체"
+                if hierarchy:
+                    ws_appendix.cell(row=current_row, column=1, value=f"■ {district_name}").font = Font(bold=True, size=11)
+                    ws_appendix.cell(row=current_row, column=1).fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+                    current_row += 1
+                
+                # 대분류별 처리
+                for cat_idx, cat in enumerate(hierarchy, 1):
+                    cat_name = cat['name']
+                    cat_level = cat['level']
+                    cat_crew = crew_settings.get(cat_name, 3)
                     
-                    current_row = 3
-                    for district, items in district_data.items():
-                        ws_appendix.cell(row=current_row, column=1, value=f"{district}").font = Font(bold=True, size=12)
-                        current_row += 1
-                        
-                        # 헤더
-                        headers_detail = ["공종", "규격", "물량", "단위", "일당", "조수", "일수", "출처"]
-                        for col_idx, header in enumerate(headers_detail, 1):
-                            cell = ws_appendix.cell(row=current_row, column=col_idx, value=header)
+                    # 대분류 전체 일수 계산
+                    all_cat_items = list(cat.get('items', []))
+                    for sub in cat.get('sub_categories', []):
+                        all_cat_items.extend(sub.get('items', []))
+                    
+                    cat_total_days = sum(
+                        calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), cat_crew)[0]
+                        for item in all_cat_items
+                    )
+                    
+                    # 대분류 헤더 (1. 우수관로)
+                    cell = ws_appendix.cell(row=current_row, column=1, value=f"{cat_idx}.{cat_name}")
+                    cell.font = Font(bold=True, size=11)
+                    cell.fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
+                    
+                    ws_appendix.cell(row=current_row, column=4, value="식").alignment = Alignment(horizontal='center')
+                    ws_appendix.cell(row=current_row, column=8, value=int(cat_total_days)).font = Font(bold=True)
+                    current_row += 1
+                    
+                    # 하위 카테고리 처리
+                    sub_categories = cat.get('sub_categories', [])
+                    
+                    if sub_categories:
+                        for sub_idx, sub in enumerate(sub_categories, 1):
+                            sub_name = sub['name']
+                            sub_items = sub.get('items', [])
+                            
+                            sub_total_days = sum(
+                                calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), cat_crew)[0]
+                                for item in sub_items
+                            )
+                            
+                            # 중분류 헤더 (1.1 토공)
+                            indent = "  "
+                            cell = ws_appendix.cell(row=current_row, column=1, value=f"{indent}{cat_idx}.{sub_idx} {sub_name}")
                             cell.font = Font(bold=True)
-                            cell.fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
-                        
-                        current_row += 1
-                        
-                        # 데이터
-                        for item in items[:50]:  # 최대 50개만
-                            ws_appendix.cell(row=current_row, column=1, value=item.get("공종", ""))
-                            ws_appendix.cell(row=current_row, column=2, value=item.get("규격", ""))
-                            ws_appendix.cell(row=current_row, column=3, value=item.get("물량", 0))
-                            ws_appendix.cell(row=current_row, column=4, value=item.get("단위", ""))
-                            ws_appendix.cell(row=current_row, column=5, value=item.get("일당", ""))
-                            ws_appendix.cell(row=current_row, column=6, value=item.get("조수", 3))
-                            ws_appendix.cell(row=current_row, column=7, value=item.get("일수", 0))
-                            ws_appendix.cell(row=current_row, column=8, value=item.get("출처", ""))
+                            ws_appendix.cell(row=current_row, column=8, value=int(sub_total_days)).font = Font(bold=True)
                             current_row += 1
-                        
-                        current_row += 2
+                            
+                            # 세부 항목들
+                            for item_idx, item in enumerate(sub_items, 1):
+                                days, label, method = calc_days_priority(
+                                    item['name'],
+                                    item.get('spec', ''),
+                                    item.get('qty', 0),
+                                    cat_crew
+                                )
+                                
+                                indent2 = "    "
+                                ws_appendix.cell(row=current_row, column=1, value=f"{indent2}{item_idx}) {item['name']}")
+                                ws_appendix.cell(row=current_row, column=2, value=item.get('spec', ''))
+                                ws_appendix.cell(row=current_row, column=3, value=item.get('qty', 0))
+                                ws_appendix.cell(row=current_row, column=4, value=item.get('unit', ''))
+                                ws_appendix.cell(row=current_row, column=5, value=label)
+                                ws_appendix.cell(row=current_row, column=6, value=cat_crew)
+                                ws_appendix.cell(row=current_row, column=7, value=8)  # 작업시간
+                                ws_appendix.cell(row=current_row, column=8, value=int(days))
+                                ws_appendix.cell(row=current_row, column=9, value=method)
+                                
+                                current_row += 1
+                    
+                    # 직접 항목이 있으면
+                    direct_items = cat.get('items', [])
+                    if direct_items:
+                        for item_idx, item in enumerate(direct_items, 1):
+                            days, label, method = calc_days_priority(
+                                item['name'],
+                                item.get('spec', ''),
+                                item.get('qty', 0),
+                                cat_crew
+                            )
+                            
+                            indent = "  "
+                            ws_appendix.cell(row=current_row, column=1, value=f"{indent}{item_idx}) {item['name']}")
+                            ws_appendix.cell(row=current_row, column=2, value=item.get('spec', ''))
+                            ws_appendix.cell(row=current_row, column=3, value=item.get('qty', 0))
+                            ws_appendix.cell(row=current_row, column=4, value=item.get('unit', ''))
+                            ws_appendix.cell(row=current_row, column=5, value=label)
+                            ws_appendix.cell(row=current_row, column=6, value=cat_crew)
+                            ws_appendix.cell(row=current_row, column=7, value=8)
+                            ws_appendix.cell(row=current_row, column=8, value=int(days))
+                            ws_appendix.cell(row=current_row, column=9, value=method)
+                            
+                            current_row += 1
+                    
+                    current_row += 1  # 대분류 간 여백
                 
                 # 컬럼 너비 조정
                 ws_calc.column_dimensions['A'].width = 40
@@ -1298,14 +1396,15 @@ with tab5:
                 ws_calc.column_dimensions['C'].width = 15
                 ws_calc.column_dimensions['D'].width = 15
                 
-                ws_appendix.column_dimensions['A'].width = 40
-                ws_appendix.column_dimensions['B'].width = 30
+                ws_appendix.column_dimensions['A'].width = 50
+                ws_appendix.column_dimensions['B'].width = 35
                 ws_appendix.column_dimensions['C'].width = 12
                 ws_appendix.column_dimensions['D'].width = 10
-                ws_appendix.column_dimensions['E'].width = 20
-                ws_appendix.column_dimensions['F'].width = 10
-                ws_appendix.column_dimensions['G'].width = 10
+                ws_appendix.column_dimensions['E'].width = 25
+                ws_appendix.column_dimensions['F'].width = 8
+                ws_appendix.column_dimensions['G'].width = 15
                 ws_appendix.column_dimensions['H'].width = 15
+                ws_appendix.column_dimensions['I'].width = 15
                 
                 # BytesIO로 저장
                 excel_buffer = BytesIO()

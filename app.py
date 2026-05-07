@@ -783,8 +783,12 @@ with tab2:
                     # ═══════════════════════════════════════════════════════
                     merged_rows = {}
                     for row in result_rows_sorted:
-                        # 공종명 추출 (번호 제거: "1.1.1 토공" → "토공")
-                        cat_name = row['공종'].split()[-1] if len(row['공종'].split()) > 1 else row['공종']
+                        # 공종명 추출 (번호 제거: "1.1.1 토공" → "토공", "1.2.1 관로 부대공사" → "관로 부대공사")
+                        parts = row['공종'].split(maxsplit=1)  # 첫 번째 공백으로만 분리
+                        if len(parts) > 1 and parts[0][0].isdigit():
+                            cat_name = parts[1]  # 번호 이후 전체를 공종명으로
+                        else:
+                            cat_name = row['공종']
                         
                         if cat_name not in merged_rows:
                             merged_rows[cat_name] = {

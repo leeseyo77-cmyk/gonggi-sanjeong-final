@@ -816,6 +816,16 @@ with tab2:
                         row["물량"] = f"{total_items}개 항목"
                         if len(row["원본_공종들"]) > 1:
                             row["공종"] = f"{cat_name} (통합)"
+                        
+                        # major_key가 없으면 첫 번째 원본 공종에서 추출
+                        if not row.get("major_key") and row.get("원본_공종들"):
+                            first_gong_jong = row["원본_공종들"][0]
+                            # "1.2.1 관로 부대공사" → "1.2"
+                            parts = first_gong_jong.split(maxsplit=1)
+                            if parts and parts[0][0].isdigit():
+                                level_parts = parts[0].split('.')
+                                if len(level_parts) >= 2:
+                                    row["major_key"] = f"{level_parts[0]}.{level_parts[1]}"
                     
                     result_rows_merged = list(merged_rows.values())
                     max_days = max((r["작업일수(일)"] for r in result_rows_merged), default=0)

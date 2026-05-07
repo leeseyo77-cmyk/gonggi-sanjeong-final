@@ -814,11 +814,17 @@ with tab2:
                         merged_rows[merge_key]["원본_공종들"].append(row['공종'])
                     
                     # 물량 정보 업데이트
-                    for cat_name, row in merged_rows.items():
+                    for merge_key, row in merged_rows.items():
                         total_items = len(row["세부항목"])
                         row["물량"] = f"{total_items}개 항목"
+                        
+                        # 공종명 정리: "1.1_관로 부대공사" → "관로 부대공사"
+                        pure_name = row["공종"]  # 이미 번호 제거된 순수 공종명
+                        
                         if len(row["원본_공종들"]) > 1:
-                            row["공종"] = f"{cat_name} (통합)"
+                            row["공종"] = f"{pure_name} (통합)"
+                        else:
+                            row["공종"] = pure_name
                         
                         # major_key가 없으면 첫 번째 원본 공종에서 추출
                         if not row.get("major_key") and row.get("원본_공종들"):

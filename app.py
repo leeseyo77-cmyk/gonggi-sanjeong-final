@@ -873,10 +873,19 @@ with tab2:
                                         for sub in row['하위카테고리']:
                                             sub_name = sub['name']
                                             sub_items = sub['items']
+                                            
+                                            # 항목이 없으면 건너뛰기 (0일 방지)
+                                            if not sub_items:
+                                                continue
+                                            
                                             sub_days = sum(
                                                 calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'])[0]
                                                 for item in sub_items
                                             )
+                                            
+                                            # 작업일수가 0이면 건너뛰기
+                                            if sub_days == 0:
+                                                continue
                                             
                                             st.markdown(f"#### {sub['level']} {sub_name} ({sub_days}일)")
                                             

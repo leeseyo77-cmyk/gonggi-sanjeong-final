@@ -842,7 +842,7 @@ with tab2:
                                 is_max = (row["작업일수(일)"] == max_days and max_days > 0)
                                 
                                 with st.expander(
-                                    f"{'🔴' if is_max else '▶'} **{row['공종']}** - {row['작업일수(일)']}일 ({row['투입조수']})",
+                                    f"{'🔴' if is_max else '▶'} **{row['공종']}** - {row['작업일수(일)']}일",
                                     expanded=False
                                 ):
                                     # 하위 카테고리별 표시
@@ -871,6 +871,7 @@ with tab2:
                                                     "수량": f"{item.get('qty', 0):,.1f}",
                                                     "단위": item.get('unit', ''),
                                                     "1일작업량": label,
+                                                    "투입조수": row['crew'],
                                                     "작업일수": int(d),
                                                     "출처": method
                                                 })
@@ -899,6 +900,7 @@ with tab2:
                                                 "수량": f"{item.get('qty', 0):,.1f}",
                                                 "단위": item.get('unit', ''),
                                                 "1일작업량": label,
+                                                "투입조수": row['crew'],
                                                 "작업일수": int(d),
                                                 "출처": method
                                             })
@@ -973,6 +975,22 @@ with tab2:
                     
                     # 공종별 투입조수 설정
                     st.markdown("#### 🔧 투입조수 설정")
+                    
+                    # 해당 지구 총 공사기간 계산 및 표시 (투입조수 설정 전에)
+                    # 임시로 기본 조수 3으로 계산
+                    temp_total_days = 0
+                    for group, items in grouped_by_type.items():
+                        for item in items:
+                            days, _, _ = calc_days_priority(
+                                item["name"],
+                                item.get("spec", ""),
+                                item.get("qty", 0),
+                                3  # 기본 조수
+                            )
+                            temp_total_days = max(temp_total_days, days)
+                    
+                    st.info(f"📊 **{selected_district} 지구 예상 공사기간:** {int(temp_total_days)}일 (기본 3조 기준)")
+                    
                     group_crews = {}
                     
                     cols = st.columns(4)

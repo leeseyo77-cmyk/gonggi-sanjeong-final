@@ -228,10 +228,10 @@ def calc_days_priority(name, spec, qty, crews=3):
                 if base_daily > 0:
                     if is_machine_based(name):
                         days = math.ceil(qty / (base_daily * crews))
-                        label = f"{base_daily}{unit}×{crews}대"
+                        label = f"{base_daily}{unit}"  # 조수 제거
                     else:
                         days = math.ceil(qty / (base_daily * crews))
-                        label = f"{base_daily}{unit}×{crews}조"
+                        label = f"{base_daily}{unit}"  # 조수 제거
                     return days, label, "가이드라인"
         
         # 관부설 직경별 매칭
@@ -242,7 +242,7 @@ def calc_days_priority(name, spec, qty, crews=3):
                 closest = min(pipe_rates.keys(), key=lambda x: abs(x - dia))
                 daily = pipe_rates[closest]
                 days = math.ceil(qty / (daily * crews))
-                return days, f"{daily}본/일×{crews}조", "가이드라인"
+                return days, f"{daily}본/일", "가이드라인"  # 조수 제거
     except Exception:
         pass
 
@@ -267,7 +267,7 @@ def calc_days_priority(name, spec, qty, crews=3):
 
         if manday > 0:
             days = math.ceil(manday / (8 * crews))
-            return days, f"{round(manday/qty,3)}인/단위×{crews}조", "표준품셈"
+            return days, f"{round(manday/qty,3)}인/단위", "표준품셈"  # 조수 제거
     except Exception:
         pass
     
@@ -289,7 +289,7 @@ def calc_days_priority(name, spec, qty, crews=3):
                         if hourly_val > 0:
                             daily_val = hourly_val * 8
                             days = math.ceil(qty / (daily_val * crews))
-                            return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}×{crews}조", "단가산출근거"
+                            return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}", "단가산출근거"  # 조수 제거
                     
                     # daily 값 (1일 작업량)
                     elif "daily" in info:
@@ -297,7 +297,7 @@ def calc_days_priority(name, spec, qty, crews=3):
                         unit = info.get("unit", "")
                         if daily_val > 0:
                             days = math.ceil(qty / (daily_val * crews))
-                            return days, f"{daily_val:.1f}{unit}×{crews}조", "단가산출근거"
+                            return days, f"{daily_val:.1f}{unit}", "단가산출근거"  # 조수 제거
                 
                 # 항목명만으로도 매칭 시도
                 if name in cached_name or cached_name in name:
@@ -307,14 +307,14 @@ def calc_days_priority(name, spec, qty, crews=3):
                         if hourly_val > 0:
                             daily_val = hourly_val * 8
                             days = math.ceil(qty / (daily_val * crews))
-                            return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}×{crews}조", "단가산출근거"
+                            return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}", "단가산출근거"  # 조수 제거
                     
                     elif "daily" in info:
                         daily_val = info.get("daily", 0)
                         unit = info.get("unit", "")
                         if daily_val > 0:
                             days = math.ceil(qty / (daily_val * crews))
-                            return days, f"{daily_val:.1f}{unit}×{crews}조", "단가산출근거"
+                            return days, f"{daily_val:.1f}{unit}", "단가산출근거"  # 조수 제거
     except Exception:
         pass
 
@@ -1011,8 +1011,8 @@ with tab2:
                                     "규격": item.get("spec", ""),
                                     "물량": item.get("qty", 0),
                                     "단위": item.get("unit", ""),
-                                    "일당": label,
-                                    "조수": crew,
+                                    "1일작업량": label,  # "5본/일x3조" → "5본/일"로 변경 필요
+                                    "조": crew,
                                     "일수": int(days),
                                     "출처": method
                                 })
@@ -1029,8 +1029,8 @@ with tab2:
                                         "규격": st.column_config.TextColumn("규격", width="large"),
                                         "물량": st.column_config.NumberColumn("물량", width="medium", format="%.1f"),
                                         "단위": st.column_config.TextColumn("단위", width="small"),
-                                        "일당": st.column_config.TextColumn("일당", width="medium"),
-                                        "조수": st.column_config.NumberColumn("조수", width="small"),
+                                        "1일작업량": st.column_config.TextColumn("1일작업량", width="medium"),
+                                        "조": st.column_config.NumberColumn("조", width="small"),
                                         "일수": st.column_config.NumberColumn("일수", width="small"),
                                         "출처": st.column_config.TextColumn("출처", width="medium"),
                                     }

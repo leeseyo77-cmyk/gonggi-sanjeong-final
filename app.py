@@ -790,8 +790,11 @@ with tab2:
                         else:
                             cat_name = row['공종']
                         
-                        if cat_name not in merged_rows:
-                            merged_rows[cat_name] = {
+                        # 키를 major_key + 공종명으로 설정 (같은 이름이라도 다른 그룹은 구분)
+                        merge_key = f"{row['major_key']}_{cat_name}"
+                        
+                        if merge_key not in merged_rows:
+                            merged_rows[merge_key] = {
                                 "level": row['level'],
                                 "공종": cat_name,
                                 "물량": 0,
@@ -805,10 +808,10 @@ with tab2:
                             }
                         
                         # 합산
-                        merged_rows[cat_name]["작업일수(일)"] += row["작업일수(일)"]
-                        merged_rows[cat_name]["세부항목"].extend(row["세부항목"])
-                        merged_rows[cat_name]["하위카테고리"].extend(row["하위카테고리"])
-                        merged_rows[cat_name]["원본_공종들"].append(row['공종'])
+                        merged_rows[merge_key]["작업일수(일)"] += row["작업일수(일)"]
+                        merged_rows[merge_key]["세부항목"].extend(row["세부항목"])
+                        merged_rows[merge_key]["하위카테고리"].extend(row["하위카테고리"])
+                        merged_rows[merge_key]["원본_공종들"].append(row['공종'])
                     
                     # 물량 정보 업데이트
                     for cat_name, row in merged_rows.items():

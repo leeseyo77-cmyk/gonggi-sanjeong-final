@@ -790,6 +790,10 @@ with tab2:
                         else:
                             cat_name = row['공종']
                         
+                        # 🔍 디버그 출력
+                        if "관로" in row['공종'] or "배수" in row['공종']:
+                            st.info(f"DEBUG: '{row['공종']}' → '{cat_name}'")
+                        
                         if cat_name not in merged_rows:
                             merged_rows[cat_name] = {
                                 "level": row['level'],

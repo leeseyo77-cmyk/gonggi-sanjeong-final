@@ -638,8 +638,9 @@ with tab2:
                                 'name': name,
                                 'items': []
                             }
-                        continue
+                        # continue를 제거하여 다음 행 계속 읽기
                     
+                    # elif가 아닌 if로 변경 - 1) 행 다음에도 계속 처리
                     if current_category and not gong_jong and name:
                         item_key = (name, spec)
                         if item_key not in seen_items:
@@ -870,11 +871,31 @@ with tab2:
                                 ):
                                     # 하위 카테고리별 표시
                                     if row['하위카테고리']:
+                                        # 하위 카테고리를 이름으로 그룹핑 (중복 제거)
+                                        merged_subs = {}
                                         for sub in row['하위카테고리']:
+                                            sub_name = sub['name']
+                                            if sub_name not in merged_subs:
+                                                merged_subs[sub_name] = {
+                                                    'name': sub_name,
+                                                    'items': []
+                                                }
+                                            merged_subs[sub_name]['items'].extend(sub['items'])
+                                        
+                                        # 재넘버링
+                                        renumbered_subs = []
+                                        for idx, (sub_name, sub_data) in enumerate(merged_subs.items(), 1):
+                                            renumbered_subs.append({
+                                                'level': f"{idx})",
+                                                'name': sub_name,
+                                                'items': sub_data['items']
+                                            })
+                                        
+                                        for sub in renumbered_subs:
                                             sub_name = sub['name']
                                             sub_items = sub['items']
                                             
-                                            # 항목이 없으면 건너뛰기 (0일 방지)
+                                            # 항목이 없으면 건너뛰기
                                             if not sub_items:
                                                 continue
                                             
@@ -883,10 +904,7 @@ with tab2:
                                                 for item in sub_items
                                             )
                                             
-                                            # 작업일수가 0이면 건너뛰기
-                                            if sub_days == 0:
-                                                continue
-                                            
+                                            # 0일인 경우도 표시 (출처 문제 확인용)
                                             st.markdown(f"#### {sub['level']} {sub_name} ({sub_days}일)")
                                             
                                             detail_items = []

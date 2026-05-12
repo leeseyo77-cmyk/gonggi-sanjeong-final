@@ -871,23 +871,28 @@ with tab2:
                                 ):
                                     # 하위 카테고리별 표시
                                     if row['하위카테고리']:
-                                        # 하위 카테고리를 이름으로 그룹핑 (중복 제거)
+                                        # 하위 카테고리를 level+이름으로 그룹핑 (다른 level의 같은 이름 구분)
                                         merged_subs = {}
                                         for sub in row['하위카테고리']:
+                                            sub_level = sub.get('level', '')
                                             sub_name = sub['name']
-                                            if sub_name not in merged_subs:
-                                                merged_subs[sub_name] = {
+                                            # 키를 "level_name"으로 설정하여 다른 level의 같은 이름 구분
+                                            merge_key = f"{sub_level}_{sub_name}"
+                                            
+                                            if merge_key not in merged_subs:
+                                                merged_subs[merge_key] = {
+                                                    'original_level': sub_level,
                                                     'name': sub_name,
                                                     'items': []
                                                 }
-                                            merged_subs[sub_name]['items'].extend(sub['items'])
+                                            merged_subs[merge_key]['items'].extend(sub['items'])
                                         
                                         # 재넘버링
                                         renumbered_subs = []
-                                        for idx, (sub_name, sub_data) in enumerate(merged_subs.items(), 1):
+                                        for idx, (merge_key, sub_data) in enumerate(merged_subs.items(), 1):
                                             renumbered_subs.append({
                                                 'level': f"{idx})",
-                                                'name': sub_name,
+                                                'name': sub_data['name'],
                                                 'items': sub_data['items']
                                             })
                                         

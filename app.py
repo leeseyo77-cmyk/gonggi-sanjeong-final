@@ -603,15 +603,23 @@ with tab2:
                 hierarchy = []
                 current_category = None
                 current_sub_category = None
-                seen_items = set()
+                current_district = None  # 현재 읽고 있는 지구 추적
+                # seen_items는 이제 사용하지 않음 - 여러 지구의 같은 항목을 모두 포함해야 함
+                
+                roman_nums = ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ', 'Ⅶ', 'Ⅷ', 'Ⅸ', 'Ⅹ']
                 
                 for row in ws.iter_rows(min_row=1, values_only=True):
                     gong_jong = str(row[0]).strip() if row[0] else ""
                     name = str(row[1]).strip() if len(row) > 1 and row[1] else ""
                     spec = str(row[2]).strip() if len(row) > 2 and row[2] else ""
                     
+                    # 지구 변경 감지
+                    if gong_jong in roman_nums:
+                        current_district = gong_jong
+                        continue
+                    
                     if re.match(r'^\d+\.\d+\.\d+$', gong_jong):
-                        # 같은 level이라도 name이 다르면 새로운 카테고리
+                        # 지구별로 별도 카테고리 생성 (합산 안 함)
                         if current_category:
                             if current_sub_category:
                                 current_category['sub_categories'].append(current_sub_category)
@@ -623,13 +631,14 @@ with tab2:
                             'level': gong_jong,
                             'name': name,
                             'items': [],
-                            'sub_categories': []
+                            'sub_categories': [],
+                            'district': current_district  # 지구 정보 저장
                         }
                         current_sub_category = None
                         continue
                     
                     if re.match(r'^\d+\)$', gong_jong):
-                        # 1), 2) 형태는 무조건 sub_category
+                        # 지구별로 별도 sub_category 생성 (합산 안 함)
                         if current_category:
                             if current_sub_category:
                                 current_category['sub_categories'].append(current_sub_category)
@@ -641,17 +650,35 @@ with tab2:
                         # continue를 제거하여 다음 행 계속 읽기
                     
                     # elif가 아닌 if로 변경 - 1) 행 다음에도 계속 처리
-                    if current_category and not gong_jong and name:
-                        item_key = (name, spec)
-                        if item_key not in seen_items:
-                            for item in matched:
-                                if item['name'] == name and item['spec'] == spec:
-                                    if current_sub_category:
-                                        current_sub_category['items'].append(item)
-                                    else:
-                                        current_category['items'].append(item)
-                                    seen_items.add(item_key)
-                                    break
+                    if current_category and not gong_jong and name and current_district:
+                        # 현재 지구의 항목만 매칭 (중복 방지)
+                        for item in matched:
+                            # 지구가 다르면 스킵
+                            if item.get('district') != current_district:
+                                continue
+                            
+                            # 공백 제거 후 비교
+                            item_name_clean = item['name'].replace(" ", "").replace("\u3000", "").strip()
+                            name_clean = name.replace(" ", "").replace("\u3000", "").strip()
+                            item_spec_clean = item.get('spec', '').replace(" ", "").replace("\u3000", "").strip()
+                            spec_clean = spec.replace(" ", "").replace("\u3000", "").strip()
+                            
+                            # 이름이 일치하거나 포함되면 OK (spec은 느슨하게)
+                            name_match = (item_name_clean == name_clean or 
+                                        item_name_clean in name_clean or 
+                                        name_clean in item_name_clean)
+                            
+                            spec_match = (not spec_clean or  # spec이 없으면 무조건 매치
+                                        item_spec_clean == spec_clean or 
+                                        spec_clean in item_spec_clean or 
+                                        item_spec_clean in spec_clean)
+                            
+                            if name_match and spec_match:
+                                if current_sub_category:
+                                    current_sub_category['items'].append(item)
+                                else:
+                                    current_category['items'].append(item)
+                                break
                 
                 if current_category:
                     if current_sub_category:
@@ -660,19 +687,65 @@ with tab2:
                         hierarchy.append(current_category)
                 
                 if hierarchy:
-                    # 중간 번호 기준 그룹핑 (1.1.X, 1.2.X, 2.1.X... 구분)
-                    major_groups = {}
-                    seen_cats = {}  # 중복 제거용
+                    # 지구별로 생성된 같은 카테고리들을 합산
+                    merged_hierarchy = {}
                     
                     for cat in hierarchy:
                         level = cat['level']
                         name = cat['name']
-                        
-                        # 중복 체크 (level + name)
                         cat_key = f"{level}_{name}"
-                        if cat_key in seen_cats:
-                            continue
-                        seen_cats[cat_key] = True
+                        
+                        if cat_key not in merged_hierarchy:
+                            # 첫 번째 카테고리 저장
+                            merged_hierarchy[cat_key] = {
+                                'level': level,
+                                'name': name,
+                                'items': list(cat.get('items', [])),
+                                'sub_categories': []
+                            }
+                            
+                            # sub_categories도 복사
+                            for sub in cat.get('sub_categories', []):
+                                merged_hierarchy[cat_key]['sub_categories'].append({
+                                    'level': sub['level'],
+                                    'name': sub['name'],
+                                    'items': list(sub.get('items', []))
+                                })
+                        else:
+                            # 같은 카테고리 발견 - items 합산
+                            merged_hierarchy[cat_key]['items'].extend(cat.get('items', []))
+                            
+                            # sub_categories 합산
+                            for sub in cat.get('sub_categories', []):
+                                sub_key = f"{sub['level']}_{sub['name']}"
+                                
+                                # 기존 sub_category 찾기
+                                existing_sub = next(
+                                    (s for s in merged_hierarchy[cat_key]['sub_categories'] 
+                                     if f"{s['level']}_{s['name']}" == sub_key), 
+                                    None
+                                )
+                                
+                                if existing_sub:
+                                    # 기존 sub에 items 추가
+                                    existing_sub['items'].extend(sub.get('items', []))
+                                else:
+                                    # 새로운 sub 추가
+                                    merged_hierarchy[cat_key]['sub_categories'].append({
+                                        'level': sub['level'],
+                                        'name': sub['name'],
+                                        'items': list(sub.get('items', []))
+                                    })
+                    
+                    # 합산된 hierarchy로 교체
+                    hierarchy = list(merged_hierarchy.values())
+                    
+                    # 중간 번호 기준 그룹핑 (1.1.X, 1.2.X, 2.1.X... 구분)
+                    major_groups = {}
+                    
+                    for cat in hierarchy:
+                        level = cat['level']
+                        name = cat['name']
                         
                         # 중간 번호 추출 (1.1.X → "1.1")
                         parts = level.split('.')

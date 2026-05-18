@@ -603,8 +603,8 @@ with tab2:
                 hierarchy = []
                 current_category = None
                 current_sub_category = None
-                current_district = None  # 현재 읽고 있는 지구 추적
-                # seen_items는 이제 사용하지 않음 - 여러 지구의 같은 항목을 모두 포함해야 함
+                current_sub_sub_category = None  # 3단계 계층
+                current_district = None  # 지구 추적
                 
                 roman_nums = ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ', 'Ⅶ', 'Ⅷ', 'Ⅸ', 'Ⅹ']
                 
@@ -619,40 +619,119 @@ with tab2:
                         continue
                     
                     if re.match(r'^\d+\.\d+\.\d+$', gong_jong):
-                        # 지구별로 별도 카테고리 생성 (합산 안 함)
-                        if current_category:
-                            if current_sub_category:
-                                current_category['sub_categories'].append(current_sub_category)
-                                current_sub_category = None
-                            if current_category.get('items') or current_category.get('sub_categories'):
-                                hierarchy.append(current_category)
+                        # 같은 level+name이면 기존 카테고리 재사용 (지구별 합산)
+                        existing = next((c for c in hierarchy if c['level'] == gong_jong and c['name'] == name), None)
                         
-                        current_category = {
-                            'level': gong_jong,
-                            'name': name,
-                            'items': [],
-                            'sub_categories': [],
-                            'district': current_district  # 지구 정보 저장
-                        }
-                        current_sub_category = None
-                        continue
-                    
-                    if re.match(r'^\d+\)$', gong_jong) or re.match(r'^\(\d+\)$', gong_jong):
-                        # 1) 또는 (1) 형태는 sub_category
-                        # 지구별로 별도 sub_category 생성 (합산 안 함)
-                        if current_category:
-                            if current_sub_category:
-                                current_category['sub_categories'].append(current_sub_category)
-                            current_sub_category = {
+                        if existing:
+                            # 기존 카테고리 재사용
+                            if current_category and current_category != existing:
+                                if current_sub_category:
+                                    current_category['sub_categories'].append(current_sub_category)
+                                    current_sub_category = None
+                            current_category = existing
+                            current_sub_category = None
+                            continue
+                        else:
+                            # 새 카테고리 생성
+                            if current_category:
+                                if current_sub_category:
+                                    current_category['sub_categories'].append(current_sub_category)
+                                    current_sub_category = None
+                                if current_category.get('items') or current_category.get('sub_categories'):
+                                    hierarchy.append(current_category)
+                            
+                            current_category = {
                                 'level': gong_jong,
                                 'name': name,
-                                'items': []
+                                'items': [],
+                                'sub_categories': []
                             }
+                            current_sub_category = None
+                            continue
+                    
+                    # (1), (2) 또는 #1, #2... 패턴은 sub_sub_category (3단계 계층)
+                    if re.match(r'^\(\d+\)$', gong_jong) or re.match(r'^#\d+', gong_jong):
+                        print(f"🟣 (1) 또는 #N 패턴 감지: gong_jong=[{gong_jong}] name=[{name}]")
+                        # (1), (2) 또는 #1 추진 형태는 sub_sub_category
+                        if current_sub_category:
+                            print(f"  ✅ current_sub_category 있음: [{current_sub_category['name']}]")
+                            # sub_category 안에 sub_categories가 없으면 생성
+                            if 'sub_categories' not in current_sub_category:
+                                current_sub_category['sub_categories'] = []
+                            
+                            # 같은 level+name+district의 sub_sub가 있으면 재사용
+                            display_name = name if name else gong_jong
+                            if current_district:
+                                display_name = f"[{current_district}] {display_name}"
+                            
+                            existing_sub_sub = next((s for s in current_sub_category['sub_categories'] 
+                                                   if s['level'] == gong_jong and s['name'] == display_name), None)
+                            
+                            if existing_sub_sub:
+                                print(f"🟣 sub_sub 재사용: parent=[{current_sub_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
+                                current_sub_sub_category = existing_sub_sub
+                            else:
+                                print(f"🟢 sub_sub 생성: parent=[{current_sub_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
+                                # 현재 sub_sub가 있으면 append
+                                if current_sub_sub_category:
+                                    is_already_in_list = any(s is current_sub_sub_category for s in current_sub_category['sub_categories'])
+                                    if not is_already_in_list:
+                                        current_sub_category['sub_categories'].append(current_sub_sub_category)
+                                
+                                # display_name은 이미 위에서 계산됨 (663-665행)
+                                current_sub_sub_category = {
+                                    'level': gong_jong,
+                                    'name': display_name,  # 이미 지구 포함된 display_name 사용
+                                    'items': [],
+                                    'district': current_district  # 지구 정보 저장
+                                }
+                        else:
+                            print(f"  ❌ current_sub_category 없음! (1) 또는 #N 패턴을 처리할 수 없음")
+                    # 1), 2) 패턴은 sub_category (2단계 계층)
+                    elif re.match(r'^\d+\)$', gong_jong):
+                        print(f"🔵 1) 패턴 감지: gong_jong=[{gong_jong}] name=[{name}]")
+                        # 1), 2) 형태는 sub_category
+                        if current_category:
+                            # 이전 sub_sub 마무리
+                            if current_sub_sub_category and current_sub_category:
+                                is_already_in_list = any(s is current_sub_sub_category for s in current_sub_category['sub_categories'])
+                                if not is_already_in_list:
+                                    if 'sub_categories' not in current_sub_category:
+                                        current_sub_category['sub_categories'] = []
+                                    current_sub_category['sub_categories'].append(current_sub_sub_category)
+                            current_sub_sub_category = None
+                            
+                            # 같은 level+name의 sub_category가 있으면 재사용
+                            existing_sub = next((s for s in current_category['sub_categories'] 
+                                               if s['level'] == gong_jong and s['name'] == name), None)
+                            
+                            if existing_sub:
+                                print(f"🔵 sub 재사용: category=[{current_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
+                                # 현재 sub가 있고, 기존 것과 다르면 append
+                                if current_sub_category and current_sub_category != existing_sub:
+                                    # 같은 객체가 이미 리스트에 있는지 체크 (객체 ID)
+                                    is_already_in_list = any(s is current_sub_category for s in current_category['sub_categories'])
+                                    if not is_already_in_list:
+                                        current_category['sub_categories'].append(current_sub_category)
+                                current_sub_category = existing_sub
+                            else:
+                                print(f"🟢 sub 생성: category=[{current_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
+                                # 현재 sub가 있으면 append
+                                if current_sub_category:
+                                    # 같은 객체가 이미 리스트에 있는지 체크 (객체 ID)
+                                    is_already_in_list = any(s is current_sub_category for s in current_category['sub_categories'])
+                                    if not is_already_in_list:
+                                        current_category['sub_categories'].append(current_sub_category)
+                                current_sub_category = {
+                                    'level': gong_jong,
+                                    'name': name,
+                                    'items': [],
+                                    'sub_categories': []  # 3단계를 위한 sub_categories
+                                }
                         # continue를 제거하여 다음 행 계속 읽기
                     
-                    # elif가 아닌 if로 변경 - 1) 행 다음에도 계속 처리
+                    # 항목 매칭 - 현재 지구만
                     if current_category and not gong_jong and name and current_district:
-                        # 현재 지구의 항목만 매칭 (중복 방지)
                         for item in matched:
                             # 지구가 다르면 스킵
                             if item.get('district') != current_district:
@@ -664,83 +743,66 @@ with tab2:
                             item_spec_clean = item.get('spec', '').replace(" ", "").replace("\u3000", "").strip()
                             spec_clean = spec.replace(" ", "").replace("\u3000", "").strip()
                             
-                            # 이름이 일치하거나 포함되면 OK (spec은 느슨하게)
+                            # 이름이 일치하거나 포함되면 OK
                             name_match = (item_name_clean == name_clean or 
                                         item_name_clean in name_clean or 
                                         name_clean in item_name_clean)
                             
-                            spec_match = (not spec_clean or  # spec이 없으면 무조건 매치
+                            spec_match = (not spec_clean or 
                                         item_spec_clean == spec_clean or 
                                         spec_clean in item_spec_clean or 
                                         item_spec_clean in spec_clean)
                             
                             if name_match and spec_match:
-                                if current_sub_category:
-                                    current_sub_category['items'].append(item)
+                                # sub_sub_category가 있으면 거기에 추가
+                                if current_sub_sub_category:
+                                    existing_item = next((i for i in current_sub_sub_category['items']
+                                                         if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                                    if existing_item:
+                                        existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
+                                        print(f"  ✨ 수량 합산(sub_sub): {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
+                                    else:
+                                        current_sub_sub_category['items'].append(item)
+                                # sub_category에 추가
+                                elif current_sub_category:
+                                    # 같은 name+spec 항목이 있으면 수량 합산
+                                    existing_item = next((i for i in current_sub_category['items'] 
+                                                         if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                                    if existing_item:
+                                        existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
+                                        print(f"  ✨ 수량 합산: {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
+                                    else:
+                                        current_sub_category['items'].append(item)
                                 else:
-                                    current_category['items'].append(item)
+                                    # category에 직접 추가할 때도 같은 로직
+                                    existing_item = next((i for i in current_category['items'] 
+                                                         if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                                    if existing_item:
+                                        existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
+                                        print(f"  ✨ 수량 합산: {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
+                                    else:
+                                        current_category['items'].append(item)
                                 break
                 
                 if current_category:
+                    # sub_sub_category 마무리
+                    if current_sub_sub_category and current_sub_category:
+                        if 'sub_categories' not in current_sub_category:
+                            current_sub_category['sub_categories'] = []
+                        is_already_in_list = any(s is current_sub_sub_category for s in current_sub_category['sub_categories'])
+                        if not is_already_in_list:
+                            current_sub_category['sub_categories'].append(current_sub_sub_category)
+                    
+                    # sub_category 마무리
                     if current_sub_category:
-                        current_category['sub_categories'].append(current_sub_category)
+                        # 같은 객체가 이미 리스트에 있는지 체크 (객체 ID 비교)
+                        is_already_in_list = any(s is current_sub_category for s in current_category['sub_categories'])
+                        if not is_already_in_list:
+                            current_category['sub_categories'].append(current_sub_category)
                     if current_category.get('items') or current_category.get('sub_categories'):
                         hierarchy.append(current_category)
                 
                 if hierarchy:
-                    # 지구별로 생성된 같은 카테고리들을 합산
-                    merged_hierarchy = {}
-                    
-                    for cat in hierarchy:
-                        level = cat['level']
-                        name = cat['name']
-                        cat_key = f"{level}_{name}"
-                        
-                        if cat_key not in merged_hierarchy:
-                            # 첫 번째 카테고리 저장
-                            merged_hierarchy[cat_key] = {
-                                'level': level,
-                                'name': name,
-                                'items': list(cat.get('items', [])),
-                                'sub_categories': []
-                            }
-                            
-                            # sub_categories도 복사
-                            for sub in cat.get('sub_categories', []):
-                                merged_hierarchy[cat_key]['sub_categories'].append({
-                                    'level': sub['level'],
-                                    'name': sub['name'],
-                                    'items': list(sub.get('items', []))
-                                })
-                        else:
-                            # 같은 카테고리 발견 - items 합산
-                            merged_hierarchy[cat_key]['items'].extend(cat.get('items', []))
-                            
-                            # sub_categories 합산
-                            for sub in cat.get('sub_categories', []):
-                                sub_key = f"{sub['level']}_{sub['name']}"
-                                
-                                # 기존 sub_category 찾기
-                                existing_sub = next(
-                                    (s for s in merged_hierarchy[cat_key]['sub_categories'] 
-                                     if f"{s['level']}_{s['name']}" == sub_key), 
-                                    None
-                                )
-                                
-                                if existing_sub:
-                                    # 기존 sub에 items 추가
-                                    existing_sub['items'].extend(sub.get('items', []))
-                                else:
-                                    # 새로운 sub 추가
-                                    merged_hierarchy[cat_key]['sub_categories'].append({
-                                        'level': sub['level'],
-                                        'name': sub['name'],
-                                        'items': list(sub.get('items', []))
-                                    })
-                    
-                    # 합산된 hierarchy로 교체
-                    hierarchy = list(merged_hierarchy.values())
-                    
                     # 중간 번호 기준 그룹핑 (1.1.X, 1.2.X, 2.1.X... 구분)
                     major_groups = {}
                     
@@ -751,7 +813,7 @@ with tab2:
                         # 중간 번호 추출 (1.1.X → "1.1")
                         parts = level.split('.')
                         if len(parts) >= 2:
-                            major_key = f"{parts[0]}.{parts[1]}"  # "1.1", "1.2", "2.1" 등
+                            major_key = f"{parts[0]}.{parts[1]}"
                         else:
                             major_key = parts[0]
                         
@@ -826,6 +888,9 @@ with tab2:
                         all_cat_items = list(cat.get('items', []))
                         for sub in cat.get('sub_categories', []):
                             all_cat_items.extend(sub.get('items', []))
+                            # sub_sub_categories도 포함 (3단계 계층)
+                            for sub_sub in sub.get('sub_categories', []):
+                                all_cat_items.extend(sub_sub.get('items', []))
                         
                         cat_total_days = sum(
                             calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), cat_crew)[0]
@@ -914,6 +979,20 @@ with tab2:
                     result_rows_merged = list(merged_rows.values())
                     max_days = max((r["작업일수(일)"] for r in result_rows_merged), default=0)
                     
+                    # 디버그: 어떤 카테고리들이 있는지 확인
+                    print("=" * 80)
+                    print("📊 UI로 전달되는 카테고리 목록:")
+                    for row in result_rows_merged:
+                        sub_count = len(row.get('하위카테고리', []))
+                        print(f"  - {row['공종']} ({row['작업일수(일)']}일, sub_categories={sub_count}개)")
+                        if '추진' in row['공종']:
+                            print(f"    🔍 하위카테고리 상세:")
+                            for sub in row.get('하위카테고리', []):
+                                sub_sub_count = len(sub.get('sub_categories', []))
+                                items_count = len(sub.get('items', []))
+                                print(f"      - {sub['level']} {sub['name']}: items={items_count}, sub_sub={sub_sub_count}")
+                    print("=" * 80)
+                    
                     # 그룹별로 표시
                     grouped_results = {}
                     for row in result_rows_merged:
@@ -945,72 +1024,140 @@ with tab2:
                                 ):
                                     # 하위 카테고리별 표시
                                     if row['하위카테고리']:
-                                        # 하위 카테고리를 level+이름으로 그룹핑 (다른 level의 같은 이름 구분)
-                                        merged_subs = {}
+                                        # 같은 name의 sub_category를 하나로 합치기
+                                        merged_by_name = {}
                                         for sub in row['하위카테고리']:
-                                            sub_level = sub.get('level', '')
                                             sub_name = sub['name']
-                                            # 키를 "level_name"으로 설정하여 다른 level의 같은 이름 구분
-                                            merge_key = f"{sub_level}_{sub_name}"
-                                            
-                                            if merge_key not in merged_subs:
-                                                merged_subs[merge_key] = {
-                                                    'original_level': sub_level,
+                                            if sub_name not in merged_by_name:
+                                                merged_by_name[sub_name] = {
+                                                    'level': sub.get('level', ''),  # 첫 번째 level 사용
                                                     'name': sub_name,
-                                                    'items': []
+                                                    'items': [],
+                                                    'sub_categories': []  # 3단계 계층
                                                 }
-                                            merged_subs[merge_key]['items'].extend(sub['items'])
+                                            # 항목 합치기 (name+spec 기준으로 중복 제거하면서)
+                                            for item in sub.get('items', []):
+                                                existing = next((i for i in merged_by_name[sub_name]['items']
+                                                               if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                                                if existing:
+                                                    existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
+                                                else:
+                                                    merged_by_name[sub_name]['items'].append(item)
+                                            # sub_categories도 합치기 (name 기준으로 중복 제거)
+                                            for sub_sub in sub.get('sub_categories', []):
+                                                sub_sub_name = sub_sub['name']
+                                                sub_sub_level = sub_sub.get('level', '')
+                                                
+                                                # 같은 name+level의 sub_sub 찾기
+                                                existing_sub_sub = next((s for s in merged_by_name[sub_name]['sub_categories']
+                                                                       if s['name'] == sub_sub_name and s.get('level') == sub_sub_level), None)
+                                                
+                                                if existing_sub_sub:
+                                                    # 기존 sub_sub에 항목 합치기
+                                                    for item in sub_sub.get('items', []):
+                                                        existing_item = next((i for i in existing_sub_sub['items']
+                                                                           if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                                                        if existing_item:
+                                                            existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
+                                                        else:
+                                                            existing_sub_sub['items'].append(item)
+                                                else:
+                                                    # 새로운 sub_sub 추가
+                                                    merged_by_name[sub_name]['sub_categories'].append(sub_sub)
                                         
-                                        # 재넘버링
-                                        renumbered_subs = []
-                                        for idx, (merge_key, sub_data) in enumerate(merged_subs.items(), 1):
-                                            renumbered_subs.append({
-                                                'level': f"{idx})",
-                                                'name': sub_data['name'],
-                                                'items': sub_data['items']
-                                            })
-                                        
-                                        for sub in renumbered_subs:
-                                            sub_name = sub['name']
-                                            sub_items = sub['items']
+                                        # 합쳐진 sub_category 표시
+                                        for sub_name, sub_data in merged_by_name.items():
+                                            sub_level = sub_data.get('level', '')
+                                            sub_items = sub_data.get('items', [])
                                             
                                             # 항목이 없으면 건너뛰기
-                                            if not sub_items:
+                                            if not sub_items and not sub_data.get('sub_categories'):
                                                 continue
                                             
+                                            # sub_days 계산 (sub_items + sub_sub_categories)
                                             sub_days = sum(
                                                 calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'])[0]
                                                 for item in sub_items
                                             )
+                                            # sub_sub_categories가 있으면 그것도 포함
+                                            for sub_sub in sub_data.get('sub_categories', []):
+                                                for item in sub_sub.get('items', []):
+                                                    d, _, _ = calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'])
+                                                    sub_days += d
                                             
-                                            # 0일인 경우도 표시 (출처 문제 확인용)
-                                            st.markdown(f"#### {sub['level']} {sub_name} ({sub_days}일)")
+                                            st.markdown(f"#### {sub_level} {sub_name} ({sub_days}일)")
                                             
-                                            detail_items = []
-                                            for item in sub_items:
-                                                d, label, method = calc_days_priority(
-                                                    item['name'],
-                                                    item.get('spec', ''),
-                                                    item.get('qty', 0),
-                                                    row['crew']
-                                                )
-                                                detail_items.append({
-                                                    "세부공종": item['name'],
-                                                    "규격": item.get('spec', ''),
-                                                    "수량": f"{item.get('qty', 0):,.1f}",
-                                                    "단위": item.get('unit', ''),
-                                                    "1일작업량": label,
-                                                    "투입조수": row['crew'],
-                                                    "작업일수": int(d),
-                                                    "출처": method
-                                                })
+                                            # sub_sub_categories가 있으면 표시 (3단계 계층)
+                                            if sub_data.get('sub_categories'):
+                                                for sub_sub in sub_data['sub_categories']:
+                                                    sub_sub_level = sub_sub.get('level', '')
+                                                    sub_sub_name = sub_sub['name']
+                                                    sub_sub_items = sub_sub.get('items', [])
+                                                    
+                                                    if not sub_sub_items:
+                                                        continue
+                                                    
+                                                    sub_sub_days = sum(
+                                                        calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'])[0]
+                                                        for item in sub_sub_items
+                                                    )
+                                                    
+                                                    # sub_sub 헤더 (들여쓰기로 계층 표현)
+                                                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;**{sub_sub_level} {sub_sub_name}** ({sub_sub_days}일)")
+                                                    
+                                                    detail_items = []
+                                                    for item in sub_sub_items:
+                                                        d, label, method = calc_days_priority(
+                                                            item['name'],
+                                                            item.get('spec', ''),
+                                                            item.get('qty', 0),
+                                                            row['crew']
+                                                        )
+                                                        detail_items.append({
+                                                            "세부공종": item['name'],
+                                                            "규격": item.get('spec', ''),
+                                                            "수량": f"{item.get('qty', 0):,.1f}",
+                                                            "단위": item.get('unit', ''),
+                                                            "1일작업량": label,
+                                                            "투입조수": row['crew'],
+                                                            "작업일수": int(d),
+                                                            "출처": method
+                                                        })
+                                                    
+                                                    if detail_items:
+                                                        st.dataframe(
+                                                            pd.DataFrame(detail_items),
+                                                            hide_index=True,
+                                                            use_container_width=True
+                                                        )
                                             
-                                            if detail_items:
-                                                st.dataframe(
-                                                    pd.DataFrame(detail_items),
-                                                    hide_index=True,
-                                                    use_container_width=True
-                                                )
+                                            # sub_items가 있으면 표시 (sub_sub_categories가 없을 때만)
+                                            elif sub_items:
+                                                detail_items = []
+                                                for item in sub_items:
+                                                    d, label, method = calc_days_priority(
+                                                        item['name'],
+                                                        item.get('spec', ''),
+                                                        item.get('qty', 0),
+                                                        row['crew']
+                                                    )
+                                                    detail_items.append({
+                                                        "세부공종": item['name'],
+                                                        "규격": item.get('spec', ''),
+                                                        "수량": f"{item.get('qty', 0):,.1f}",
+                                                        "단위": item.get('unit', ''),
+                                                        "1일작업량": label,
+                                                        "투입조수": row['crew'],
+                                                        "작업일수": int(d),
+                                                        "출처": method
+                                                    })
+                                                
+                                                if detail_items:
+                                                    st.dataframe(
+                                                        pd.DataFrame(detail_items),
+                                                        hide_index=True,
+                                                        use_container_width=True
+                                                    )
                                     
                                     # 직접 항목도 있으면 표시
                                     direct_items = [item for item in row['세부항목'] if item not in sum([sub['items'] for sub in row['하위카테고리']], [])]

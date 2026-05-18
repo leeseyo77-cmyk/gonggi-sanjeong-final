@@ -637,7 +637,8 @@ with tab2:
                         current_sub_category = None
                         continue
                     
-                    if re.match(r'^\d+\)$', gong_jong):
+                    if re.match(r'^\d+\)$', gong_jong) or re.match(r'^\(\d+\)$', gong_jong):
+                        # 1) 또는 (1) 형태는 sub_category
                         # 지구별로 별도 sub_category 생성 (합산 안 함)
                         if current_category:
                             if current_sub_category:

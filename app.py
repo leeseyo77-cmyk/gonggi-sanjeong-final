@@ -221,7 +221,10 @@ def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
                 matched = True
             elif "맨홀뚜껑" in key and "맨홀뚜껑" in name:
                 matched = True
-            elif "추진" in key and "추진" in name and len(key) > 2:
+            # 🔥 수정: 추진공은 "강관" + "추진" 조합만 매칭 (오매칭 방지)
+            # 원래 코드: elif "추진" in key and "추진" in name and len(key) > 2:
+            # 문제: "추진" 키워드만으로 다른 항목과 오매칭되어 1850일 폭발
+            elif "추진" in key and "추진" in name and "강관" in key and "강관" in (name + spec):
                 matched = True
             
             if matched:
@@ -683,8 +686,8 @@ with tab2:
                             current_sub_category = None
                             continue
                     
-                    # (N) #숫자 형태만 구분자로 처리 (예: (1) #1 추진, (2) #2 추진가시설)
-                    # (1) D200mm 같은 것은 세부공종이므로 제외
+                    # (N) #숫자 형태는 구분자로 sub_sub_category 생성
+                    # 예: (1) #1 추진, (2) #2 추진 등 - 각각 다른 구간이므로 독립적으로 계산
                     is_hash_separator = False
                     if re.match(r'^\(\d+\)$', gong_jong) and name and re.match(r'^#\d+', name):
                         is_hash_separator = True
@@ -692,7 +695,7 @@ with tab2:
                         is_hash_separator = True
                     
                     if is_hash_separator:
-                        print(f"🟣 (N) #숫자 구분자 감지: gong_jong=[{gong_jong}] name=[{name}] → sub_sub_category로 생성")
+                        print(f"🟣 (#N) 구분자 감지: gong_jong=[{gong_jong}] name=[{name}] → sub_sub_category로 생성")
                         # #1, #2... 를 sub_sub_category로 생성 (지구 정보 포함)
                         if current_sub_category:
                             current_sub_sub_category = {
@@ -701,11 +704,11 @@ with tab2:
                                 'district': current_district,
                                 'items': []
                             }
-                            # sub_sub_categories 리스트에 추가
-                            if 'sub_sub_categories' not in current_sub_category:
-                                current_sub_category['sub_sub_categories'] = []
-                            current_sub_category['sub_sub_categories'].append(current_sub_sub_category)
-                            print(f"  ✅ sub_sub 생성: [{name}] district=[{current_district}]")
+                            # sub_categories 리스트에 추가 (키 이름 통일!)
+                            if 'sub_categories' not in current_sub_category:
+                                current_sub_category['sub_categories'] = []
+                            current_sub_category['sub_categories'].append(current_sub_sub_category)
+                            print(f"  ✅ sub_sub 생성: parent=[{current_sub_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
                         continue
                     # 1), 2) 패턴은 sub_category (2단계 계층)
                     elif re.match(r'^\d+\)$', gong_jong):
@@ -727,12 +730,13 @@ with tab2:
                             
                             if existing_sub:
                                 print(f"🔵 sub 재사용: category=[{current_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
-                                # 현재 sub가 있고, 기존 것과 다르면 append
+                                # 이전 sub가 있으면 append (기존과 다른 경우에만)
                                 if current_sub_category and current_sub_category != existing_sub:
-                                    # 같은 객체가 이미 리스트에 있는지 체크 (객체 ID)
                                     is_already_in_list = any(s is current_sub_category for s in current_category['sub_categories'])
                                     if not is_already_in_list:
+                                        print(f"  ⚠️ 이전 sub [{current_sub_category.get('name')}] append")
                                         current_category['sub_categories'].append(current_sub_category)
+                                # 기존 sub로 교체
                                 current_sub_category = existing_sub
                             else:
                                 print(f"🟢 sub 생성: category=[{current_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")

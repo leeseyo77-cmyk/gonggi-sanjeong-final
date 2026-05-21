@@ -1175,7 +1175,7 @@ with tab2:
                                                         st.dataframe(
                                                             pd.DataFrame(detail_items),
                                                             hide_index=True,
-                                                            use_container_width=True
+                                                            width="stretch"
                                                         )
                                             
                                             # sub_items가 있으면 표시 (sub_sub_categories가 없을 때만)
@@ -1204,7 +1204,7 @@ with tab2:
                                                     st.dataframe(
                                                         pd.DataFrame(detail_items),
                                                         hide_index=True,
-                                                        use_container_width=True
+                                                        width="stretch"
                                                     )
                                     
                                     # 직접 항목도 있으면 표시
@@ -1234,7 +1234,7 @@ with tab2:
                                             st.dataframe(
                                                 pd.DataFrame(detail_items),
                                                 hide_index=True,
-                                                use_container_width=True
+                                                width="stretch"
                                             )
                     
                     ca, cb = st.columns(2)
@@ -1365,7 +1365,7 @@ with tab2:
                                 
                                 st.dataframe(
                                     display_df,
-                                    use_container_width=True,
+                                    width="stretch",
                                     height=400,
                                     column_config={
                                         "공종": st.column_config.TextColumn("공종", width="large"),
@@ -1470,12 +1470,12 @@ with tab3:
                 return ["background-color:#3d0000;color:#ff6b6b"] * len(row)
             return [""] * len(row)
 
-        st.dataframe(df_cp.style.apply(hl_cp, axis=1), hide_index=True, use_container_width=True)
+        st.dataframe(df_cp.style.apply(hl_cp, axis=1), hide_index=True, width="stretch")
         
         fig_bar = px.bar(df_cp, x="작업일수(일)", y="공종", orientation="h", text="작업일수(일)",
                          color="작업일수(일)", color_continuous_scale=["#27AE60","#F39C12","#E74C3C"])
         fig_bar.update_layout(height=350, showlegend=False, yaxis=dict(autorange="reversed"))
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width="stretch")
     else:
         st.warning("TAB 2에서 엑셀을 먼저 업로드해주세요.")
 
@@ -1548,7 +1548,7 @@ with tab5:
         
         st.markdown("---")
         
-        if st.button("📥 엑셀 보고서 생성", type="primary", use_container_width=True):
+        if st.button("📥 엑셀 보고서 생성", type="primary", width="stretch"):
             try:
                 from openpyxl import Workbook
                 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -1794,7 +1794,7 @@ with tab5:
                     data=excel_buffer,
                     file_name=f"공사기간_산정_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
+                    width="stretch"
                 )
                 
             except Exception as e:

@@ -215,11 +215,20 @@ WORK_KEY_MAP = [
 ]
 
 def get_work_key(name: str, spec: str):
+    # 🔥 추진공 제외 항목: 추진설비, 갱구, 선도체 등은 별도 설비로 제외
+    exclude_keywords = ["추진설비", "갱구", "선도체", "스크류콘베어", "커터교환", "갱구절단"]
+    
     for name_kws, spec_kws, key in WORK_KEY_MAP:
         if not any(kw in name for kw in name_kws):
             continue
         if spec_kws and not any(kw in (name+spec) for kw in spec_kws):
             continue
+        
+        # 🔥 추진공 매칭 시 제외 키워드 체크
+        if "추진" in str(key):
+            if any(excl in name for excl in exclude_keywords):
+                continue  # 제외 항목은 스킵
+        
         return key
     return None
 

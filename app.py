@@ -346,7 +346,8 @@ def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
     except Exception:
         pass
 
-    return 0, "-", "-"
+    # 4순위: 매칭 안 됨 → 수동입력 필요
+    return 0, "⚠️ 수동입력", "매칭 안 됨"
 
 # ══════════════════════════════════════════════════════════════
 # 비작업일수
@@ -383,6 +384,19 @@ def calc_completion_date(start, work_days):
 # 엑셀 파서
 # ══════════════════════════════════════════════════════════════
 def parse_by_keyword(file):
+    # 🔥 디버그: 파일 로그
+    import datetime
+    log_file = "debug_log.txt"
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"파싱 시작: {datetime.datetime.now()}\n")
+        f.write(f"{'='*60}\n")
+    
+    # 🔥 디버그: 파싱 시작
+    print(f"\n{'🔥'*30}")
+    print(f"📂 parse_by_keyword 시작")
+    print(f"{'🔥'*30}\n")
+    
     wb = openpyxl.load_workbook(file, data_only=True)  # read_only=False로 변경
     skip_sheets = ["목차","안내","INITIAL","초기","index"]
     priority = ["설계내역서","내역서","공사비내역서"]
@@ -757,63 +771,95 @@ with tab2:
                     
                     # 항목 매칭 - 현재 지구만
                     if current_category and not gong_jong and name and current_district:
-                        for item in matched:
-                            # 지구가 다르면 스킵
-                            if item.get('district') != current_district:
-                                continue
-                            
-                            # 공백 제거 후 비교
-                            item_name_clean = item['name'].replace(" ", "").replace("\u3000", "").strip()
-                            name_clean = name.replace(" ", "").replace("\u3000", "").strip()
-                            item_spec_clean = item.get('spec', '').replace(" ", "").replace("\u3000", "").strip()
-                            spec_clean = spec.replace(" ", "").replace("\u3000", "").strip()
-                            
-                            # 이름이 일치하거나 포함되면 OK
-                            name_match = (item_name_clean == name_clean or 
-                                        item_name_clean in name_clean or 
-                                        name_clean in item_name_clean)
-                            
-                            spec_match = (not spec_clean or 
-                                        item_spec_clean == spec_clean or 
-                                        spec_clean in item_spec_clean or 
-                                        item_spec_clean in spec_clean)
-                            
-                            if name_match and spec_match:
-                                # sub_sub_category가 있으면 거기에 추가
-                                if current_sub_sub_category:
-                                    existing_item = next((i for i in current_sub_sub_category['items']
-                                                         if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
-                                    if existing_item:
-                                        existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
-                                        print(f"  ✨ 수량 합산(sub_sub): {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
-                                    else:
-                                        current_sub_sub_category['items'].append(item)
-                                # sub_category에 추가
-                                elif current_sub_category:
-                                    # 같은 name+spec 항목이 있으면 수량 합산
-                                    existing_item = next((i for i in current_sub_category['items'] 
-                                                         if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
-                                    if existing_item:
-                                        existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
-                                        # 추진공 관련은 자세히 로그
-                                        if "추진" in current_sub_category.get('name', ''):
-                                            print(f"  🔧 추진공 수량 합산: [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) {item.get('qty', 0)} {item.get('unit', '')} → 총 {existing_item['qty']}")
-                                        else:
-                                            print(f"  ✨ 수량 합산: {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
-                                    else:
-                                        current_sub_category['items'].append(item)
-                                        if "추진" in current_sub_category.get('name', ''):
-                                            print(f"  🆕 추진공 항목 추가: [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) {item.get('qty', 0)} {item.get('unit', '')}")
+                        # matched 리스트에서 현재 지구 항목만 필터링
+                        district_items = [item for item in matched if item.get('district') == current_district]
+                        
+                        if not district_items:
+                            continue
+                        
+                        # 첫 번째 항목만 사용 (중복 방지)
+                        item = district_items[0]
+                        
+                        # 공백 제거 후 매칭 체크
+                        item_name_clean = item['name'].replace(" ", "").replace("\u3000", "").strip()
+                        name_clean = name.replace(" ", "").replace("\u3000", "").strip()
+                        item_spec_clean = item.get('spec', '').replace(" ", "").replace("\u3000", "").strip()
+                        spec_clean = spec.replace(" ", "").replace("\u3000", "").strip()
+                        
+                        # 이름이 일치하거나 포함되면 OK
+                        name_match = (item_name_clean == name_clean or 
+                                    item_name_clean in name_clean or 
+                                    name_clean in item_name_clean)
+                        
+                        spec_match = (not spec_clean or 
+                                    item_spec_clean == spec_clean or 
+                                    spec_clean in item_spec_clean or 
+                                    item_spec_clean in spec_clean)
+                        
+                        # ✅ 매칭 여부와 무관하게 항목 추가 (calc_days_priority에서 처리)
+                        # 단, 매칭 정보는 기록
+                        matched_flag = name_match and spec_match
+                        if not matched_flag:
+                            # 매칭 실패한 항목에 플래그 추가
+                            item['_unmatched'] = True
+                        
+                        # 🔥 추진공 특수 처리: #N 추진 하위 항목은 상위 "추진공"으로 합산
+                        if (current_sub_sub_category and 
+                            current_sub_category and 
+                            "추진" in current_sub_category.get('name', '') and
+                            re.match(r'^#\d+', current_sub_sub_category.get('name', ''))):
+                            # #1 추진, #2 추진 등의 항목은 상위 "1) 추진공"에 합산
+                            existing_item = next((i for i in current_sub_category['items'] 
+                                                 if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                            if existing_item:
+                                existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
+                                msg = f"🔧 추진공 수량 합산(#N→상위): [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) +{item.get('qty', 0)} → 총 {existing_item['qty']} {item.get('unit', '')}"
+                                print(f"  {msg}")
+                                with open("debug_log.txt", "a", encoding="utf-8") as f:
+                                    f.write(f"{msg}\n")
+                            else:
+                                current_sub_category['items'].append(item)
+                                msg = f"🆕 추진공 항목 추가(#N→상위): [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) {item.get('qty', 0)} {item.get('unit', '')}"
+                                print(f"  {msg}")
+                                with open("debug_log.txt", "a", encoding="utf-8") as f:
+                                    f.write(f"{msg}\n")
+                        # sub_sub_category가 있으면 거기에 추가 (일반 케이스)
+                        elif current_sub_sub_category:
+                            existing_item = next((i for i in current_sub_sub_category['items']
+                                                 if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                            if existing_item:
+                                existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
+                                print(f"  ✨ 수량 합산(sub_sub): {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
+                            else:
+                                current_sub_sub_category['items'].append(item)
+                        # sub_category에 추가
+                        elif current_sub_category:
+                            # 같은 name+spec 항목이 있으면 수량 합산
+                            existing_item = next((i for i in current_sub_category['items'] 
+                                                 if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                            if existing_item:
+                                existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
+                                # 추진공 관련은 자세히 로그
+                                if "추진" in current_sub_category.get('name', ''):
+                                    print(f"  🔧 추진공 수량 합산: [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) {item.get('qty', 0)} {item.get('unit', '')} → 총 {existing_item['qty']}")
                                 else:
-                                    # category에 직접 추가할 때도 같은 로직
-                                    existing_item = next((i for i in current_category['items'] 
-                                                         if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
-                                    if existing_item:
-                                        existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
-                                        print(f"  ✨ 수량 합산: {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
-                                    else:
-                                        current_category['items'].append(item)
-                                break
+                                    print(f"  ✨ 수량 합산: {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
+                            else:
+                                current_sub_category['items'].append(item)
+                                if "추진" in current_sub_category.get('name', ''):
+                                    msg = f"🆕 추진공 항목 추가: [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) {item.get('qty', 0)} {item.get('unit', '')}"
+                                    print(f"  {msg}")
+                                    with open("debug_log.txt", "a", encoding="utf-8") as f:
+                                        f.write(f"{msg}\n")
+                        else:
+                            # category에 직접 추가할 때도 같은 로직
+                            existing_item = next((i for i in current_category['items'] 
+                                                 if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                            if existing_item:
+                                existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
+                                print(f"  ✨ 수량 합산: {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
+                            else:
+                                current_category['items'].append(item)
                 
                 if current_category:
                     # sub_sub_category 마무리
@@ -1110,7 +1156,20 @@ with tab2:
                                             for item in sub_items:
                                                 d, _, _ = calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'], item.get('unit', ''))
                                                 sub_days += d
-                                                # 추진공 디버깅
+                                                
+                                                # 🔥 디버그: 추진 관련 항목 상세 출력
+                                                if "추진" in cat_name or "추진" in sub_name or "추진" in item['name']:
+                                                    print(f"\n{'='*60}")
+                                                    print(f"📍 카테고리: {cat_name}")
+                                                    print(f"📍 세부공종: {sub_name}")
+                                                    print(f"📌 항목명: {item['name']}")
+                                                    print(f"📌 규격: {item.get('spec', '')}")
+                                                    print(f"📌 수량: {item.get('qty', 0)} {item.get('unit', '')}")
+                                                    print(f"🔑 work_key: {item.get('work_key', 'None')}")
+                                                    print(f"⏰ 작업일수: {d}일")
+                                                    print(f"{'='*60}")
+                                                
+                                                # 추진공 디버깅 (기존)
                                                 if "추진" in sub_name and d > 100:
                                                     print(f"⚠️ 큰 작업일수: {sub_name} - {item['name']} ({item.get('spec', '')}) qty={item.get('qty', 0)} unit={item.get('unit', '')} → {d}일")
                                             
@@ -1133,7 +1192,36 @@ with tab2:
                                             else:
                                                 st.markdown(f"#### {sub_level} {sub_name} ({sub_days}일)")
                                             
-                                            # sub_sub_categories가 있으면 표시 (3단계 계층)
+                                            # 🔥 sub_items 먼저 표시 (추진공의 경우 여기에 합산됨!)
+                                            if sub_items:
+                                                detail_items = []
+                                                for item in sub_items:
+                                                    d, label, method = calc_days_priority(
+                                                        item['name'],
+                                                        item.get('spec', ''),
+                                                        item.get('qty', 0),
+                                                        row['crew'],
+                                                        item.get('unit', '')
+                                                    )
+                                                    detail_items.append({
+                                                        "세부공종": item['name'],
+                                                        "규격": item.get('spec', ''),
+                                                        "수량": f"{item.get('qty', 0):,.1f}",
+                                                        "단위": item.get('unit', ''),
+                                                        "1일작업량": label,
+                                                        "투입조수": row['crew'],
+                                                        "작업일수": int(d),
+                                                        "출처": method
+                                                    })
+                                                
+                                                if detail_items:
+                                                    st.dataframe(
+                                                        pd.DataFrame(detail_items),
+                                                        hide_index=True,
+                                                        width="stretch"
+                                                    )
+                                            
+                                            # sub_sub_categories가 있으면 추가로 표시 (3단계 계층)
                                             if sub_data.get('sub_categories'):
                                                 for sub_sub in sub_data['sub_categories']:
                                                     sub_sub_level = sub_sub.get('level', '')
@@ -1178,8 +1266,8 @@ with tab2:
                                                             width="stretch"
                                                         )
                                             
-                                            # sub_items가 있으면 표시 (sub_sub_categories가 없을 때만)
-                                            elif sub_items:
+                                            # (아래 elif 블록은 제거됨 - 위에서 이미 처리)
+                                            if False:
                                                 detail_items = []
                                                 for item in sub_items:
                                                     d, label, method = calc_days_priority(

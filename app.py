@@ -11,17 +11,41 @@ from io import BytesIO
 # 가이드라인 데이터 및 기상 데이터 import
 try:
     from guideline_data import GUIDELINE_APPENDIX_FULL, GUIDELINE_APPENDIX
-    from weather_data import HEAT_DAYS, REGIONS, get_heat_days_by_region, get_total_non_work_days
-except ImportError:
+    from weather_data import (
+        RAIN_DAYS, COLD_DAYS, HOT_DAYS, REGION_MAPPING,
+        get_total_non_work_days, get_monthly_breakdown
+    )
+    from holiday_data import (
+        LEGAL_HOLIDAYS, get_legal_holidays, get_total_holidays,
+        calc_overlap_days, get_total_non_work_days_with_holidays,
+        get_holiday_breakdown_monthly
+    )
+    REGIONS = list(REGION_MAPPING.keys())
+except ImportError as e:
+    print(f"Import 실패: {e}")
     # 파일이 없을 경우 기본값 사용
     GUIDELINE_APPENDIX_FULL = {}
     GUIDELINE_APPENDIX = {}
-    HEAT_DAYS = {}
+    RAIN_DAYS = {}
+    COLD_DAYS = {}
+    HOT_DAYS = {}
+    REGION_MAPPING = {"서울": "서울"}
     REGIONS = ["서울"]
-    def get_heat_days_by_region(region, month=None):
-        return 0.0
-    def get_total_non_work_days(region, start, end):
-        return 0.0
+    LEGAL_HOLIDAYS = {}
+    def get_total_non_work_days(region, start_date, end_date, check_rain=True, check_cold=True, check_hot=True):
+        return 0
+    def get_monthly_breakdown(region, start_date, end_date, check_rain=True, check_cold=True, check_hot=True):
+        return []
+    def get_legal_holidays(year, month):
+        return 0
+    def get_total_holidays(start_date, end_date):
+        return 0
+    def calc_overlap_days(a, b, c):
+        return 0
+    def get_total_non_work_days_with_holidays(*args, **kwargs):
+        return {"total": 0, "weather": 0, "holidays": 0, "overlap": 0, "formula": ""}
+    def get_holiday_breakdown_monthly(start_date, end_date):
+        return []
 
 st.set_page_config(page_title="상하수도 공기산정", layout="wide", initial_sidebar_state="expanded")
 
@@ -182,6 +206,20 @@ def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
     if not qty or qty <= 0:
         return 0, "-", "-"
 
+    # 0순위: 수동입력 (최우선)
+    try:
+        if "manual_rates" in st.session_state:
+            manual_key = f"{name}|{spec}"  # 이름+규격으로 키 생성
+            if manual_key in st.session_state["manual_rates"]:
+                manual_data = st.session_state["manual_rates"][manual_key]
+                daily_val = manual_data.get("daily", 0)
+                unit = manual_data.get("unit", "")
+                if daily_val > 0:
+                    days = math.ceil(qty / (daily_val * crews))
+                    return days, f"{daily_val:.1f}{unit}", "수동입력"
+    except Exception:
+        pass
+
     # 1순위: 가이드라인
     try:
         # 정확한 매칭 시도
@@ -230,6 +268,17 @@ def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
             if matched:
                 base_daily = val.get("daily", 0)
                 unit = val.get("unit", "")
+                
+                # ⚠️ 의심스러운 가이드라인 스킵 (이상 값 방지)
+                # 1. unit="일" 같이 명확하지 않은 단위
+                # 2. daily가 1 미만으로 너무 작은 값 (1m/일 미만은 비정상)
+                unit_clean = unit.strip().lower()
+                if unit_clean in ["일", "day", "days", ""]:
+                    # 단위가 "일"이면 의미 불명확 → 매칭 안 됨으로 처리
+                    continue
+                if base_daily > 0 and base_daily < 1:
+                    # 1일에 1단위 미만은 너무 작음 → 매칭 안 됨으로 처리
+                    continue
                 
                 # ⚠️ 단위 불일치 체크
                 if item_unit and unit and base_daily > 0:
@@ -557,15 +606,32 @@ st.sidebar.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-st.sidebar.info("📅 **공사 시작일**은 TAB 4에서 설정")
+# 📋 워크플로우 가이드
+st.sidebar.markdown("""
+<div style='background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); 
+            padding: 16px; border-radius: 10px; margin-bottom: 20px;'>
+    <h3 style='color: white; margin: 0 0 12px 0; font-size: 16px;'>📋 작업 순서</h3>
+    <ol style='color: #dbeafe; margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.8;'>
+        <li>📂 <strong>엑셀 인식</strong><br><span style='font-size: 11px; color: #93c5fd;'>설계내역서 업로드</span></li>
+        <li>📝 <strong>수동입력</strong><br><span style='font-size: 11px; color: #93c5fd;'>매칭 안 된 항목 입력</span></li>
+        <li>🌧 <strong>비작업일수</strong><br><span style='font-size: 11px; color: #93c5fd;'>기상·휴일 반영</span></li>
+        <li>📋 <strong>공기산정</strong><br><span style='font-size: 11px; color: #93c5fd;'>투입조수·작업일수</span></li>
+        <li>🔍 <strong>CP 분석</strong><br><span style='font-size: 11px; color: #93c5fd;'>주요공종 식별</span></li>
+        <li>📄 <strong>보고서</strong><br><span style='font-size: 11px; color: #93c5fd;'>최종 결과 출력</span></li>
+    </ol>
+</div>
+""", unsafe_allow_html=True)
+
+st.sidebar.info("📅 **공사 시작일**은 TAB '비작업일수 계산기'에서 설정")
 st.title("상하수도 관로공사 공기산정 시스템")
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📋 공기산정",
+tab2, tab6, tab4, tab1, tab3, tab5 = st.tabs([
     "📂 엑셀 내역서 인식",
-    "🔍 주요공종 CP 분석",
+    "📝 수동입력 관리",
     "🌧 비작업일수 계산기",
+    "📋 공기산정",
+    "🔍 주요공종 CP 분석",
     "📄 공기산정 보고서"
 ])
 
@@ -579,14 +645,29 @@ with tab2:
     uploaded = st.file_uploader("설계내역서 엑셀 (.xlsx)", type=["xlsx","xls"])
 
     if uploaded:
+        # 프로그레스 바
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
         try:
+            status_text.text("📂 엑셀 파일 로드 중...")
+            progress_bar.progress(20)
+            
             with st.spinner("파싱 중..."):
                 all_rows, col_info = parse_by_keyword(uploaded)
-
+            
+            progress_bar.progress(40)
+            status_text.text("✅ 파싱 완료!")
+            
             matched = [r for r in all_rows if r["group"] != "기타"]
-            st.success(f"시트 **{col_info['시트명']}** | 인식 **{len(matched)}건**")
-
+            
+            progress_bar.progress(60)
+            status_text.text("🔍 계층 구조 분석 중...")
+            
             if matched:
+                status_text.text("📊 UI 생성 중...")
+                progress_bar.progress(80)
+                
                 st.markdown("---")
                 
                 wb = openpyxl.load_workbook(uploaded, data_only=True)
@@ -769,39 +850,30 @@ with tab2:
                                 }
                         # continue를 제거하여 다음 행 계속 읽기
                     
-                    # 항목 매칭 - 현재 지구만
-                    if current_category and not gong_jong and name and current_district:
-                        # matched 리스트에서 현재 지구 항목만 필터링
-                        district_items = [item for item in matched if item.get('district') == current_district]
+                    # 항목 매칭
+                    if current_category and not gong_jong and name:
+                        # 엑셀 row에서 직접 수량/단위 읽기
+                        qty_val = row[3] if len(row) > 3 else None
+                        unit_val = row[4] if len(row) > 4 else None
                         
-                        if not district_items:
+                        try:
+                            qty = float(qty_val) if qty_val else 0
+                        except:
+                            qty = 0
+                        
+                        if qty <= 0:
                             continue
                         
-                        # 첫 번째 항목만 사용 (중복 방지)
-                        item = district_items[0]
+                        unit = str(unit_val).strip() if unit_val else ""
                         
-                        # 공백 제거 후 매칭 체크
-                        item_name_clean = item['name'].replace(" ", "").replace("\u3000", "").strip()
-                        name_clean = name.replace(" ", "").replace("\u3000", "").strip()
-                        item_spec_clean = item.get('spec', '').replace(" ", "").replace("\u3000", "").strip()
-                        spec_clean = spec.replace(" ", "").replace("\u3000", "").strip()
-                        
-                        # 이름이 일치하거나 포함되면 OK
-                        name_match = (item_name_clean == name_clean or 
-                                    item_name_clean in name_clean or 
-                                    name_clean in item_name_clean)
-                        
-                        spec_match = (not spec_clean or 
-                                    item_spec_clean == spec_clean or 
-                                    spec_clean in item_spec_clean or 
-                                    item_spec_clean in spec_clean)
-                        
-                        # ✅ 매칭 여부와 무관하게 항목 추가 (calc_days_priority에서 처리)
-                        # 단, 매칭 정보는 기록
-                        matched_flag = name_match and spec_match
-                        if not matched_flag:
-                            # 매칭 실패한 항목에 플래그 추가
-                            item['_unmatched'] = True
+                        # 항목 객체 생성
+                        item = {
+                            'name': name,
+                            'spec': spec,
+                            'qty': qty,
+                            'unit': unit,
+                            'district': current_district  # None일 수도 있음
+                        }
                         
                         # 🔥 추진공 특수 처리: #N 추진 하위 항목은 상위 "추진공"으로 합산
                         if (current_sub_sub_category and 
@@ -902,7 +974,12 @@ with tab2:
                     for major_key in major_groups:
                         major_groups[major_key].sort(key=lambda x: tuple(int(p) for p in x['level'].split('.')))
                     
-                    st.info(f"✅ {len(major_groups)}개 공종 그룹, {sum(len(v) for v in major_groups.values())}개 주공종 인식")
+                    # 프로그레스 완료
+                    progress_bar.progress(100)
+                    status_text.empty()
+                    progress_bar.empty()
+                    
+                    st.success(f"✅ 파싱 완료! {len(major_groups)}개 공종 그룹, {sum(len(v) for v in major_groups.values())}개 주공종 인식")
                     
                     # 그룹명 정의
                     major_names = {
@@ -919,7 +996,19 @@ with tab2:
                     
                     major_tabs = st.tabs(tab_labels)
                     
+                    # 🔧 session_state 초기화
+                    if 'crew_by_main' not in st.session_state:
+                        st.session_state['crew_by_main'] = {}
+                    
+                    # 🔧 모든 카테고리 crew 기본값 미리 설정 (TAB 열기 전에!)
                     all_crew_settings = {}
+                    for major_key in sorted_keys:
+                        for cat in major_groups[major_key]:
+                            cat_name = cat['name']
+                            cat_level = cat['level']
+                            cat_full = f"{cat_level} {cat_name}"
+                            # 기본값 3조
+                            all_crew_settings[cat_name] = st.session_state['crew_by_main'].get(cat_full, 3)
                     
                     for tab_idx, (major_key, major_tab) in enumerate(zip(sorted_keys, major_tabs)):
                         with major_tab:
@@ -960,7 +1049,7 @@ with tab2:
                     for cat in hierarchy:
                         cat_name = cat['name']
                         cat_level = cat['level']
-                        cat_crew = crew_settings[cat_name]
+                        cat_crew = crew_settings.get(cat_name, 3)
                         
                         all_cat_items = list(cat.get('items', []))
                         for sub in cat.get('sub_categories', []):
@@ -1056,20 +1145,6 @@ with tab2:
                     result_rows_merged = list(merged_rows.values())
                     max_days = max((r["작업일수(일)"] for r in result_rows_merged), default=0)
                     
-                    # 디버그: 어떤 카테고리들이 있는지 확인
-                    print("=" * 80)
-                    print("📊 UI로 전달되는 카테고리 목록:")
-                    for row in result_rows_merged:
-                        sub_count = len(row.get('하위카테고리', []))
-                        print(f"  - {row['공종']} ({row['작업일수(일)']}일, sub_categories={sub_count}개)")
-                        if '추진' in row['공종']:
-                            print(f"    🔍 하위카테고리 상세:")
-                            for sub in row.get('하위카테고리', []):
-                                sub_sub_count = len(sub.get('sub_categories', []))
-                                items_count = len(sub.get('items', []))
-                                print(f"      - {sub['level']} {sub['name']}: items={items_count}, sub_sub={sub_sub_count}")
-                    print("=" * 80)
-                    
                     # 그룹별로 표시
                     grouped_results = {}
                     for row in result_rows_merged:
@@ -1077,6 +1152,16 @@ with tab2:
                         if major_key not in grouped_results:
                             grouped_results[major_key] = []
                         grouped_results[major_key].append(row)
+                    
+                    # 🔧 session_state에 저장 (TAB 2에서 사용)
+                    st.session_state['grouped_results'] = grouped_results
+                    st.session_state['group_names'] = {
+                        "1.1": "🏗️ 하수관로공사",
+                        "1.2": "🔧 관로 부대공사",
+                        "2.1": "💧 배수설비공사",
+                        "2.2": "⚙️ 기계설비",
+                    }
+                    st.session_state['max_days'] = max_days
                     
                     # 그룹명
                     group_names = {
@@ -1091,7 +1176,8 @@ with tab2:
                         group_name = group_names.get(major_key, f"📁 {major_key}")
                         rows_in_group = grouped_results[major_key]
                         
-                        with st.expander(f"**{group_name}** ({len(rows_in_group)}개 공종)", expanded=True):
+                        # outer expander를 닫힌 상태로 시작 (성능 향상)
+                        with st.expander(f"**{group_name}** ({len(rows_in_group)}개 공종)", expanded=False):
                             for idx, row in enumerate(rows_in_group):
                                 is_max = (row["작업일수(일)"] == max_days and max_days > 0)
                                 
@@ -1157,19 +1243,7 @@ with tab2:
                                                 d, _, _ = calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'], item.get('unit', ''))
                                                 sub_days += d
                                                 
-                                                # 🔥 디버그: 추진 관련 항목 상세 출력
-                                                if "추진" in cat_name or "추진" in sub_name or "추진" in item['name']:
-                                                    print(f"\n{'='*60}")
-                                                    print(f"📍 카테고리: {cat_name}")
-                                                    print(f"📍 세부공종: {sub_name}")
-                                                    print(f"📌 항목명: {item['name']}")
-                                                    print(f"📌 규격: {item.get('spec', '')}")
-                                                    print(f"📌 수량: {item.get('qty', 0)} {item.get('unit', '')}")
-                                                    print(f"🔑 work_key: {item.get('work_key', 'None')}")
-                                                    print(f"⏰ 작업일수: {d}일")
-                                                    print(f"{'='*60}")
-                                                
-                                                # 추진공 디버깅 (기존)
+                                                # 추진공 디버깅 (큰 작업일수만)
                                                 if "추진" in sub_name and d > 100:
                                                     print(f"⚠️ 큰 작업일수: {sub_name} - {item['name']} ({item.get('spec', '')}) qty={item.get('qty', 0)} unit={item.get('unit', '')} → {d}일")
                                             
@@ -1220,6 +1294,104 @@ with tab2:
                                                         hide_index=True,
                                                         width="stretch"
                                                     )
+                                                    
+                                                    # 🔧 수동입력 UI: 매칭 안 된 항목만
+                                                    unmatched_items = [
+                                                        (idx, item, detail_items[idx]) 
+                                                        for idx, item in enumerate(sub_items)
+                                                        if detail_items[idx]["출처"] == "매칭 안 됨"
+                                                    ]
+                                                    
+                                                    if unmatched_items:
+                                                        st.markdown("---")
+                                                        st.info(f"📝 매칭 안 된 항목: {len(unmatched_items)}개 - **TAB 6 '수동입력 관리'**에서 입력하세요!")
+                                                        
+                                                        # 🔧 session_state에 매칭 안 된 항목 수집
+                                                        if "unmatched_all" not in st.session_state:
+                                                            st.session_state["unmatched_all"] = {}
+                                                        
+                                                        # 카테고리별로 저장
+                                                        cat_key = f"{major_key}_{row['공종']}"
+                                                        if cat_key not in st.session_state["unmatched_all"]:
+                                                            st.session_state["unmatched_all"][cat_key] = {
+                                                                "major_key": major_key,
+                                                                "group_name": group_name,
+                                                                "category": row['공종'],
+                                                                "items": []
+                                                            }
+                                                        
+                                                        for idx_um, item_um, _ in unmatched_items:
+                                                            manual_key_um = f"{item_um['name']}|{item_um.get('spec', '')}"
+                                                            # 중복 방지
+                                                            existing = [i for i in st.session_state["unmatched_all"][cat_key]["items"] if i["manual_key"] == manual_key_um]
+                                                            if not existing:
+                                                                st.session_state["unmatched_all"][cat_key]["items"].append({
+                                                                    "name": item_um['name'],
+                                                                    "spec": item_um.get('spec', ''),
+                                                                    "qty": item_um.get('qty', 0),
+                                                                    "unit": item_um.get('unit', ''),
+                                                                    "manual_key": manual_key_um,
+                                                                    "sub_name": sub_name
+                                                                })
+                                                        
+                                                        # 🔧 수동입력 UI 일시 비활성화 (성능 문제로)
+                                                        # TODO: 추후 별도 페이지로 분리
+                                                        if False:  # 비활성화
+                                                            # session_state 초기화
+                                                            if "manual_rates" not in st.session_state:
+                                                                st.session_state["manual_rates"] = {}
+                                                            
+                                                            for idx, item, detail_row in unmatched_items:
+                                                                manual_key = f"{item['name']}|{item.get('spec', '')}"
+                                                                
+                                                                # 고유 키 생성 (카테고리명 포함으로 완전히 고유하게!)
+                                                            cat_name = row['공종']
+                                                            unique_key = f"{major_key}_{cat_name}_{sub_level}_{sub_name}_{manual_key}_{idx}".replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_").replace("|", "_")
+                                                            
+                                                            col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                                                            
+                                                            with col1:
+                                                                st.text(f"{item['name']} ({item.get('spec', '')})")
+                                                            
+                                                            with col2:
+                                                                # 기존 값 불러오기
+                                                                existing_val = 0
+                                                                existing_unit = item.get('unit', '') + "/일"
+                                                                if manual_key in st.session_state["manual_rates"]:
+                                                                    existing_val = st.session_state["manual_rates"][manual_key].get("daily", 0)
+                                                                    existing_unit = st.session_state["manual_rates"][manual_key].get("unit", existing_unit)
+                                                                
+                                                                daily_rate = st.number_input(
+                                                                    "1일 작업량",
+                                                                    min_value=0.0,
+                                                                    value=float(existing_val),
+                                                                    step=0.1,
+                                                                    key=f"manual_input_{unique_key}",
+                                                                    label_visibility="collapsed"
+                                                                )
+                                                            
+                                                            with col3:
+                                                                unit_input = st.text_input(
+                                                                    "단위",
+                                                                    value=existing_unit,
+                                                                    key=f"manual_unit_{unique_key}",
+                                                                    label_visibility="collapsed"
+                                                                )
+                                                            
+                                                            with col4:
+                                                                if st.button("저장", key=f"manual_save_{unique_key}"):
+                                                                    if daily_rate > 0:
+                                                                        st.session_state["manual_rates"][manual_key] = {
+                                                                            "daily": daily_rate,
+                                                                            "unit": unit_input
+                                                                        }
+                                                                        st.success("✅ 저장됨!")
+                                                                        st.rerun()
+                                                            
+                                                            # 계산 결과 미리보기
+                                                            if daily_rate > 0:
+                                                                calc_days = math.ceil(item.get('qty', 0) / (daily_rate * row['crew']))
+                                                                st.caption(f"→ 예상 작업일수: **{calc_days}일** (조수: {row['crew']})")
                                             
                                             # sub_sub_categories가 있으면 추가로 표시 (3단계 계층)
                                             if sub_data.get('sub_categories'):
@@ -1483,53 +1655,64 @@ with tab2:
 with tab1:
     st.subheader("📋 공기산정 요약")
     
-    st.markdown("### ⚙️ 기본 설정")
+    # session_state에서 지역 가져오기 (비작업일수 탭에서 설정)
+    selected_region = st.session_state.get("selected_region", "서울")
+    
+    # 지역이 설정되지 않은 경우 안내
+    if "selected_region" not in st.session_state:
+        st.warning("⚠️ 먼저 **'비작업일수 계산기'** 탭에서 공사 지역을 선택해주세요!")
+    
+    st.markdown("### 📊 공사 정보 요약")
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        selected_region = st.selectbox(
-            "🌍 공사 지역 선택",
-            options=REGIONS,
-            index=REGIONS.index("서울") if "서울" in REGIONS else 0,
-            help="지역별 기상 데이터 (혹서기 비작업일수) 적용"
-        )
-        st.session_state["selected_region"] = selected_region
+        st.metric("📍 공사 지역", selected_region)
     
     with col2:
-        st.metric("선택 지역", selected_region)
+        total_work_days = st.session_state.get("total_work_days", 0)
+        st.metric("💼 총 순작업일수", f"{total_work_days}일")
     
     with col3:
-        if selected_region in HEAT_DAYS:
-            annual_heat_days = HEAT_DAYS[selected_region].get("연간", 0)
-            st.metric("연간 혹서기 일수", f"{annual_heat_days:.1f}일")
+        # 비작업일수 결과 표시 (있는 경우)
+        if "weather_result" in st.session_state:
+            non_work = st.session_state["weather_result"].get("non_work_days", 0)
+            st.metric("🚫 비작업일수", f"{non_work}일")
+        else:
+            st.metric("🚫 비작업일수", "미계산")
     
     st.markdown("---")
     
     if "work_result" in st.session_state:
-        st.success("✅ TAB 2에서 계산 완료!")
+        st.success("✅ 엑셀 인식 탭에서 계산 완료!")
         
-        col_a, col_b, col_c = st.columns(3)
-        total_work_days = st.session_state.get('total_work_days', 0)
-        
-        col_a.metric("💼 총 순작업일수", f"{total_work_days}일")
-        col_b.metric("🌍 적용 지역", selected_region)
-        
-        # 작업 기간 동안 혹서기 일수 예상 (7-8월 기준)
-        estimated_heat = get_total_non_work_days(selected_region, 7, 8)
-        col_c.metric("🔥 여름철 혹서기", f"{estimated_heat:.1f}일")
-        
-        # 연간 혹서기 일수 가져오기
-        annual_heat_days = HEAT_DAYS.get(selected_region, {}).get("연간", 0)
-        
-        st.info(f"""
-        **📍 {selected_region} 지역 기상 정보**
-        - 연간 혹서기 비작업일수: {annual_heat_days:.1f}일
-        - 7-8월 혹서기: {estimated_heat:.1f}일
-        - TAB 4에서 상세 공기 계산 가능
-        """)
+        # 최종 결과 (비작업일수 계산 완료된 경우)
+        if "weather_result" in st.session_state:
+            result = st.session_state["weather_result"]
+            
+            st.markdown("### 🎯 최종 공기산정 결과")
+            
+            col_a, col_b, col_c, col_d = st.columns(4)
+            col_a.metric("📅 총 공사기간", f"{result['total_days']}일")
+            col_b.metric("💼 순작업일수", f"{result['work_days']}일")
+            col_c.metric("🚫 비작업일수", f"{result['non_work_days']}일")
+            col_d.metric("📍 적용 지역", result['region'])
+            
+            st.info(f"""
+            **📍 {result['region']} 지역 공기산정 결과**
+            - 착공일: {result['start_date'].strftime('%Y년 %m월 %d일')}
+            - 준공일: {result['end_date'].strftime('%Y년 %m월 %d일')}
+            - 총 공사기간: **{result['total_days']}일**
+            
+            **적용된 비작업일 조건:**
+            - {'✅' if result['include_rain'] else '❌'} 강우일
+            - {'✅' if result['include_cold'] else '❌'} 한랭일
+            - {'✅' if result['include_hot'] else '❌'} 폭염일
+            """)
+        else:
+            st.info("👉 **'비작업일수 계산기'** 탭에서 비작업일수를 계산하면 최종 공기산정 결과가 표시됩니다!")
     else:
-        st.warning("TAB 2에서 엑셀을 먼저 업로드해주세요.")
+        st.warning("⚠️ **'엑셀 내역서 인식'** 탭에서 엑셀을 먼저 업로드해주세요.")
 
 # ══════════════════════════════════════════════════════════════
 # TAB 3
@@ -1571,43 +1754,382 @@ with tab3:
 # TAB 4
 # ══════════════════════════════════════════════════════════════
 with tab4:
-    st.subheader("비작업일수 계산기")
+    st.subheader("🌧 비작업일수 계산기")
+    st.caption("지역별 기상 데이터를 기반으로 비작업일수를 계산합니다")
     
-    st.markdown("### ⚙️ 비작업일 조건 설정")
+    # ──────────────────────────────────
+    # 1. 지역 선택
+    # ──────────────────────────────────
+    st.markdown("### 🌍 공사 지역 선택")
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        include_rain = st.checkbox("🌧️ 강우일 포함", value=True)
-    with col2:
-        include_cold = st.checkbox("❄️ 한파일 포함 (영하 5도 이하)", value=False)
-    with col3:
-        include_dust = st.checkbox("😷 미세먼지 포함", value=False)
+    col_r1, col_r2 = st.columns([2, 1])
+    with col_r1:
+        # 17개 지역
+        default_region = st.session_state.get("selected_region", "서울")
+        if default_region not in REGIONS:
+            default_region = "서울"
+        
+        selected_region = st.selectbox(
+            "공사 지역",
+            options=REGIONS,
+            index=REGIONS.index(default_region),
+            help="지역별 기상 데이터 (강우/한파/폭염) 적용"
+        )
+        st.session_state["selected_region"] = selected_region
+    
+    with col_r2:
+        st.metric("선택 지역", f"📍 {selected_region}")
     
     st.markdown("---")
     
+    # ──────────────────────────────────
+    # 2. 비작업일 조건
+    # ──────────────────────────────────
+    st.markdown("### ⚙️ 비작업일 조건 설정")
+    st.caption("📖 가이드라인 공식: 비작업일수 = 기상조건(A) + 법정공휴일(B) - 중복일수(C)")
+    
+    st.markdown("**🌤️ 기상조건 (A)**")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        include_rain = st.checkbox("🌧️ 강우일 포함", value=True, help="월별 평균 강우일수")
+    with col2:
+        include_cold = st.checkbox("❄️ 한랭일 포함", value=True, help="일 최저기온 -10°C 이하")
+    with col3:
+        include_hot = st.checkbox("🔥 폭염일 포함", value=True, help="일 최고기온 33°C 이상")
+    
+    st.markdown("**📅 법정공휴일 (B)**")
+    col_h1, col_h2 = st.columns(2)
+    with col_h1:
+        include_holidays = st.checkbox(
+            "📅 법정공휴일 포함",
+            value=True,
+            help="가이드라인 부록1: 일요일(52일) + 명절 + 국경일 + 기타 + 대체공휴일"
+        )
+    with col_h2:
+        min_weekly_rest = st.checkbox(
+            "⚖️ 주 40시간 근무제 보장",
+            value=True,
+            help="월별 비작업일수가 주 40시간 근무제 일수보다 작으면 보정"
+        )
+    
+    st.markdown("---")
+    
+    # ──────────────────────────────────
+    # 3. 공사 기간 설정
+    # ──────────────────────────────────
+    st.markdown("### 📅 공사 기간 설정")
+    
     col_a, col_b = st.columns(2)
     with col_a:
-        start_date = st.date_input("착공일", datetime.now().date())
-    with col_b:
-        work_days = st.number_input("순작업일수", min_value=1, max_value=3650, 
-                                     value=st.session_state.get("total_work_days", 100))
+        start_date = st.date_input(
+            "착공일",
+            value=st.session_state.get("start_date", datetime.now().date()),
+            key="weather_start_date"
+        )
+        st.session_state["start_date"] = start_date
     
-    if st.button("공기 계산", type="primary"):
-        completion = calc_completion_date(start_date, work_days)
-        total_days = (completion - start_date).days + 1
-        non_work_days = total_days - work_days
-        st.success(f"✅ 준공일: **{completion.strftime('%Y년 %m월 %d일')}**")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("총 공사기간", f"{total_days}일")
-        col2.metric("순작업일수", f"{work_days}일")
-        col3.metric("비작업일수", f"{non_work_days}일")
+    with col_b:
+        # TAB 2에서 계산된 순작업일수 자동 입력
+        default_work_days = st.session_state.get("total_work_days", 100)
+        # max_value를 동적으로 설정 (값이 크면 max도 자동으로 늘림)
+        max_val = max(10000, default_work_days + 1000)
+        work_days = st.number_input(
+            "순작업일수",
+            min_value=1,
+            max_value=max_val,
+            value=default_work_days,
+            key="weather_work_days",
+            help="TAB '엑셀 내역서 인식'에서 자동 계산된 값"
+        )
+        st.session_state["work_days_input"] = work_days
+    
+    st.markdown("---")
+    
+    # ──────────────────────────────────
+    # 4. 계산 버튼
+    # ──────────────────────────────────
+    if st.button("📊 비작업일수 계산", type="primary", width="stretch"):
+        from datetime import datetime as dt
         
+        # datetime 변환
+        start_dt = dt.combine(start_date, dt.min.time())
+        
+        # 종료일 추정: 순작업일수 * 1.5
+        rough_end_date = start_dt + timedelta(days=int(work_days * 1.5))
+        
+        # 반복 계산: 정확한 종료일 찾기
+        for _ in range(5):
+            # 1. 기상조건 비작업일수 (A)
+            weather_days = get_total_non_work_days(
+                selected_region,
+                start_dt,
+                rough_end_date,
+                check_rain=include_rain,
+                check_cold=include_cold,
+                check_hot=include_hot
+            )
+            
+            if isinstance(weather_days, dict):
+                weather_days = weather_days.get("total", 0)
+            
+            # 2. 가이드라인 공식 적용 (A + B - C)
+            result = get_total_non_work_days_with_holidays(
+                weather_days,
+                start_dt,
+                rough_end_date,
+                include_holidays=include_holidays,
+                min_weekly_rest=min_weekly_rest
+            )
+            
+            non_work_days = result["total"]
+            
+            # 총 공사기간 = 순작업일수 + 비작업일수
+            calculated_end = start_dt + timedelta(days=int(work_days + non_work_days - 1))
+            
+            # 수렴 체크
+            if abs((rough_end_date - calculated_end).days) <= 1:
+                break
+            rough_end_date = calculated_end
+        
+        completion_date = calculated_end
+        total_days = (completion_date - start_dt).days + 1
+        
+        # 결과 저장
+        st.session_state["weather_result"] = {
+            "region": selected_region,
+            "start_date": start_dt,
+            "end_date": completion_date,
+            "total_days": total_days,
+            "work_days": work_days,
+            "non_work_days": non_work_days,
+            "weather_days": result["weather"],
+            "holiday_days": result["holidays"],
+            "overlap_days": result["overlap"],
+            "formula": result["formula"],
+            "include_rain": include_rain,
+            "include_cold": include_cold,
+            "include_hot": include_hot,
+            "include_holidays": include_holidays,
+            "min_weekly_rest": min_weekly_rest,
+        }
+        
+        st.success(f"✅ 준공일: **{completion_date.strftime('%Y년 %m월 %d일')}**")
+    
+    # ──────────────────────────────────
+    # 5. 결과 표시
+    # ──────────────────────────────────
+    if "weather_result" in st.session_state:
+        result = st.session_state["weather_result"]
+        
+        st.markdown("### 📊 계산 결과")
+        
+        # 메인 메트릭
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric("📍 지역", result["region"])
+        col_m2.metric("📅 총 공사기간", f"{result['total_days']}일")
+        col_m3.metric("💼 순작업일수", f"{result['work_days']}일")
+        col_m4.metric("🚫 비작업일수", f"{result['non_work_days']}일")
+        
+        # 비작업일수 세부 (A + B - C)
+        st.markdown("#### 🧮 비작업일수 세부 (가이드라인 공식)")
+        col_a, col_b, col_c, col_d = st.columns(4)
+        col_a.metric("🌤️ 기상조건 (A)", f"{result.get('weather_days', 0)}일")
+        col_b.metric("📅 법정공휴일 (B)", f"{result.get('holiday_days', 0)}일")
+        col_c.metric("⚠️ 중복 (C)", f"{result.get('overlap_days', 0)}일")
+        col_d.metric("📌 공식", f"A+B-C = {result.get('non_work_days', 0)}일")
+        
+        st.caption(f"📐 계산식: {result.get('formula', '')}")
+        
+        # 적용 조건
         st.info(f"""
         **적용된 조건:**
-        - {'✅' if include_rain else '❌'} 강우일
-        - {'✅' if include_cold else '❌'} 한파일 (영하 5도 이하)
-        - {'✅' if include_dust else '❌'} 미세먼지
+        - {'✅' if result['include_rain'] else '❌'} 강우일
+        - {'✅' if result['include_cold'] else '❌'} 한랭일 (-10°C 이하)
+        - {'✅' if result['include_hot'] else '❌'} 폭염일 (33°C 이상)
+        - {'✅' if result.get('include_holidays', False) else '❌'} 법정공휴일
+        - {'✅' if result.get('min_weekly_rest', False) else '❌'} 주 40시간 근무제 보장
+        - **기간**: {result['start_date'].strftime('%Y-%m-%d')} ~ {result['end_date'].strftime('%Y-%m-%d')}
         """)
+        
+        # 월별 통합 상세 표
+        try:
+            from datetime import datetime as dt
+            import pandas as pd
+            
+            monthly_weather = get_monthly_breakdown(
+                result["region"],
+                result["start_date"],
+                result["end_date"],
+                check_rain=result["include_rain"],
+                check_cold=result["include_cold"],
+                check_hot=result["include_hot"]
+            )
+            
+            monthly_holidays = get_holiday_breakdown_monthly(
+                result["start_date"],
+                result["end_date"]
+            )
+            
+            if monthly_weather:
+                st.markdown("### 📅 월별 비작업일수 상세")
+                st.caption("📖 각 월의 기상조건 + 공휴일 + 중복일수 + 최종 비작업일수")
+                
+                # 월별 데이터 통합
+                holiday_dict = {h["월"]: h["법정공휴일"] for h in monthly_holidays} if monthly_holidays else {}
+                
+                monthly_data = []
+                from calendar import monthrange
+                
+                for m in monthly_weather:
+                    month_str = m["month"]
+                    year, mon = map(int, month_str.split("-"))
+                    cal_days = monthrange(year, mon)[1]
+                    
+                    rain = m.get("rain", 0)
+                    cold = m.get("cold", 0)
+                    hot = m.get("hot", 0)
+                    weather_total = rain + cold + hot  # A
+                    
+                    holidays = holiday_dict.get(month_str, 0) if result.get("include_holidays", False) else 0  # B
+                    
+                    # 중복일수 (C = A × B ÷ 달력일수)
+                    overlap = round(weather_total * holidays / cal_days) if cal_days > 0 else 0
+                    
+                    # 월별 비작업일수
+                    month_non_work = round(weather_total + holidays - overlap)
+                    
+                    # 주 40시간 근무제 보장
+                    weeks = cal_days / 7
+                    min_rest = round(weeks)
+                    if result.get("min_weekly_rest", False) and month_non_work < min_rest:
+                        month_non_work = min_rest
+                    
+                    monthly_data.append({
+                        "월": month_str,
+                        "🌧️ 강우": f"{rain:.1f}",
+                        "❄️ 한랭": f"{cold:.1f}",
+                        "🔥 폭염": f"{hot:.1f}",
+                        "🌤️ 기상(A)": f"{weather_total:.1f}",
+                        "📅 공휴일(B)": f"{holidays}",
+                        "⚠️ 중복(C)": f"{overlap}",
+                        "📊 비작업": f"{month_non_work}",
+                        "📆 달력일": f"{cal_days}",
+                    })
+                
+                df_monthly = pd.DataFrame(monthly_data)
+                st.dataframe(df_monthly, hide_index=True, width="stretch")
+                
+                # ──────────────────────────────────
+                # 항목별 분석
+                # ──────────────────────────────────
+                st.markdown("### 📈 항목별 비작업일수 분석")
+                
+                # 합계 계산
+                total_rain = sum(m.get("rain", 0) for m in monthly_weather)
+                total_cold = sum(m.get("cold", 0) for m in monthly_weather)
+                total_hot = sum(m.get("hot", 0) for m in monthly_weather)
+                total_weather = total_rain + total_cold + total_hot
+                total_holiday = sum(holiday_dict.values())
+                
+                # 막대 차트
+                chart_data = {
+                    "항목": ["🌧️ 강우일", "❄️ 한랭일", "🔥 폭염일", "📅 법정공휴일", "⚠️ 중복일수"],
+                    "일수": [total_rain, total_cold, total_hot, total_holiday, result.get('overlap_days', 0)]
+                }
+                df_chart = pd.DataFrame(chart_data)
+                
+                col_chart1, col_chart2 = st.columns([2, 1])
+                
+                with col_chart1:
+                    st.bar_chart(df_chart.set_index("항목"))
+                
+                with col_chart2:
+                    st.markdown("**📊 합계**")
+                    st.metric("🌧️ 강우일", f"{total_rain:.1f}일")
+                    st.metric("❄️ 한랭일", f"{total_cold:.1f}일")
+                    st.metric("🔥 폭염일", f"{total_hot:.1f}일")
+                    st.metric("📅 법정공휴일", f"{total_holiday}일")
+                
+                # 항목별 expander
+                with st.expander("🌧️ 강우일 월별 상세", expanded=False):
+                    rain_data = [{"월": m["month"], "강우일수": f"{m.get('rain', 0):.1f}일"} for m in monthly_weather]
+                    st.dataframe(pd.DataFrame(rain_data), hide_index=True, width="stretch")
+                    st.caption(f"📌 {result['region']} 지역의 월별 평균 강우일수 (기상청 기준)")
+                
+                with st.expander("❄️ 한랭일 월별 상세", expanded=False):
+                    cold_data = [{"월": m["month"], "한랭일수": f"{m.get('cold', 0):.1f}일"} for m in monthly_weather]
+                    st.dataframe(pd.DataFrame(cold_data), hide_index=True, width="stretch")
+                    st.caption(f"📌 일 최저기온 -10°C 이하 기준 (한랭일 평균)")
+                
+                with st.expander("🔥 폭염일 월별 상세", expanded=False):
+                    hot_data = [{"월": m["month"], "폭염일수": f"{m.get('hot', 0):.1f}일"} for m in monthly_weather]
+                    st.dataframe(pd.DataFrame(hot_data), hide_index=True, width="stretch")
+                    st.caption(f"📌 일 최고기온 33°C 이상 기준 (폭염일 평균)")
+                
+                with st.expander("📅 법정공휴일 월별 상세", expanded=False):
+                    if monthly_holidays:
+                        holiday_detail = [{"월": h["월"], "공휴일수": f"{h['법정공휴일']}일"} for h in monthly_holidays]
+                        st.dataframe(pd.DataFrame(holiday_detail), hide_index=True, width="stretch")
+                        st.caption("📌 부록1: 일요일(52일) + 명절 + 국경일 + 기타 공휴일 + 대체공휴일")
+                    else:
+                        st.info("법정공휴일이 포함되지 않았습니다.")
+                
+                # 가이드라인 공식 설명
+                with st.expander("📐 계산 공식 설명", expanded=False):
+                    st.markdown(f"""
+                    ### 가이드라인 19페이지 공식
+                    
+                    **비작업일수 = A + B - C**
+                    
+                    | 항목 | 내용 | 값 |
+                    |------|------|-----|
+                    | **A** | 기상조건 비작업일수 (강우 + 한랭 + 폭염) | {result.get('weather_days', 0)}일 |
+                    | **B** | 법정 공휴일수 (부록1 기준) | {result.get('holiday_days', 0)}일 |
+                    | **C** | 중복일수 = A × B ÷ 달력일수 (소수점 반올림) | {result.get('overlap_days', 0)}일 |
+                    | **계** | A + B - C | **{result.get('non_work_days', 0)}일** |
+                    
+                    ### 주 40시간 근무제 보장
+                    - 월별 비작업일수가 주 40시간 근무제 일수보다 작을 경우, 보정 적용
+                    - 일반적으로 주 1일 휴식 보장 (월 4~5일)
+                    
+                    ### 데이터 출처
+                    - **기상 데이터**: 기상청 평년값 (1991-2020)
+                    - **법정공휴일**: 「관공서의 공휴일에 관한 규정」 (부록1, 2026-2035)
+                    """)
+        except Exception as e:
+            st.error(f"월별 상세 정보 표시 오류: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    # ──────────────────────────────────
+    # 6. 지역 기상 정보 미리보기
+    # ──────────────────────────────────
+    with st.expander(f"📊 {selected_region} 지역 연간 기상 통계", expanded=False):
+        if selected_region in RAIN_DAYS:
+            import pandas as pd
+            
+            months = list(range(1, 13))
+            data = {
+                "월": [f"{m}월" for m in months],
+                "🌧️ 강우일": [RAIN_DAYS[selected_region].get(m, 0) for m in months],
+                "❄️ 한랭일": [COLD_DAYS[selected_region].get(m, 0) for m in months],
+                "🔥 폭염일": [HOT_DAYS[selected_region].get(m, 0) for m in months],
+            }
+            df_stats = pd.DataFrame(data)
+            df_stats["합계"] = df_stats["🌧️ 강우일"] + df_stats["❄️ 한랭일"] + df_stats["🔥 폭염일"]
+            
+            st.dataframe(df_stats, hide_index=True, width="stretch")
+            
+            # 연간 합계
+            annual_rain = sum(RAIN_DAYS[selected_region].values())
+            annual_cold = sum(COLD_DAYS[selected_region].values())
+            annual_hot = sum(HOT_DAYS[selected_region].values())
+            
+            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+            col_s1.metric("연간 강우일", f"{annual_rain:.1f}일")
+            col_s2.metric("연간 한랭일", f"{annual_cold:.1f}일")
+            col_s3.metric("연간 폭염일", f"{annual_hot:.1f}일")
+            col_s4.metric("연간 총합", f"{annual_rain + annual_cold + annual_hot:.1f}일")
 
 # ══════════════════════════════════════════════════════════════
 # TAB 5
@@ -1889,3 +2411,184 @@ with tab5:
                 st.error(f"보고서 생성 실패: {e}")
                 import traceback
                 st.code(traceback.format_exc())
+
+# ══════════════════════════════════════════════════════════════
+# TAB 6: 수동입력 관리
+# ══════════════════════════════════════════════════════════════
+with tab6:
+    st.subheader("📝 수동입력 관리")
+    st.caption("매칭 안 된 항목들에 대해 1일 작업량을 직접 입력하세요")
+    
+    # session_state 초기화
+    if "manual_rates" not in st.session_state:
+        st.session_state["manual_rates"] = {}
+    
+    if "unmatched_all" not in st.session_state or not st.session_state["unmatched_all"]:
+        st.info("📂 먼저 TAB 2에서 엑셀 파일을 업로드하세요!")
+    else:
+        unmatched_all = st.session_state["unmatched_all"]
+        
+        # 그룹별로 정리
+        group_data = {
+            "1.1": {"name": "🏗️ 하수관로공사", "categories": []},
+            "1.2": {"name": "🔧 관로 부대공사", "categories": []},
+            "2.1": {"name": "💧 배수설비공사", "categories": []},
+            "2.2": {"name": "⚙️ 기계설비", "categories": []},
+        }
+        
+        for cat_key, cat_data in unmatched_all.items():
+            mk = cat_data["major_key"]
+            if mk in group_data:
+                group_data[mk]["categories"].append(cat_data)
+        
+        # 전체 통계
+        total_unmatched = sum(
+            sum(len(cat["items"]) for cat in gd["categories"])
+            for gd in group_data.values()
+        )
+        saved_count = len(st.session_state["manual_rates"])
+        
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("전체 매칭 안 된 항목", f"{total_unmatched}개")
+        with col_b:
+            st.metric("저장된 항목", f"{saved_count}개", delta=f"{total_unmatched - saved_count}개 남음")
+        with col_c:
+            if st.button("🗑️ 모든 저장 초기화", width="stretch"):
+                st.session_state["manual_rates"] = {}
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # 하위 탭 (4개 그룹)
+        sub_tab_labels = []
+        sub_tab_keys = []
+        for mk, gd in group_data.items():
+            count = sum(len(cat["items"]) for cat in gd["categories"])
+            if count > 0:
+                sub_tab_labels.append(f"{gd['name']} ({count})")
+                sub_tab_keys.append(mk)
+        
+        if not sub_tab_labels:
+            st.success("🎉 모든 항목이 매칭되었습니다!")
+        else:
+            sub_tabs = st.tabs(sub_tab_labels)
+            
+            # 🚀 @st.fragment로 페이지 변경 시 전체 재실행 방지
+            @st.fragment
+            def render_manual_input_page(mk, gd):
+                # 모든 항목을 평탄화
+                all_items = []
+                for cat in gd["categories"]:
+                    for item in cat["items"]:
+                        all_items.append({
+                            **item,
+                            "category": cat["category"]
+                        })
+                
+                if not all_items:
+                    st.info("매칭 안 된 항목이 없습니다.")
+                    return
+                
+                # 페이지네이션
+                items_per_page = 20
+                total_pages = (len(all_items) + items_per_page - 1) // items_per_page
+                
+                page_key = f"page_{mk}"
+                if page_key not in st.session_state:
+                    st.session_state[page_key] = 1
+                
+                # 페이지 선택
+                col_p1, col_p2, col_p3 = st.columns([1, 2, 1])
+                with col_p1:
+                    if st.button("◀ 이전", key=f"prev_{mk}", disabled=(st.session_state[page_key] <= 1)):
+                        st.session_state[page_key] -= 1
+                        st.rerun(scope="fragment")
+                with col_p2:
+                    st.markdown(f"<div style='text-align: center; padding: 8px;'>페이지 {st.session_state[page_key]} / {total_pages}</div>", unsafe_allow_html=True)
+                with col_p3:
+                    if st.button("다음 ▶", key=f"next_{mk}", disabled=(st.session_state[page_key] >= total_pages)):
+                        st.session_state[page_key] += 1
+                        st.rerun(scope="fragment")
+                
+                # 현재 페이지 항목
+                start_idx = (st.session_state[page_key] - 1) * items_per_page
+                end_idx = min(start_idx + items_per_page, len(all_items))
+                page_items = all_items[start_idx:end_idx]
+                
+                st.markdown("---")
+                st.markdown(f"### 📋 {start_idx + 1} ~ {end_idx} 번째 항목")
+                
+                # 일괄 입력 폼
+                with st.form(key=f"form_{mk}_{st.session_state[page_key]}"):
+                    # 헤더
+                    col_h1, col_h2, col_h3, col_h4, col_h5 = st.columns([2, 2, 1, 1.5, 1])
+                    with col_h1:
+                        st.markdown("**항목명**")
+                    with col_h2:
+                        st.markdown("**규격**")
+                    with col_h3:
+                        st.markdown("**수량**")
+                    with col_h4:
+                        st.markdown("**1일 작업량**")
+                    with col_h5:
+                        st.markdown("**단위**")
+                    
+                    st.markdown("---")
+                    
+                    # 입력 폼
+                    form_inputs = {}
+                    for i, item in enumerate(page_items):
+                        manual_key = item["manual_key"]
+                        
+                        # 기존 값
+                        existing_val = 0.0
+                        existing_unit = item.get('unit', '') + "/일"
+                        if manual_key in st.session_state["manual_rates"]:
+                            existing_val = st.session_state["manual_rates"][manual_key].get("daily", 0)
+                            existing_unit = st.session_state["manual_rates"][manual_key].get("unit", existing_unit)
+                        
+                        col1, col2, col3, col4, col5 = st.columns([2, 2, 1, 1.5, 1])
+                        with col1:
+                            st.text(item["name"])
+                        with col2:
+                            st.text(item.get("spec", ""))
+                        with col3:
+                            st.text(f"{item.get('qty', 0):,.1f}")
+                        with col4:
+                            daily = st.number_input(
+                                "daily",
+                                min_value=0.0,
+                                value=float(existing_val),
+                                step=0.1,
+                                key=f"in_{mk}_{start_idx + i}",
+                                label_visibility="collapsed"
+                            )
+                        with col5:
+                            unit_in = st.text_input(
+                                "unit",
+                                value=existing_unit,
+                                key=f"un_{mk}_{start_idx + i}",
+                                label_visibility="collapsed"
+                            )
+                        
+                        form_inputs[manual_key] = {"daily": daily, "unit": unit_in}
+                    
+                    st.markdown("---")
+                    
+                    # 일괄 저장 버튼
+                    submitted = st.form_submit_button("💾 이 페이지 일괄 저장", width="stretch", type="primary")
+                    
+                    if submitted:
+                        saved = 0
+                        for mk_key, vals in form_inputs.items():
+                            if vals["daily"] > 0:
+                                st.session_state["manual_rates"][mk_key] = vals
+                                saved += 1
+                        st.success(f"✅ {saved}개 항목 저장 완료!")
+                        st.rerun(scope="fragment")
+            
+            # 각 sub_tab에서 fragment 함수 호출
+            for sub_tab, mk in zip(sub_tabs, sub_tab_keys):
+                with sub_tab:
+                    render_manual_input_page(mk, group_data[mk])

@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import openpyxl
+from hopyo_parser import parse_hopyo_daily_amounts
 import math
 import re
 from datetime import datetime, timedelta
@@ -197,9 +198,11 @@ def extract_diameter(spec_str):
 def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
     """
     우선순위:
-    1. 가이드라인 부록
-    2. 표준품셈 Man-day
-    3. 단가산출근거 Q값
+    0. 수동입력
+    1. 단가산출근거 호표 Q값 (호표번호 1:1 매칭)
+    2. 가이드라인 부록
+    3. 표준품셈 Man-day
+    4. 단가산출근거 Q값 (항목명 기반)
     
     item_unit: 실제 항목의 단위 (M, 개소, 본 등)
     """
@@ -217,6 +220,19 @@ def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
                 if daily_val > 0:
                     days = math.ceil(qty / (daily_val * crews))
                     return days, f"{daily_val:.1f}{unit}", "수동입력"
+    except Exception:
+        pass
+
+    # 1순위: 단가산출근거 호표 Q값 (호표번호로 1:1 매칭; 형식1=Q=/HR 기반)
+    try:
+        hopyo_map = st.session_state.get("hopyo_by_item", {})
+        hopyo_daily = st.session_state.get("hopyo_daily", {})
+        hopyo_no = hopyo_map.get((name, spec))
+        if hopyo_no is not None and hopyo_no in hopyo_daily:
+            daily_val, unit = hopyo_daily[hopyo_no]
+            if daily_val and daily_val > 0:
+                days = math.ceil(qty / (daily_val * crews))
+                return days, f"{daily_val:.1f}{unit}", "단가산출근거(호표)"
     except Exception:
         pass
 
@@ -564,6 +580,16 @@ def parse_by_keyword(file):
                 if spec_match:
                     detail_spec = spec_match.group(0)
             
+            # 호표 참조 추출 (행 전체 스캔; 통상 비고열에 '산근 N호표' 텍스트가 있음)
+            hopyo_num = None
+            for cell in row:
+                v = cell.value
+                if isinstance(v, str):
+                    m_ref = re.search(r'산근\s*(\d+)\s*호표', v)
+                    if m_ref:
+                        hopyo_num = int(m_ref.group(1))
+                        break
+
             results.append({
                 "row_idx": row_idx,
                 "district": district,
@@ -576,6 +602,7 @@ def parse_by_keyword(file):
                 "unit": unit,
                 "amount": row[5].value if len(row) > 5 else 0,
                 "labor": row[6].value if len(row) > 6 else 0,
+                "hopyo": hopyo_num,
             })
     
     # 원본 순서로 정렬 (row_idx 기준)
@@ -591,6 +618,9 @@ def parse_by_keyword(file):
             merged[key]["qty"] = (merged[key].get("qty") or 0) + (r.get("qty") or 0)
             merged[key]["amount"] = (merged[key].get("amount") or 0) + (r.get("amount") or 0)
             merged[key]["labor"] = (merged[key].get("labor") or 0) + (r.get("labor") or 0)
+            # 호표는 같은 (name, spec)이면 동일하다고 가정. 만일 첫 행에 비어있고 뒤에 채워졌다면 채워준다.
+            if merged[key].get("hopyo") is None and r.get("hopyo") is not None:
+                merged[key]["hopyo"] = r["hopyo"]
     
     return list(merged.values()), col_info
 
@@ -600,11 +630,18 @@ def parse_by_keyword(file):
 st.sidebar.header("⚙️ 기본 설정")
 st.sidebar.markdown("""
 <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-            padding: 20px; border-radius: 10px; margin-bottom: 20px;'>
-    <h3 style='color: white; margin: 0 0 10px 0; font-size: 18px;'>🚧 공사 유형</h3>
-    <p style='color: #e0e7ff; margin: 0; font-size: 14px;'>현재: <strong style='color: #fbbf24;'>하수관로</strong></p>
+            padding: 16px 20px; border-radius: 10px; margin-bottom: 8px;'>
+    <h3 style='color: white; margin: 0; font-size: 18px;'>🚧 공사 유형</h3>
 </div>
 """, unsafe_allow_html=True)
+construction_type = st.sidebar.selectbox(
+    "공사 유형 선택",
+    ["하수관로", "상하수도 구조물", "관로+구조물"],
+    index=0,
+    label_visibility="collapsed",
+    help="현재는 하수관로 위주로 동작합니다. 상하수도 구조물(하수처리시설·정수장·배수지·펌프장 등)은 추후 지원 예정.",
+)
+st.session_state["construction_type"] = construction_type
 
 # 📋 워크플로우 가이드
 st.sidebar.markdown("""
@@ -623,7 +660,7 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 
 st.sidebar.info("📅 **공사 시작일**은 TAB '비작업일수 계산기'에서 설정")
-st.title("상하수도 관로공사 공기산정 시스템")
+st.title("상하수도 공사기간 산정 시스템")
 st.markdown("---")
 
 tab2, tab6, tab4, tab1, tab3, tab5 = st.tabs([
@@ -722,8 +759,14 @@ with tab2:
                 if dangagun_cache:
                     st.info(f"✅ 단가산출근거에서 {len(dangagun_cache)}개 항목 Q값 추출")
                 
+                # 단가산출근거 호표별 일작업량 캐시 (호표번호 1:1 매칭용; 형식1=Q=/HR 기반)
+                st.session_state["hopyo_daily"] = parse_hopyo_daily_amounts(wb)
+                if st.session_state["hopyo_daily"]:
+                    st.info(f"✅ 단가산출근거 호표별 일작업량 {len(st.session_state['hopyo_daily'])}개 추출")
+                
                 # 계층 구조 파싱
                 hierarchy = []
+                st.session_state["hopyo_by_item"] = {}  # (name, spec) → 호표번호 (calc 1순위용, 매 파싱마다 초기화)
                 current_category = None
                 current_sub_category = None
                 current_sub_sub_category = None  # 3단계 계층
@@ -874,6 +917,19 @@ with tab2:
                             'unit': unit,
                             'district': current_district  # None일 수도 있음
                         }
+
+                        # 호표 참조 추출 → (name, spec) 맵에 저장 (calc_days_priority 1순위용).
+                        # 계층구조 루프와 동일한 name/spec/row를 쓰므로 키 불일치가 발생하지 않는다.
+                        _hopyo_num = None
+                        for _v in row:
+                            if isinstance(_v, str):
+                                _m = re.search(r'산근\s*(\d+)\s*호표', _v)
+                                if _m:
+                                    _hopyo_num = int(_m.group(1))
+                                    break
+                        if _hopyo_num is not None:
+                            item['hopyo'] = _hopyo_num
+                            st.session_state["hopyo_by_item"][(name, spec)] = _hopyo_num
                         
                         # 🔥 추진공 특수 처리: #N 추진 하위 항목은 상위 "추진공"으로 합산
                         if (current_sub_sub_category and 
@@ -1914,6 +1970,9 @@ with tab4:
         }
         
         st.success(f"✅ 준공일: **{completion_date.strftime('%Y년 %m월 %d일')}**")
+        # 공기산정 탭(tab1)이 이 탭보다 먼저 실행되므로, 방금 저장한 weather_result를
+        # 같은 실행에서 못 읽는다. 즉시 rerun 해서 모든 탭이 새 값으로 다시 렌더되게 한다.
+        st.rerun()
     
     # ──────────────────────────────────
     # 5. 결과 표시

@@ -1,19 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-hopyo_parser.py — 단가산출근거 호표별 일작업량 파서 (형식1: Q=/HR 또는 Q1=/HR)
+hopyo_parser.py — 단가산출근거 호표별 일작업량 파서
 
 배경
 ----
 설계자가 단가산출근거에 직접 산정한 시공량(시간당 작업량 Q)을 호표번호로
 1:1 매칭해서, 가이드라인보다 우선 적용하기 위한 데이터 소스를 만든다.
 
+버전 이력
+---------
+v1: 형식1 "Q = ... = X 단위/HR" (대문자만) → 106개 호표 커버.
+v2: 아래 2개 케이스 추가 → 278개 호표로 확대.
+    (a) 대소문자 버그 수정: 시트 안에 "/HR", "/hr", "/Hr" 등 표기가
+        섞여 있었는데 v1 정규식이 대문자 "/HR"만 매칭해서 소문자
+        표기(217개 호표)를 전부 놓치고 있었음 → re.IGNORECASE로 수정.
+    (b) 역수 형태(시간/단위) 신규 지원: 일부 호표는
+        "Q = X hr/단위" (예: 0.16 hr/본, "본 하나 만드는 데 걸리는 시간")
+        형태로 되어 있어 기존 "단위/hr" 패턴과 정반대. 이 경우
+        일작업량 = 8 / X 로 계산 (기존 X*8과 다른 공식).
+        58개 호표가 이 형태.
+
 처리 대상 형식
 --------------
-형식1만 처리 (1차 구현):
-  "Q = 60/Tc = X.XX 단위/HR"   (천공후항타)
-  "Q1 = 60/Tc1 = X.XX 단위/HR" (항발)
-변수명이 Q/Q1 어느 쪽이든 동일하게 매칭 (정규식이 `=`만 기준).
-시간당 → 일당 환산은 ×8.
+1) "Q = ... = X.XX 단위/hr" (대소문자 무관)  → 일작업량 = X * 8
+   "Q1 = ... = X.XX 단위/hr" (항발 등, 변수명 Q/Q1 무관)
+2) "Q = ... = X.XX hr/단위" (역수형: 단위당 소요시간) → 일작업량 = 8 / X
+같은 블록에 두 형식이 섞여 있진 않다고 가정(각 호표는 1가지 형식만 사용).
+한 블록에 여러 줄이 있으면 처음 발견되는 것을 채택.
 
 전제 조건
 ---------
@@ -52,9 +65,11 @@ from typing import Dict, Tuple
 # 열 인덱스 1의 '제 N호표' 패턴 (블록 시작 표시)
 _HOPYO_BLOCK_RE = re.compile(r"제\s*(\d+)\s*호표")
 
-# 'Q = ... = X 단위/HR' 또는 'Q1 = ... = X 단위/HR'에서 X와 단위 추출.
-# 둘 다 마지막 `= 숫자 단위/HR` 구조라 동일한 정규식으로 잡힌다.
-_HOPYO_Q_RE = re.compile(r"=\s*([\d.]+)\s*([가-힣㎡㎥]+)/HR")
+# 형식1(정방향): 'Q = ... = X 단위/hr' (대소문자 무관: /HR, /hr, /Hr 전부 매칭)
+_Q_FORWARD_RE = re.compile(r"=\s*([\d.]+)\s*([가-힣㎡㎥]+)/hr", re.IGNORECASE)
+
+# 형식2(역수): 'Q = ... = X hr/단위' (단위 하나 만드는 데 걸리는 시간)
+_Q_INVERSE_RE = re.compile(r"=\s*([\d.]+)\s*hr/([가-힣㎡㎥]+)", re.IGNORECASE)
 
 # 시간당 → 일당 환산 계수 (8시간 작업)
 _HR_TO_DAY = 8
@@ -72,7 +87,7 @@ def parse_hopyo_daily_amounts(wb) -> Dict[int, Tuple[float, str]]:
     Returns
     -------
     dict[int, tuple[float, str]]
-        {호표번호: (일작업량, 단위)}. 형식1을 못 찾은 호표는 포함되지 않음.
+        {호표번호: (일작업량, 단위)}. 두 형식 다 못 찾은 호표는 포함되지 않음.
     """
     if wb is None or "단가산출근거" not in wb.sheetnames:
         return {}
@@ -93,19 +108,38 @@ def parse_hopyo_daily_amounts(wb) -> Dict[int, Tuple[float, str]]:
     if not starts:
         return {}
 
-    # 2) 각 호표 블록(다음 호표 시작 직전까지) 안에서 첫 Q=/HR 라인 추출
+    # 2) 각 호표 블록(다음 호표 시작 직전까지) 안에서 첫 Q 라인 추출
+    #    정방향(단위/hr)을 우선 탐색하고, 없으면 역수(hr/단위)를 시도.
     ordered = sorted(starts.items(), key=lambda kv: kv[1])
     result: Dict[int, Tuple[float, str]] = {}
     for idx, (n, s) in enumerate(ordered):
         end = ordered[idx + 1][1] if idx + 1 < len(ordered) else len(rows)
+
+        found_fwd = None
+        found_inv = None
         for j in range(s, end):
             c1 = rows[j][1] if len(rows[j]) > 1 else None
-            if isinstance(c1, str):
-                m = _HOPYO_Q_RE.search(c1)
+            if not isinstance(c1, str):
+                continue
+            if found_fwd is None:
+                m = _Q_FORWARD_RE.search(c1)
                 if m:
-                    daily = round(float(m.group(1)) * _HR_TO_DAY, 4)
-                    result[n] = (daily, m.group(2))
-                    break
+                    found_fwd = (float(m.group(1)), m.group(2))
+            if found_fwd is None and found_inv is None:
+                mi = _Q_INVERSE_RE.search(c1)
+                if mi:
+                    found_inv = (float(mi.group(1)), mi.group(2))
+            if found_fwd is not None:
+                break  # 정방향이 우선이므로 찾으면 바로 종료
+
+        if found_fwd is not None:
+            val, unit = found_fwd
+            result[n] = (round(val * _HR_TO_DAY, 4), unit)
+        elif found_inv is not None:
+            val, unit = found_inv
+            if val > 0:
+                result[n] = (round(_HR_TO_DAY / val, 4), unit)
+
     return result
 
 
@@ -125,6 +159,7 @@ def parse_hopyo_daily_amounts_from_path(path: str) -> Dict[int, Tuple[float, str
 
 # (호표번호, 기대 일작업량, 허용오차, 설명)
 _VERIFY_POINTS = [
+    # v1 기존 검증 (회귀 확인 — 이 값들은 절대 안 바뀌어야 함)
     (1,   32.56, 0.05, "H-PILE 천공후항타 H=3.55m"),
     (40,  58.48, 0.05, "SHEET PILE 천공후항타 H=3.8m  (검증치 58.5)"),
     (46,  54.00, 0.05, "SHEET PILE 천공후항타 H=4.48m (검증치 54.0)"),
@@ -133,6 +168,12 @@ _VERIFY_POINTS = [
     (25,  51.92, 0.05, "H-PILE 항발 H=6.21m"),
     (110, 39.60, 0.05, "SHEET PILE 항발 H=9.5m"),
     (228, 30.32, 0.05, "열연강판 항타 및 항발 (첫 Q라인=항타)"),
+    # v2 신규 검증 (대소문자 버그 수정으로 커버된 항목)
+    (111, 75.46 * 8, 0.5, "가물막이 설치 및 해체 (소문자 ㎥/hr)"),
+    (117, 18.53 * 8, 0.5, "되메우기(B=1.5m미만,모래) (소문자 ㎥/hr)"),
+    # v2 신규 검증 (역수 형태 hr/단위)
+    (129, 50.00, 0.05, "말뚝박기용 천공(열연강판) H=2.9m (역수: 0.16hr/본)"),
+    (130, 50.00, 0.05, "말뚝박기용 천공(오거비트) H=2.94m (역수: 0.16hr/본)"),
 ]
 
 
@@ -147,9 +188,9 @@ def _main(argv):
 
     print(f"[로드] {path}")
     result = parse_hopyo_daily_amounts_from_path(path)
-    print(f"[파싱] 형식1(Q=/HR | Q1=/HR) 보유 호표: {len(result)}개")
+    print(f"[파싱] 형식1+역수형 통합 보유 호표: {len(result)}개")
 
-    # 단위 분포 (대부분 '본'이어야 함)
+    # 단위 분포
     from collections import Counter
     units = Counter(u for _, u in result.values())
     print(f"[단위] {dict(units)}")

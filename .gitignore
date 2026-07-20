@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.xlsx
+*.XLS
+app_backup_*.py
+*_backup_*.py
+app_debug_*.py
+debug_log.txt
+backup/
+Start_Here_Mac.app/
+PROFILE.py

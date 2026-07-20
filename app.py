@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import openpyxl
-from hopyo_parser import parse_hopyo_daily_amounts
+import zipfile
+from openpyxl.utils.exceptions import InvalidFileException
+from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic
 import math
 import re
 from datetime import datetime, timedelta
@@ -195,11 +197,63 @@ def extract_diameter(spec_str):
                 return val
     return None
 
+def naeyeok_to_hierarchy(hier_items):
+    """
+    naeyeok_parser.parse_naeyeok_hierarchy_items()의 평평한(flat) 리스트를
+    기존 app.py가 기대하는 hierarchy 딕셔너리 구조로 변환하는 어댑터.
+
+    기존 구조({'level','name','items','sub_categories'})와 동일한 모양으로
+    맞춰서, 결과표/주공정선택/수동입력 등 하위 로직을 신양식·구양식 모두
+    무수정으로 재사용할 수 있게 한다.
+
+    level은 "90.N.1" 형식의 합성 코드를 씀 (구양식의 "1.1"/"1.2"/"2.1" 등과
+    절대 겹치지 않도록 90번대를 예약 — 크루설정 탭의 major_names 하드코딩
+    라벨과 우연히 매칭되어 엉뚱한 이름이 붙는 걸 방지).
+    같은 대공종(예: 토공)은 라인(A-LINE 등)이 달라도 같은 major_key로 묶여
+    최종적으로 "같은 공종명끼리 합산" 단계에서 하나로 합쳐진다 — 구양식이
+    지구(Ⅰ/Ⅱ/Ⅲ)별로 반복되는 같은 공종을 합산하던 것과 동일한 동작.
+    """
+    major_order = {}
+    cats = {}
+    for it in hier_items:
+        cat_name = it.get("category") or "기타"
+        if cat_name not in major_order:
+            major_order[cat_name] = len(major_order) + 1
+        idx = major_order[cat_name]
+        if cat_name not in cats:
+            cats[cat_name] = {
+                "level": f"90.{idx}.1",
+                "name": cat_name,
+                "items": [],
+                "sub_categories": [
+                    # 항목을 합성 sub_category 하나로 감싼다.
+                    # 이유: 결과표의 세부항목 렌더링과 '매칭 안 됨' 수집(unmatched_all)이
+                    # sub_categories 경로에만 구현되어 있어서, items 직속으로 두면
+                    # 수동입력(TAB6)에 항목이 아예 안 뜬다.
+                    {
+                        "level": "1)",
+                        "name": cat_name,
+                        "items": [],
+                        "sub_categories": [],
+                        "district": None,
+                    }
+                ],
+            }
+        cats[cat_name]["sub_categories"][0]["items"].append({
+            "name": it.get("name", ""),
+            "spec": it.get("spec", ""),
+            "qty": it.get("qty", 0),
+            "unit": it.get("unit", ""),
+            "district": it.get("line", ""),
+        })
+    return list(cats.values())
+
+
 def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
     """
     우선순위:
     0. 수동입력
-    1. 단가산출근거 호표 Q값 (호표번호 1:1 매칭)
+    1. 단가산출근거 호표 Q값 (호표번호 1:1 매칭) / 일위대가_산근 코드 Q값 (신양식, 코드 1:1 매칭)
     2. 가이드라인 부록
     3. 표준품셈 Man-day
     4. 단가산출근거 Q값 (항목명 기반)
@@ -208,6 +262,14 @@ def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
     """
     if not qty or qty <= 0:
         return 0, "-", "-"
+
+    # 운반·상차류는 본공정(토공·관부설 등)과 병행되므로 공기에서 제외 (토글 ON일 때).
+    # 한 곳에서 처리 → 총계·sub합·상세 모든 호출부가 자동으로 동일하게 0일/병행 처리됨.
+    try:
+        if st.session_state.get("exclude_haul", False) and any(k in (name or "") for k in ("운반", "상차")):
+            return 0, "병행", "병행(제외)"
+    except Exception:
+        pass
 
     # 0순위: 수동입력 (최우선)
     try:
@@ -233,6 +295,19 @@ def calc_days_priority(name, spec, qty, crews=3, item_unit=""):
             if daily_val and daily_val > 0:
                 days = math.ceil(qty / (daily_val * crews))
                 return days, f"{daily_val:.1f}{unit}", "단가산출근거(호표)"
+    except Exception:
+        pass
+
+    # 1순위: 일위대가_산근 코드 Q값 (신양식 — 코드로 1:1 매칭; 호표 방식과 동일 우선순위)
+    try:
+        naeyeok_map = st.session_state.get("naeyeok_code_by_item", {})
+        naeyeok_daily = st.session_state.get("naeyeok_code_daily", {})
+        naeyeok_code = naeyeok_map.get((name, spec))
+        if naeyeok_code is not None and naeyeok_code in naeyeok_daily:
+            daily_val, unit = naeyeok_daily[naeyeok_code]
+            if daily_val and daily_val > 0:
+                days = math.ceil(qty / (daily_val * crews))
+                return days, f"{daily_val:.1f}{unit}", "일위대가_산근(코드)"
     except Exception:
         pass
 
@@ -679,7 +754,11 @@ with tab2:
     st.subheader("📂 엑셀 내역서 자동 인식")
     st.caption("도급 설계내역서 업로드 → 계층 구조 자동 파싱")
 
-    uploaded = st.file_uploader("설계내역서 엑셀 (.xlsx)", type=["xlsx","xls"])
+    uploaded = st.file_uploader(
+        "설계내역서 엑셀 (.xlsx 형식만 지원)",
+        type=["xlsx"],
+        help="구버전 .xls 파일은 지원하지 않습니다. 엑셀에서 열어 '다른 이름으로 저장' → 'Excel 통합 문서(.xlsx)'로 저장한 뒤 업로드해주세요.",
+    )
 
     if uploaded:
         # 프로그레스 바
@@ -690,6 +769,13 @@ with tab2:
             status_text.text("📂 엑셀 파일 로드 중...")
             progress_bar.progress(20)
             
+            # 조기 양식 판별 (템플릿 인식되면 구양식 전용 게이트를 우회해야 하므로 먼저 확인)
+            try:
+                _wb_check = openpyxl.load_workbook(uploaded, read_only=True, data_only=True)
+                _early_is_new = detect_template(_wb_check) is not None
+            except Exception:
+                _early_is_new = False
+
             with st.spinner("파싱 중..."):
                 all_rows, col_info = parse_by_keyword(uploaded)
             
@@ -701,7 +787,7 @@ with tab2:
             progress_bar.progress(60)
             status_text.text("🔍 계층 구조 분석 중...")
             
-            if matched:
+            if matched or _early_is_new:
                 status_text.text("📊 UI 생성 중...")
                 progress_bar.progress(80)
                 
@@ -759,253 +845,23 @@ with tab2:
                 if dangagun_cache:
                     st.info(f"✅ 단가산출근거에서 {len(dangagun_cache)}개 항목 Q값 추출")
                 
-                # 단가산출근거 호표별 일작업량 캐시 (호표번호 1:1 매칭용; 형식1=Q=/HR 기반)
-                st.session_state["hopyo_daily"] = parse_hopyo_daily_amounts(wb)
-                if st.session_state["hopyo_daily"]:
-                    st.info(f"✅ 단가산출근거 호표별 일작업량 {len(st.session_state['hopyo_daily'])}개 추출")
-                
-                # 계층 구조 파싱
+                # 계층 구조 파싱 (설정 기반 범용 엔진 — universal_parser.py)
                 hierarchy = []
-                st.session_state["hopyo_by_item"] = {}  # (name, spec) → 호표번호 (calc 1순위용, 매 파싱마다 초기화)
-                current_category = None
-                current_sub_category = None
-                current_sub_sub_category = None  # 3단계 계층
-                current_district = None  # 지구 추적
-                
-                roman_nums = ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ', 'Ⅶ', 'Ⅷ', 'Ⅸ', 'Ⅹ']
-                
-                for row in ws.iter_rows(min_row=1, values_only=True):
-                    gong_jong = str(row[0]).strip() if row[0] else ""
-                    name = str(row[1]).strip() if len(row) > 1 and row[1] else ""
-                    spec = str(row[2]).strip() if len(row) > 2 and row[2] else ""
-                    
-                    # 지구 변경 감지
-                    if gong_jong in roman_nums:
-                        # 이전 sub_category를 category에 추가
-                        if current_sub_category and current_category:
-                            is_already_in_list = any(s is current_sub_category for s in current_category['sub_categories'])
-                            if not is_already_in_list:
-                                current_category['sub_categories'].append(current_sub_category)
-                        
-                        # 지구 전환
-                        current_district = gong_jong
-                        current_sub_category = None  # sub 초기화
-                        current_sub_sub_category = None  # sub_sub도 초기화
-                        continue
-                    
-                    if re.match(r'^\d+\.\d+\.\d+$', gong_jong):
-                        # 같은 level+name이면 기존 카테고리 재사용 (지구별 합산)
-                        existing = next((c for c in hierarchy if c['level'] == gong_jong and c['name'] == name), None)
-                        
-                        if existing:
-                            # 기존 카테고리 재사용
-                            if current_category and current_category != existing:
-                                if current_sub_category:
-                                    current_category['sub_categories'].append(current_sub_category)
-                                    current_sub_category = None
-                            current_category = existing
-                            current_sub_category = None
-                            continue
-                        else:
-                            # 새 카테고리 생성
-                            if current_category:
-                                if current_sub_category:
-                                    current_category['sub_categories'].append(current_sub_category)
-                                    current_sub_category = None
-                                if current_category.get('items') or current_category.get('sub_categories'):
-                                    hierarchy.append(current_category)
-                            
-                            current_category = {
-                                'level': gong_jong,
-                                'name': name,
-                                'items': [],
-                                'sub_categories': []
-                            }
-                            current_sub_category = None
-                            continue
-                    
-                    # (N) #숫자 형태는 구분자로 sub_sub_category 생성
-                    # 예: (1) #1 추진, (2) #2 추진 등 - 각각 다른 구간이므로 독립적으로 계산
-                    is_hash_separator = False
-                    if re.match(r'^\(\d+\)$', gong_jong) and name and re.match(r'^#\d+', name):
-                        is_hash_separator = True
-                    elif re.match(r'^#\d+', gong_jong):
-                        is_hash_separator = True
-                    
-                    if is_hash_separator:
-                        print(f"🟣 (#N) 구분자 감지: gong_jong=[{gong_jong}] name=[{name}] → sub_sub_category로 생성")
-                        # #1, #2... 를 sub_sub_category로 생성 (지구 정보 포함)
-                        if current_sub_category:
-                            current_sub_sub_category = {
-                                'level': gong_jong,
-                                'name': name,
-                                'district': current_district,
-                                'items': []
-                            }
-                            # sub_categories 리스트에 추가 (키 이름 통일!)
-                            if 'sub_categories' not in current_sub_category:
-                                current_sub_category['sub_categories'] = []
-                            current_sub_category['sub_categories'].append(current_sub_sub_category)
-                            print(f"  ✅ sub_sub 생성: parent=[{current_sub_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
-                        continue
-                    # 1), 2) 패턴은 sub_category (2단계 계층)
-                    elif re.match(r'^\d+\)$', gong_jong):
-                        print(f"🔵 1) 패턴 감지: gong_jong=[{gong_jong}] name=[{name}]")
-                        # 1), 2) 형태는 sub_category
-                        if current_category:
-                            # 이전 sub_sub 마무리
-                            if current_sub_sub_category and current_sub_category:
-                                is_already_in_list = any(s is current_sub_sub_category for s in current_sub_category['sub_categories'])
-                                if not is_already_in_list:
-                                    if 'sub_categories' not in current_sub_category:
-                                        current_sub_category['sub_categories'] = []
-                                    current_sub_category['sub_categories'].append(current_sub_sub_category)
-                            current_sub_sub_category = None
-                            
-                            # 같은 level+name+district의 sub_category가 있으면 재사용
-                            existing_sub = next((s for s in current_category['sub_categories'] 
-                                               if s['level'] == gong_jong and s['name'] == name and s.get('district') == current_district), None)
-                            
-                            if existing_sub:
-                                print(f"🔵 sub 재사용: category=[{current_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
-                                # 이전 sub가 있으면 append (기존과 다른 경우에만)
-                                if current_sub_category and current_sub_category != existing_sub:
-                                    is_already_in_list = any(s is current_sub_category for s in current_category['sub_categories'])
-                                    if not is_already_in_list:
-                                        print(f"  ⚠️ 이전 sub [{current_sub_category.get('name')}] append")
-                                        current_category['sub_categories'].append(current_sub_category)
-                                # 기존 sub로 교체
-                                current_sub_category = existing_sub
-                            else:
-                                print(f"🟢 sub 생성: category=[{current_category['name']}] level=[{gong_jong}] name=[{name}] district=[{current_district}]")
-                                # 현재 sub가 있으면 append
-                                if current_sub_category:
-                                    # 같은 객체가 이미 리스트에 있는지 체크 (객체 ID)
-                                    is_already_in_list = any(s is current_sub_category for s in current_category['sub_categories'])
-                                    if not is_already_in_list:
-                                        current_category['sub_categories'].append(current_sub_category)
-                                current_sub_category = {
-                                    'level': gong_jong,
-                                    'name': name,
-                                    'items': [],
-                                    'sub_categories': [],  # 3단계를 위한 sub_categories
-                                    'district': current_district  # 지구 정보 추가
-                                }
-                        # continue를 제거하여 다음 행 계속 읽기
-                    
-                    # 항목 매칭
-                    if current_category and not gong_jong and name:
-                        # 엑셀 row에서 직접 수량/단위 읽기
-                        qty_val = row[3] if len(row) > 3 else None
-                        unit_val = row[4] if len(row) > 4 else None
-                        
-                        try:
-                            qty = float(qty_val) if qty_val else 0
-                        except:
-                            qty = 0
-                        
-                        if qty <= 0:
-                            continue
-                        
-                        unit = str(unit_val).strip() if unit_val else ""
-                        
-                        # 항목 객체 생성
-                        item = {
-                            'name': name,
-                            'spec': spec,
-                            'qty': qty,
-                            'unit': unit,
-                            'district': current_district  # None일 수도 있음
-                        }
-
-                        # 호표 참조 추출 → (name, spec) 맵에 저장 (calc_days_priority 1순위용).
-                        # 계층구조 루프와 동일한 name/spec/row를 쓰므로 키 불일치가 발생하지 않는다.
-                        _hopyo_num = None
-                        for _v in row:
-                            if isinstance(_v, str):
-                                _m = re.search(r'산근\s*(\d+)\s*호표', _v)
-                                if _m:
-                                    _hopyo_num = int(_m.group(1))
-                                    break
-                        if _hopyo_num is not None:
-                            item['hopyo'] = _hopyo_num
-                            st.session_state["hopyo_by_item"][(name, spec)] = _hopyo_num
-                        
-                        # 🔥 추진공 특수 처리: #N 추진 하위 항목은 상위 "추진공"으로 합산
-                        if (current_sub_sub_category and 
-                            current_sub_category and 
-                            "추진" in current_sub_category.get('name', '') and
-                            re.match(r'^#\d+', current_sub_sub_category.get('name', ''))):
-                            # #1 추진, #2 추진 등의 항목은 상위 "1) 추진공"에 합산
-                            existing_item = next((i for i in current_sub_category['items'] 
-                                                 if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
-                            if existing_item:
-                                existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
-                                msg = f"🔧 추진공 수량 합산(#N→상위): [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) +{item.get('qty', 0)} → 총 {existing_item['qty']} {item.get('unit', '')}"
-                                print(f"  {msg}")
-                                with open("debug_log.txt", "a", encoding="utf-8") as f:
-                                    f.write(f"{msg}\n")
-                            else:
-                                current_sub_category['items'].append(item)
-                                msg = f"🆕 추진공 항목 추가(#N→상위): [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) {item.get('qty', 0)} {item.get('unit', '')}"
-                                print(f"  {msg}")
-                                with open("debug_log.txt", "a", encoding="utf-8") as f:
-                                    f.write(f"{msg}\n")
-                        # sub_sub_category가 있으면 거기에 추가 (일반 케이스)
-                        elif current_sub_sub_category:
-                            existing_item = next((i for i in current_sub_sub_category['items']
-                                                 if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
-                            if existing_item:
-                                existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
-                                print(f"  ✨ 수량 합산(sub_sub): {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
-                            else:
-                                current_sub_sub_category['items'].append(item)
-                        # sub_category에 추가
-                        elif current_sub_category:
-                            # 같은 name+spec 항목이 있으면 수량 합산
-                            existing_item = next((i for i in current_sub_category['items'] 
-                                                 if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
-                            if existing_item:
-                                existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
-                                # 추진공 관련은 자세히 로그
-                                if "추진" in current_sub_category.get('name', ''):
-                                    print(f"  🔧 추진공 수량 합산: [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) {item.get('qty', 0)} {item.get('unit', '')} → 총 {existing_item['qty']}")
-                                else:
-                                    print(f"  ✨ 수량 합산: {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
-                            else:
-                                current_sub_category['items'].append(item)
-                                if "추진" in current_sub_category.get('name', ''):
-                                    msg = f"🆕 추진공 항목 추가: [{current_sub_category['name']}] {item['name']} ({item.get('spec', '')}) {item.get('qty', 0)} {item.get('unit', '')}"
-                                    print(f"  {msg}")
-                                    with open("debug_log.txt", "a", encoding="utf-8") as f:
-                                        f.write(f"{msg}\n")
-                        else:
-                            # category에 직접 추가할 때도 같은 로직
-                            existing_item = next((i for i in current_category['items'] 
-                                                 if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
-                            if existing_item:
-                                existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
-                                print(f"  ✨ 수량 합산: {item['name']} ({item.get('spec', '')}) → {existing_item['qty']}")
-                            else:
-                                current_category['items'].append(item)
-                
-                if current_category:
-                    # sub_sub_category 마무리
-                    if current_sub_sub_category and current_sub_category:
-                        if 'sub_categories' not in current_sub_category:
-                            current_sub_category['sub_categories'] = []
-                        is_already_in_list = any(s is current_sub_sub_category for s in current_sub_category['sub_categories'])
-                        if not is_already_in_list:
-                            current_sub_category['sub_categories'].append(current_sub_sub_category)
-                    
-                    # sub_category 마무리
-                    if current_sub_category:
-                        # 같은 객체가 이미 리스트에 있는지 체크 (객체 ID 비교)
-                        is_already_in_list = any(s is current_sub_category for s in current_category['sub_categories'])
-                        if not is_already_in_list:
-                            current_category['sub_categories'].append(current_sub_category)
-                    if current_category.get('items') or current_category.get('sub_categories'):
-                        hierarchy.append(current_category)
+                _tmpl = detect_template(wb)
+                if _tmpl is not None:
+                    _uni_items = parse_items_generic(wb, _tmpl)
+                    hierarchy = naeyeok_to_hierarchy(_uni_items)
+                    st.session_state["naeyeok_code_daily"] = parse_unit_price_generic(wb, _tmpl)
+                    st.session_state["naeyeok_code_by_item"] = {
+                        (it["name"], it.get("spec", "")): it["code"]
+                        for it in _uni_items if it.get("code")
+                    }
+                    st.session_state["hopyo_daily"] = {}
+                    st.session_state["hopyo_by_item"] = {}
+                    if _uni_items:
+                        st.info(f"✅ 템플릿 인식: {_tmpl['name']} — {len(_uni_items)}개 항목, {len(hierarchy)}개 대공종")
+                else:
+                    st.warning("⚠️ 인식할 수 없는 엑셀 양식입니다. 지원 양식: 표준형(산근호표), 코드매칭형(내역서산근)")
                 
                 if hierarchy:
                     # 중간 번호 기준 그룹핑 (1.1.X, 1.2.X, 2.1.X... 구분)
@@ -1048,7 +904,13 @@ with tab2:
                     
                     # 탭 생성
                     sorted_keys = sorted(major_groups.keys(), key=lambda x: tuple(int(p) for p in x.split('.')))
-                    tab_labels = [major_names.get(key, f"📁 {key}") for key in sorted_keys]
+                    def _major_tab_label(key):
+                        if key.startswith("90."):
+                            # 신양식 합성코드: 그룹 내 첫 카테고리 이름으로 표시 (그룹당 대공종 1개)
+                            cats = major_groups.get(key, [])
+                            return f"📁 {cats[0]['name']}" if cats else f"📁 {key}"
+                        return major_names.get(key, f"📁 {key}")
+                    tab_labels = [_major_tab_label(key) for key in sorted_keys]
                     
                     major_tabs = st.tabs(tab_labels)
                     
@@ -1096,6 +958,29 @@ with tab2:
                                     st.session_state['crew_by_main'][cat_full] = crew_val
                     
                     crew_settings = all_crew_settings
+                    
+                    # ── 🎯 주공정 선택 + 운반류 자동 제외 ──
+                    _major_seen = []
+                    for _cat in hierarchy:
+                        if _cat['name'] not in _major_seen:
+                            _major_seen.append(_cat['name'])
+                    _default_major = [c for c in _major_seen if not any(kw in c for kw in ("운반", "자재"))]
+                    st.markdown("---")
+                    st.markdown("### 🎯 주공정 선택")
+                    st.caption("동시에 진행되는 공종은 공기에 영향이 없습니다. 공기를 지배하는 주공정만 선택하세요 (선택된 공종 중 최장이 공기).")
+                    selected_major = st.multiselect(
+                        "공기에 반영할 대공종",
+                        options=_major_seen,
+                        default=_default_major,
+                        key="selected_major_widget",
+                    )
+                    st.session_state["selected_major"] = selected_major
+                    exclude_haul = st.checkbox(
+                        "운반·상차류 항목 자동 제외 (토공·관부설 등과 병행되므로 공기 미반영)",
+                        value=True,
+                        key="exclude_haul_widget",
+                    )
+                    st.session_state["exclude_haul"] = exclude_haul
                     
                     st.markdown("---")
                     st.markdown("### 📊 공종별 작업일수 계산 결과")
@@ -1159,6 +1044,7 @@ with tab2:
                             merged_rows[merge_key] = {
                                 "level": row['level'],
                                 "공종": cat_name,
+                                "공종명_pure": cat_name,
                                 "물량": 0,
                                 "투입조수": row['투입조수'],
                                 "작업일수(일)": 0,
@@ -1199,7 +1085,10 @@ with tab2:
                                     row["major_key"] = f"{level_parts[0]}.{level_parts[1]}"
                     
                     result_rows_merged = list(merged_rows.values())
-                    max_days = max((r["작업일수(일)"] for r in result_rows_merged), default=0)
+                    # 주공정으로 선택된 대공종만 공기(max)에 반영. 미선택 공종은 병행으로 보고 제외.
+                    _sel_major = set(st.session_state.get("selected_major", []))
+                    _major_rows = [r for r in result_rows_merged if r.get("공종명_pure") in _sel_major] or result_rows_merged
+                    max_days = max((r["작업일수(일)"] for r in _major_rows), default=0)
                     
                     # 그룹별로 표시
                     grouped_results = {}
@@ -1229,16 +1118,25 @@ with tab2:
                     
                     # 그룹별 expander
                     for major_key in sorted(grouped_results.keys(), key=lambda x: tuple(int(p) for p in x.split('.'))):
-                        group_name = group_names.get(major_key, f"📁 {major_key}")
                         rows_in_group = grouped_results[major_key]
+                        if major_key.startswith("90."):
+                            # 신양식 합성코드(90.x)는 코드 대신 해당 그룹의 대공종명으로 표시
+                            _first_name = rows_in_group[0].get("공종명_pure") or rows_in_group[0].get("공종", major_key)
+                            group_name = f"📁 {_first_name}"
+                        else:
+                            group_name = group_names.get(major_key, f"📁 {major_key}")
                         
                         # outer expander를 닫힌 상태로 시작 (성능 향상)
                         with st.expander(f"**{group_name}** ({len(rows_in_group)}개 공종)", expanded=False):
                             for idx, row in enumerate(rows_in_group):
                                 is_max = (row["작업일수(일)"] == max_days and max_days > 0)
+                                _sel_major_disp = set(st.session_state.get("selected_major", []))
+                                _is_selected_major = (not _sel_major_disp) or (row.get("공종명_pure") in _sel_major_disp)
+                                _major_badge = "🎯" if _is_selected_major else "⚪"
                                 
                                 with st.expander(
-                                    f"{'🔴' if is_max else '▶'} **{row['공종']}** - {row['작업일수(일)']}일",
+                                    f"{'🔴' if is_max else '▶'} {_major_badge} **{row['공종']}** - {row['작업일수(일)']}일"
+                                    + ("" if _is_selected_major else " _(병행·공기 미반영)_"),
                                     expanded=False
                                 ):
                                     # 하위 카테고리별 표시
@@ -1372,7 +1270,7 @@ with tab2:
                                                             st.session_state["unmatched_all"][cat_key] = {
                                                                 "major_key": major_key,
                                                                 "group_name": group_name,
-                                                                "category": row['공종'],
+                                                                "category": row.get('공종명_pure', row['공종']),
                                                                 "items": []
                                                             }
                                                         
@@ -1698,6 +1596,12 @@ with tab2:
                                 total_days = sum(item["일수"] for item in display_items)
                                 st.metric(f"{group_names.get(group, group)} 총 작업일수", f"{total_days}일")
                     
+        except (zipfile.BadZipFile, InvalidFileException):
+            st.error(
+                "❌ 이 파일은 .xlsx 형식이 아닙니다 (구버전 .xls로 추정).\n\n"
+                "엑셀에서 파일을 연 뒤 **[다른 이름으로 저장] → [Excel 통합 문서(.xlsx)]** 로 "
+                "다시 저장하고 업로드해주세요."
+            )
         except Exception as e:
             st.error(f"파싱 실패: {e}")
             import traceback
@@ -2497,8 +2401,10 @@ with tab6:
         
         for cat_key, cat_data in unmatched_all.items():
             mk = cat_data["major_key"]
-            if mk in group_data:
-                group_data[mk]["categories"].append(cat_data)
+            if mk not in group_data:
+                # 신양식 합성코드(90.x) 등 미등록 그룹은 동적 생성 (대공종명으로 라벨)
+                group_data[mk] = {"name": f"📁 {cat_data.get('category', mk)}", "categories": []}
+            group_data[mk]["categories"].append(cat_data)
         
         # 전체 통계
         total_unmatched = sum(
@@ -2549,6 +2455,11 @@ with tab6:
                     st.info("매칭 안 된 항목이 없습니다.")
                     return
                 
+                # 🎯 주공정 항목을 위로 정렬 (선택 안 했으면 전체를 주공정으로 간주 → 정렬 안 함)
+                _sel_major_manual = set(st.session_state.get("selected_major", []))
+                if _sel_major_manual:
+                    all_items.sort(key=lambda it: 0 if it.get("category") in _sel_major_manual else 1)
+                
                 # 페이지네이션
                 items_per_page = 20
                 total_pages = (len(all_items) + items_per_page - 1) // items_per_page
@@ -2581,7 +2492,9 @@ with tab6:
                 # 일괄 입력 폼
                 with st.form(key=f"form_{mk}_{st.session_state[page_key]}"):
                     # 헤더
-                    col_h1, col_h2, col_h3, col_h4, col_h5 = st.columns([2, 2, 1, 1.5, 1])
+                    col_h0, col_h1, col_h2, col_h3, col_h4, col_h5 = st.columns([1.3, 2, 2, 1, 1.5, 1])
+                    with col_h0:
+                        st.markdown("**대공종**")
                     with col_h1:
                         st.markdown("**항목명**")
                     with col_h2:
@@ -2607,7 +2520,13 @@ with tab6:
                             existing_val = st.session_state["manual_rates"][manual_key].get("daily", 0)
                             existing_unit = st.session_state["manual_rates"][manual_key].get("unit", existing_unit)
                         
-                        col1, col2, col3, col4, col5 = st.columns([2, 2, 1, 1.5, 1])
+                        col0, col1, col2, col3, col4, col5 = st.columns([1.3, 2, 2, 1, 1.5, 1])
+                        with col0:
+                            _cat = item.get("category", "")
+                            if not _sel_major_manual or _cat in _sel_major_manual:
+                                st.markdown(f"🎯 {_cat}")
+                            else:
+                                st.markdown(f"⚪ {_cat}")
                         with col1:
                             st.text(item["name"])
                         with col2:

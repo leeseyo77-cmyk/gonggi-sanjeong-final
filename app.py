@@ -429,6 +429,34 @@ def render_detail_table(detail_items, source_items, base_crew, key):
                 st.rerun()
 
 
+def _render_apply_rates(scope_key: str):
+    """대기 중인 1일작업량 수정을 한 번에 반영하는 버튼.
+
+    수동입력 관리 탭의 검토 섹션용. 값을 입력할 때마다 즉시 반영하면
+    입력 하나마다 전체 재계산이 돌아 느리고, 반대로 rerun을 안 하면
+    결과표·총공사기간이 갱신되지 않아 "저장해도 안 바뀐다"처럼 보인다.
+    그래서 대기 목록에 모았다가 버튼을 눌렀을 때만 반영·재계산한다.
+    """
+    _pending = st.session_state.get("pending_rate", {})
+    if not _pending:
+        return
+    _n = len(_pending)
+    _a1, _a2 = st.columns([3, 1])
+    with _a1:
+        st.warning(f"✏️ 수정한 {_n}건이 아직 반영되지 않았습니다. 다 입력한 뒤 오른쪽 버튼을 누르세요.")
+    with _a2:
+        if st.button(f"🔄 {_n}건 반영", key=f"apply_rates_{scope_key}",
+                     type="primary", width="stretch"):
+            st.session_state.setdefault("manual_rates", {})
+            for _ik, (_v, _u) in _pending.items():
+                if _v > 0:
+                    st.session_state["manual_rates"][_ik] = {"daily": _v, "unit": _u}
+                else:
+                    st.session_state["manual_rates"].pop(_ik, None)
+            st.session_state["pending_rate"] = {}
+            st.rerun()
+
+
 def is_non_work_category(cat_name: str) -> bool:
     """대공종명이 시공이 아닌(비용·서류·자재) 성격이면 True."""
     return any(kw in (cat_name or "") for kw in NON_WORK_CATEGORY_KEYWORDS)
@@ -2328,11 +2356,40 @@ with tab1:
             st.markdown("### 🎯 최종 공기산정 결과")
             
             col_a, col_b, col_c, col_d = st.columns(4)
-            col_a.metric("📅 총 공사기간", f"{result['total_days']}일",
+            # 총 공사기간에는 준비·시운전·정리기간이 포함되므로
+            # '작업+비작업'과 값이 다르다. 라벨에 그 사실을 명시해 혼동을 막는다.
+            _extra_a = (result.get("prep_days", 0) + result.get("wrapup_days", 0)
+                        + result.get("commission_days", 0))
+            _lbl_a = "📅 총 공사기간" + (" (준비·시운전·정리 포함)" if _extra_a else "")
+            col_a.metric(_lbl_a, f"{result['total_days']}일",
                          delta=days_to_months_text(result['total_days']), delta_color="off")
             col_b.metric("💼 순작업일수", f"{result['work_days']}일")
             col_c.metric("🚫 비작업일수", f"{result['non_work_days']}일")
             col_d.metric("📍 적용 지역", result['region'])
+
+            # 공사기간 구성 (가이드라인: 준비 + 작업 + 비작업 + 시운전 + 정리)
+            # 상단 메트릭만 보면 '작업+비작업'과 총계가 안 맞아 보이므로,
+            # 구성요소를 같은 크기의 지표 카드로 나란히 보여준다.
+            if _extra_a:
+                _pp = result.get("prep_days", 0)
+                _ww = result.get("wrapup_days", 0)
+                _cc2 = result.get("commission_days", 0)
+                _items = [
+                    ("🏁 준비기간", _pp),
+                    ("💼 작업일수", result["work_days"]),
+                    ("🚫 비작업일수", result["non_work_days"]),
+                    ("⚙️ 시운전", _cc2),
+                    ("🧹 정리기간", _ww),
+                ]
+                _items = [(lb, v) for lb, v in _items if v]
+                st.markdown("#### 🗓️ 공사기간 구성")
+                _bcols = st.columns(len(_items) + 1)
+                for _bi, (_lb, _v) in enumerate(_items):
+                    _sign = "" if _bi == 0 else "＋"
+                    _bcols[_bi].metric(f"{_sign}{_lb}", f"{_v}일")
+                _bcols[-1].metric("＝ 총 공사기간", f"{result['total_days']}일",
+                                  delta=days_to_months_text(result["total_days"]),
+                                  delta_color="off")
             
             st.info(f"""
             **📍 {result['region']} 지역 공기산정 결과**
@@ -2584,6 +2641,17 @@ with tab4:
             help="TAB '엑셀 내역서 인식'에서 자동 계산된 값 (재계산 시 자동 갱신)"
         )
         st.session_state["work_days_input"] = work_days
+
+    # 순작업일수가 바뀌었는데 이전 계산 결과가 남아 있으면 안내.
+    # 수동입력·조수 변경으로 작업일수가 달라져도 '비작업일수 계산' 버튼을 다시
+    # 누르기 전까지는 총 공사기간이 옛 값으로 표시되어 "안 바뀐다"처럼 보인다.
+    _prev_res = st.session_state.get("weather_result") or {}
+    _prev_wd = _prev_res.get("work_days")
+    if _prev_wd is not None and int(_prev_wd) != int(work_days):
+        st.warning(
+            f"⚠️ 순작업일수가 **{int(_prev_wd)}일 → {int(work_days)}일**로 바뀌었습니다. "
+            "아래 **비작업일수 계산** 버튼을 다시 눌러야 총 공사기간에 반영됩니다."
+        )
     
     st.markdown("---")
     
@@ -2690,7 +2758,10 @@ with tab4:
         # 메인 메트릭
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("📍 지역", result["region"])
-        col_m2.metric("📅 총 공사기간", f"{result['total_days']}일",
+        _extra_m = (result.get("prep_days", 0) + result.get("wrapup_days", 0)
+                    + result.get("commission_days", 0))
+        _lbl_m = "📅 총 공사기간" + (" (준비·시운전·정리 포함)" if _extra_m else "")
+        col_m2.metric(_lbl_m, f"{result['total_days']}일",
                       delta=days_to_months_text(result['total_days']), delta_color="off")
         col_m3.metric("💼 순작업일수", f"{result['work_days']}일")
         col_m4.metric("🚫 비작업일수", f"{result['non_work_days']}일")
@@ -2804,52 +2875,67 @@ with tab4:
                 st.dataframe(df_monthly, hide_index=True, width="stretch")
                 
                 # ──────────────────────────────────
+                # ──────────────────────────────────
                 # 항목별 분석
+                # 가이드라인 방식(13개 조건)으로 계산하면 조건 구성이 프로젝트마다
+                # 달라지므로, 예전처럼 강우/한랭/폭염 3개 키를 고정으로 읽으면
+                # 모두 0으로 표시된다. weather_detail의 조건별 결과를 그대로 쓴다.
                 # ──────────────────────────────────
                 st.markdown("### 📈 항목별 비작업일수 분석")
-                
-                # 합계 계산
-                total_rain = sum(m.get("rain", 0) for m in monthly_weather)
-                total_cold = sum(m.get("cold", 0) for m in monthly_weather)
-                total_hot = sum(m.get("hot", 0) for m in monthly_weather)
-                total_weather = total_rain + total_cold + total_hot
+
+                _wdet = st.session_state.get("weather_detail") or {}
+                _by_cond = _wdet.get("by_condition") or {}
+                _monthly_w = _wdet.get("monthly") or []
                 total_holiday = sum(holiday_dict.values())
-                
-                # 막대 차트
-                chart_data = {
-                    "항목": ["🌧️ 강우일", "❄️ 한랭일", "🔥 폭염일", "📅 법정공휴일", "⚠️ 중복일수"],
-                    "일수": [total_rain, total_cold, total_hot, total_holiday, result.get('overlap_days', 0)]
-                }
-                df_chart = pd.DataFrame(chart_data)
-                
-                col_chart1, col_chart2 = st.columns([2, 1])
-                
-                with col_chart1:
-                    st.bar_chart(df_chart.set_index("항목"))
-                
-                with col_chart2:
-                    st.markdown("**📊 합계**")
-                    st.metric("🌧️ 강우일", f"{total_rain:.1f}일")
-                    st.metric("❄️ 한랭일", f"{total_cold:.1f}일")
-                    st.metric("🔥 폭염일", f"{total_hot:.1f}일")
-                    st.metric("📅 법정공휴일", f"{total_holiday}일")
-                
-                # 항목별 expander
-                with st.expander("🌧️ 강우일 월별 상세", expanded=False):
-                    rain_data = [{"월": m["month"], "강우일수": f"{m.get('rain', 0):.1f}일"} for m in monthly_weather]
-                    st.dataframe(pd.DataFrame(rain_data), hide_index=True, width="stretch")
-                    st.caption(f"📌 {result['region']} 지역의 월별 평균 강우일수 (기상청 기준)")
-                
-                with st.expander("❄️ 한랭일 월별 상세", expanded=False):
-                    cold_data = [{"월": m["month"], "한랭일수": f"{m.get('cold', 0):.1f}일"} for m in monthly_weather]
-                    st.dataframe(pd.DataFrame(cold_data), hide_index=True, width="stretch")
-                    st.caption(f"📌 일 최저기온 -10°C 이하 기준 (한랭일 평균)")
-                
-                with st.expander("🔥 폭염일 월별 상세", expanded=False):
-                    hot_data = [{"월": m["month"], "폭염일수": f"{m.get('hot', 0):.1f}일"} for m in monthly_weather]
-                    st.dataframe(pd.DataFrame(hot_data), hide_index=True, width="stretch")
-                    st.caption(f"📌 일 최고기온 33°C 이상 기준 (폭염일 평균)")
-                
+
+                if _by_cond:
+                    _labels, _values = [], []
+                    for _ck, _cv in _by_cond.items():
+                        _labels.append(CONDITION_LABELS.get(_ck, _ck))
+                        _values.append(round(_cv, 1))
+                    _labels.append("법정공휴일")
+                    _values.append(total_holiday)
+                    _labels.append("중복일수(차감)")
+                    _values.append(result.get("overlap_days", 0))
+
+                    df_chart = pd.DataFrame({"항목": _labels, "일수": _values})
+                    col_chart1, col_chart2 = st.columns([2, 1])
+                    with col_chart1:
+                        st.bar_chart(df_chart.set_index("항목"))
+                    with col_chart2:
+                        st.markdown("**📊 합계**")
+                        for _ck, _cv in _by_cond.items():
+                            st.metric(CONDITION_LABELS.get(_ck, _ck), f"{_cv:.1f}일")
+                        st.metric("📅 법정공휴일", f"{total_holiday}일")
+
+                    # 조건별 월별 상세
+                    if _monthly_w:
+                        with st.expander("🌤️ 기상조건 월별 상세", expanded=False):
+                            st.dataframe(pd.DataFrame(_monthly_w), hide_index=True, width="stretch")
+                            st.caption(
+                                f"📌 {st.session_state.get('selected_station', result.get('region',''))} "
+                                "관측지점 기준 (가이드라인 부록3, 2015~2024 월평균)"
+                            )
+                else:
+                    # 구버전 weather_data 경로(가이드라인 데이터 미적용)
+                    total_rain = sum(m.get("rain", 0) for m in monthly_weather)
+                    total_cold = sum(m.get("cold", 0) for m in monthly_weather)
+                    total_hot = sum(m.get("hot", 0) for m in monthly_weather)
+                    df_chart = pd.DataFrame({
+                        "항목": ["🌧️ 강우일", "❄️ 한랭일", "🔥 폭염일", "📅 법정공휴일", "⚠️ 중복일수"],
+                        "일수": [total_rain, total_cold, total_hot, total_holiday,
+                                result.get("overlap_days", 0)],
+                    })
+                    col_chart1, col_chart2 = st.columns([2, 1])
+                    with col_chart1:
+                        st.bar_chart(df_chart.set_index("항목"))
+                    with col_chart2:
+                        st.markdown("**📊 합계**")
+                        st.metric("🌧️ 강우일", f"{total_rain:.1f}일")
+                        st.metric("❄️ 한랭일", f"{total_cold:.1f}일")
+                        st.metric("🔥 폭염일", f"{total_hot:.1f}일")
+                        st.metric("📅 법정공휴일", f"{total_holiday}일")
+
                 with st.expander("📅 법정공휴일 월별 상세", expanded=False):
                     if monthly_holidays:
                         holiday_detail = [{"월": h["월"], "공휴일수": f"{h['법정공휴일']}일"} for h in monthly_holidays]
@@ -3287,98 +3373,110 @@ with tab6:
             )
             if _n_sr + _n_lr == 0:
                 st.success("추정값으로 계산된 항목이 없습니다.")
-            # ══════════════════════════════════════════════════════
-            # 🔎 동일계열 Q승계 항목 검토
-            # 산근에 Q산식이 없어 같은 계열(동일 항목명·규격)의 Q값을 물려받은 항목들.
-            # 추정값이므로 설계자가 한 번 확인하고, 필요하면 여기서 바로 수정한다.
-            # ══════════════════════════════════════════════════════
-            _sr = st.session_state.get("series_review_all", {})
-            _sr_items = []
-            for _k, _c in _sr.items():
-                for _it in _c["items"]:
-                    _sr_items.append({**_it, "category": _c.get("category", "")})
-            if _sr_items:
-                with st.expander(f"🔎 승계값 검토 필요 ({len(_sr_items)}개) — 같은 계열 Q값을 물려받은 항목", expanded=False):
-                    st.caption(
-                        "산근에 Q산식이 없어 노무비 역산으로는 과소평가되던 항목에, "
-                        "시공조건이 같은 계열(동일 항목명·규격)의 Q값을 승계했습니다. "
-                        "장비·조건이 실제로 동일한지 확인하고, 다르면 아래에서 1일 작업량을 직접 입력하세요. "
-                        "입력하면 수동입력(0순위)으로 승계값을 덮어씁니다."
-                    )
-                    for _i, _it in enumerate(_sr_items):
-                        _c1, _c2, _c3, _c4 = st.columns([2.6, 2, 1.4, 1.4])
-                        with _c1:
-                            st.text(f"[{_it.get('category','')}] {_it['name'][:26]}")
-                        with _c2:
-                            st.text(f"{_it.get('spec','')[:24]}")
-                        with _c3:
-                            st.text(f"승계 {_it.get('승계값','')}")
-                        with _c4:
-                            _mk_s = _it["manual_key"]
-                            _cur = st.session_state["manual_rates"].get(_mk_s, {})
-                            _val = st.number_input(
-                                "수정", min_value=0.0, step=0.1,
-                                value=float(_cur.get("daily", 0.0)),
-                                key=f"sr_{_i}_{_mk_s}", label_visibility="collapsed",
-                            )
-                            if _val > 0:
-                                st.session_state["manual_rates"][_mk_s] = {
-                                    "daily": _val, "unit": _it.get("unit", ""),
-                                }
-                            elif _mk_s in st.session_state["manual_rates"] and _cur.get("daily", 0) > 0 and _val == 0:
-                                del st.session_state["manual_rates"][_mk_s]
-                    st.caption("※ 0으로 두면 승계값을 그대로 사용합니다.")
-                st.markdown("---")
+            # 값을 입력할 때마다 전체 재실행되면 느리므로 @st.fragment로 감싼다.
+            # 이 영역만 다시 그려지고, 반영 버튼을 눌렀을 때만 전체가 갱신된다.
+            @st.fragment
+            def _review_section():
+                # ══════════════════════════════════════════════════════
+                # 🔎 동일계열 Q승계 항목 검토
+                # 산근에 Q산식이 없어 같은 계열(동일 항목명·규격)의 Q값을 물려받은 항목들.
+                # 추정값이므로 설계자가 한 번 확인하고, 필요하면 여기서 바로 수정한다.
+                # ══════════════════════════════════════════════════════
+                _sr = st.session_state.get("series_review_all", {})
+                _sr_items = []
+                for _k, _c in _sr.items():
+                    for _it in _c["items"]:
+                        _sr_items.append({**_it, "category": _c.get("category", "")})
+                if _sr_items:
+                    with st.expander(f"🔎 승계값 검토 필요 ({len(_sr_items)}개) — 같은 계열 Q값을 물려받은 항목", expanded=False):
+                        st.caption(
+                            "산근에 Q산식이 없어 노무비 역산으로는 과소평가되던 항목에, "
+                            "시공조건이 같은 계열(동일 항목명·규격)의 Q값을 승계했습니다. "
+                            "장비·조건이 실제로 동일한지 확인하고, 다르면 아래에서 1일 작업량을 직접 입력하세요. "
+                            "입력하면 수동입력(0순위)으로 승계값을 덮어씁니다."
+                        )
+                        for _i, _it in enumerate(_sr_items):
+                            _c1, _c2, _c3, _c4 = st.columns([2.6, 2, 1.4, 1.4])
+                            with _c1:
+                                st.text(f"[{_it.get('category','')}] {_it['name'][:26]}")
+                            with _c2:
+                                st.text(f"{_it.get('spec','')[:24]}")
+                            with _c3:
+                                st.text(f"승계 {_it.get('승계값','')}")
+                            with _c4:
+                                _mk_s = _it["manual_key"]
+                                _cur = st.session_state["manual_rates"].get(_mk_s, {})
+                                _pend_s = st.session_state.get("pending_rate", {}).get(_mk_s)
+                                _val = st.number_input(
+                                    "수정", min_value=0.0, step=0.1,
+                                    value=float(_pend_s[0]) if _pend_s else float(_cur.get("daily", 0.0)),
+                                    key=f"sr_{_i}_{_mk_s}", label_visibility="collapsed",
+                                )
+                                # 입력 즉시 반영하지 않고 대기 목록에 모은다(입력할 때마다
+                                # 전체 재계산이 돌면 느리고, rerun이 없으면 결과표가 안 바뀐다).
+                                st.session_state.setdefault("pending_rate", {})
+                                _cur_v = float(_cur.get("daily", 0.0) or 0.0)
+                                if abs(_val - _cur_v) > 1e-9:
+                                    st.session_state["pending_rate"][_mk_s] = (_val, _it.get("unit", ""))
+                                else:
+                                    st.session_state["pending_rate"].pop(_mk_s, None)
+                        st.caption("※ 0으로 두면 승계값을 그대로 사용합니다.")
+                        _render_apply_rates("sr")
+                    st.markdown("---")
 
-            # ══════════════════════════════════════════════════════
-            # 🔎 노무비역산 추정값 검토 (작업일수 큰 항목)
-            # 일위대가에 인수가 없어 노무비로 되짚은 값이라 정밀도가 낮다.
-            # 설계자가 다른 품셈을 적용했다면 크게 어긋날 수 있으므로
-            # 공기 영향이 큰(작업일수 5일 이상) 항목부터 확인한다.
-            # ══════════════════════════════════════════════════════
-            _lr = st.session_state.get("labor_review_all", {})
-            _lr_items = []
-            for _k, _c in _lr.items():
-                for _it in _c["items"]:
-                    _lr_items.append({**_it, "category": _c.get("category", "")})
-            _lr_items.sort(key=lambda x: -int(x.get("작업일수", 0) or 0))
-            if _lr_items:
-                _top = _lr_items[:40]
-                with st.expander(
-                    f"🔎 역산 추정값 검토 ({len(_lr_items)}개 중 상위 {len(_top)}개) — 노무비로 되짚은 값",
-                    expanded=False,
-                ):
-                    st.caption(
-                        "일위대가에 직접 인수(단위 '인')가 없어 노무비를 노임단가로 나눠 추정한 값입니다. "
-                        "설계자가 별도 품셈이나 자체 기준을 적용한 항목은 실제와 차이가 클 수 있습니다. "
-                        "작업일수가 큰 순서로 정렬했으니 공기에 영향이 큰 항목부터 확인하고, "
-                        "필요하면 1일 작업량을 직접 입력하세요(수동입력이 0순위로 우선 적용됩니다)."
-                    )
-                    for _i4, _it4 in enumerate(_top):
-                        _c1, _c2, _c3, _c4, _c5 = st.columns([2.4, 1.8, 1.0, 1.2, 1.2])
-                        with _c1:
-                            st.text(f"[{_it4.get('category','')}] {_it4['name'][:24]}")
-                        with _c2:
-                            st.text(f"{_it4.get('spec','')[:22]}")
-                        with _c3:
-                            st.text(f"{_it4.get('작업일수',0)}일")
-                        with _c4:
-                            st.text(f"추정 {_it4.get('추정값','')}")
-                        with _c5:
-                            _mk4 = _it4["manual_key"]
-                            _cur4 = st.session_state["manual_rates"].get(_mk4, {})
-                            _val4 = st.number_input(
-                                "수정", min_value=0.0, step=0.1,
-                                value=float(_cur4.get("daily", 0.0)),
-                                key=f"lr_{_i4}_{_mk4}", label_visibility="collapsed",
-                            )
-                            if _val4 > 0:
-                                st.session_state["manual_rates"][_mk4] = {
-                                    "daily": _val4, "unit": _it4.get("unit", ""),
-                                }
-                            elif _mk4 in st.session_state["manual_rates"] and _cur4.get("daily", 0) > 0 and _val4 == 0:
-                                del st.session_state["manual_rates"][_mk4]
-                    st.caption("※ 0으로 두면 추정값을 그대로 사용합니다.")
+                # ══════════════════════════════════════════════════════
+                # 🔎 노무비역산 추정값 검토 (작업일수 큰 항목)
+                # 일위대가에 인수가 없어 노무비로 되짚은 값이라 정밀도가 낮다.
+                # 설계자가 다른 품셈을 적용했다면 크게 어긋날 수 있으므로
+                # 공기 영향이 큰(작업일수 5일 이상) 항목부터 확인한다.
+                # ══════════════════════════════════════════════════════
+                _lr = st.session_state.get("labor_review_all", {})
+                _lr_items = []
+                for _k, _c in _lr.items():
+                    for _it in _c["items"]:
+                        _lr_items.append({**_it, "category": _c.get("category", "")})
+                _lr_items.sort(key=lambda x: -int(x.get("작업일수", 0) or 0))
+                if _lr_items:
+                    _top = _lr_items[:40]
+                    with st.expander(
+                        f"🔎 역산 추정값 검토 ({len(_lr_items)}개 중 상위 {len(_top)}개) — 노무비로 되짚은 값",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "일위대가에 직접 인수(단위 '인')가 없어 노무비를 노임단가로 나눠 추정한 값입니다. "
+                            "설계자가 별도 품셈이나 자체 기준을 적용한 항목은 실제와 차이가 클 수 있습니다. "
+                            "작업일수가 큰 순서로 정렬했으니 공기에 영향이 큰 항목부터 확인하고, "
+                            "필요하면 1일 작업량을 직접 입력하세요(수동입력이 0순위로 우선 적용됩니다)."
+                        )
+                        for _i4, _it4 in enumerate(_top):
+                            _c1, _c2, _c3, _c4, _c5 = st.columns([2.4, 1.8, 1.0, 1.2, 1.2])
+                            with _c1:
+                                st.text(f"[{_it4.get('category','')}] {_it4['name'][:24]}")
+                            with _c2:
+                                st.text(f"{_it4.get('spec','')[:22]}")
+                            with _c3:
+                                st.text(f"{_it4.get('작업일수',0)}일")
+                            with _c4:
+                                st.text(f"추정 {_it4.get('추정값','')}")
+                            with _c5:
+                                _mk4 = _it4["manual_key"]
+                                _cur4 = st.session_state["manual_rates"].get(_mk4, {})
+                                _pend4 = st.session_state.get("pending_rate", {}).get(_mk4)
+                                _val4 = st.number_input(
+                                    "수정", min_value=0.0, step=0.1,
+                                    value=float(_pend4[0]) if _pend4 else float(_cur4.get("daily", 0.0)),
+                                    key=f"lr_{_i4}_{_mk4}", label_visibility="collapsed",
+                                )
+                                st.session_state.setdefault("pending_rate", {})
+                                _cur4_v = float(_cur4.get("daily", 0.0) or 0.0)
+                                if abs(_val4 - _cur4_v) > 1e-9:
+                                    st.session_state["pending_rate"][_mk4] = (_val4, _it4.get("unit", ""))
+                                else:
+                                    st.session_state["pending_rate"].pop(_mk4, None)
+                        st.caption("※ 0으로 두면 추정값을 그대로 사용합니다.")
+                        _render_apply_rates("lr")
+
+            _review_section()
 
 
         with _main_tabs[1]:

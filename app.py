@@ -243,13 +243,34 @@ def days_to_months_text(days) -> str:
         return ""
     if d <= 0:
         return ""
-    m = d / 30.4
+    # 표시 자릿수(소수 1자리)로 먼저 반올림한다. 안 그러면 47.96개월이
+    # '3년 12.0개월'로 표시된다(실측).
+    m = round(d / 30.4, 1)
     # 12개월 이상이면 'N년 M개월'도 함께
     if m >= 12:
         y = int(m // 12)
-        rm = m - y * 12
+        rm = round(m - y * 12, 1)
         return f"≒ {m:.1f}개월 ({y}년 {rm:.1f}개월)"
     return f"≒ {m:.1f}개월"
+
+
+def applied_condition_lines(result) -> list:
+    """비작업일수 계산에 실제로 적용한 기상조건을 '✅ 조건명' 목록으로 반환(표시용).
+
+    가이드라인 13개 조건 방식이면 계산 시 저장한 조건 목록(conditions)을 쓴다.
+    예전처럼 강우/한랭/폭염 플래그를 읽으면, 가이드라인 방식에서는 호환용으로
+    항상 True라서 실제 선택과 무관하게 전부 ✅로 표시되었다.
+    """
+    conds = result.get("conditions")
+    if conds is not None:
+        if not conds:
+            return ["❌ 기상조건 미적용"]
+        return [f"✅ {CONDITION_LABELS.get(c, c)}" for c in conds]
+    return [
+        f"{'✅' if result.get('include_rain') else '❌'} 강우일",
+        f"{'✅' if result.get('include_cold') else '❌'} 한랭일 (-10°C 이하)",
+        f"{'✅' if result.get('include_hot') else '❌'} 폭염일 (33°C 이상)",
+    ]
 
 
 # 출처별 신뢰도 아이콘.
@@ -1164,6 +1185,87 @@ def parse_by_keyword(file):
     
     return list(merged.values()), col_info
 
+
+def _extract_dangagun(wb):
+    """단가산출근거 시트에서 항목별 Q값(시간당·1일 작업량)을 추출한다."""
+    dangagun_cache = {}
+    if '단가산출근거' not in wb.sheetnames:
+        return dangagun_cache
+    ws_danga = wb['단가산출근거']
+    current_item = None
+
+    for row in ws_danga.iter_rows(min_row=1, values_only=True):
+        row_text = " ".join([str(c) for c in row if c])
+
+        # 항목명 추출 (규격 포함)
+        if row[1] and "/" in str(row[1]):
+            item_text = str(row[1]).strip()
+            if "/" in item_text:
+                current_item = item_text.split("/")[0].strip()
+
+        # Q 값 추출 (다양한 패턴)
+        if current_item and "Q =" in row_text:
+            # 패턴 1: Q = 숫자 단위/HR
+            match1 = re.search(r'Q\s*=\s*([\d.]+)\s*([^\s]+/HR)', row_text, re.IGNORECASE)
+            if match1:
+                hourly_val = float(match1.group(1))
+                unit = match1.group(2).replace("HR", "Hr").replace("hr", "Hr")
+                dangagun_cache[current_item] = {"hourly": hourly_val, "unit": unit}
+                continue
+
+            # 패턴 2: Q = 숫자/일 /8 Hr = 숫자 단위/Hr
+            match2 = re.search(r'=\s*([\d.]+)\s*([^\s/]+)/Hr', row_text, re.IGNORECASE)
+            if match2:
+                hourly_val = float(match2.group(1))
+                unit = match2.group(2) + "/Hr"
+                dangagun_cache[current_item] = {"hourly": hourly_val, "unit": unit}
+                continue
+
+        # 1세트 = N일 패턴
+        if current_item and "세트" in row_text and "일" in row_text:
+            match3 = re.search(r'(\d+)\s*세트\s*=\s*([\d.]+)\s*일', row_text)
+            if match3:
+                sets = float(match3.group(1))
+                days = float(match3.group(2))
+                # 1일 = sets/days 세트
+                daily_val = sets / days
+                dangagun_cache[current_item] = {"daily": daily_val, "unit": "세트/일"}
+                continue
+    return dangagun_cache
+
+
+@st.cache_data(show_spinner=False, max_entries=3)
+def parse_workbook_cached(file_bytes: bytes):
+    """업로드한 엑셀을 한 번만 파싱하고, 결과를 파일 내용 기준으로 캐시한다.
+
+    Streamlit은 위젯을 건드릴 때마다 스크립트 전체를 다시 실행한다. 예전에는
+    그때마다 엑셀을 3번(양식 판별·키워드 파싱·계층 파싱) 새로 읽어서 재실행 1회에
+    수 초씩 걸렸다. 내용이 같은 파일이면 캐시된 결과를 돌려준다.
+    st.cache_data는 호출마다 복사본을 주므로 화면 쪽에서 값을 고쳐도 캐시는 그대로다.
+
+    반환: (all_rows, col_info, parsed)
+      parsed["dangagun"]: 단가산출근거 Q값
+      parsed["template"]: 인식된 템플릿의 파싱 결과 (인식 실패 시 None)
+    """
+    all_rows, col_info = parse_by_keyword(BytesIO(file_bytes))
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    parsed = {"dangagun": _extract_dangagun(wb), "template": None}
+    tmpl = detect_template(wb)
+    if tmpl is not None:
+        items = parse_items_generic(wb, tmpl)
+        code_daily = parse_unit_price_generic(wb, tmpl)
+        labor_daily = parse_labor_derived_by_template(wb, tmpl)
+        parsed["template"] = {
+            "name": tmpl["name"],
+            "has_alt": bool(tmpl.get("link_regex_alt")),
+            "items": items,
+            "code_daily": code_daily,
+            "labor_daily": labor_daily,
+            # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
+            "series_fallback": apply_series_fallback(items, code_daily, labor_daily),
+        }
+    return all_rows, col_info, parsed
+
 # ══════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════
@@ -1239,15 +1341,12 @@ with tab2:
             status_text.text("📂 엑셀 파일 로드 중...")
             progress_bar.progress(20)
             
-            # 조기 양식 판별 (템플릿 인식되면 구양식 전용 게이트를 우회해야 하므로 먼저 확인)
-            try:
-                _wb_check = openpyxl.load_workbook(uploaded, read_only=True, data_only=True)
-                _early_is_new = detect_template(_wb_check) is not None
-            except Exception:
-                _early_is_new = False
-
+            # 파싱 결과는 파일 내용 기준으로 캐시된다(parse_workbook_cached 참고)
             with st.spinner("파싱 중..."):
-                all_rows, col_info = parse_by_keyword(uploaded)
+                all_rows, col_info, _parsed = parse_workbook_cached(uploaded.getvalue())
+            _tmpl_data = _parsed["template"]
+            # 템플릿이 인식되면 구양식 전용 게이트(matched)를 우회한다
+            _early_is_new = _tmpl_data is not None
             
             progress_bar.progress(40)
             status_text.text("✅ 파싱 완료!")
@@ -1263,53 +1362,8 @@ with tab2:
                 
                 st.markdown("---")
                 
-                wb = openpyxl.load_workbook(uploaded, data_only=True)
-                ws = wb['설계내역서'] if '설계내역서' in wb.sheetnames else wb.active
-                
-                # 단가산출근거 캐싱 (개선: 다양한 패턴 인식)
-                dangagun_cache = {}
-                if '단가산출근거' in wb.sheetnames:
-                    ws_danga = wb['단가산출근거']
-                    current_item = None
-                    
-                    for row in ws_danga.iter_rows(min_row=1, values_only=True):
-                        row_text = " ".join([str(c) for c in row if c])
-                        
-                        # 항목명 추출 (규격 포함)
-                        if row[1] and "/" in str(row[1]):
-                            item_text = str(row[1]).strip()
-                            if "/" in item_text:
-                                current_item = item_text.split("/")[0].strip()
-                        
-                        # Q 값 추출 (다양한 패턴)
-                        if current_item and "Q =" in row_text:
-                            # 패턴 1: Q = 숫자 단위/HR
-                            match1 = re.search(r'Q\s*=\s*([\d.]+)\s*([^\s]+/HR)', row_text, re.IGNORECASE)
-                            if match1:
-                                hourly_val = float(match1.group(1))
-                                unit = match1.group(2).replace("HR", "Hr").replace("hr", "Hr")
-                                dangagun_cache[current_item] = {"hourly": hourly_val, "unit": unit}
-                                continue
-                            
-                            # 패턴 2: Q = 숫자/일 /8 Hr = 숫자 단위/Hr
-                            match2 = re.search(r'=\s*([\d.]+)\s*([^\s/]+)/Hr', row_text, re.IGNORECASE)
-                            if match2:
-                                hourly_val = float(match2.group(1))
-                                unit = match2.group(2) + "/Hr"
-                                dangagun_cache[current_item] = {"hourly": hourly_val, "unit": unit}
-                                continue
-                        
-                        # 1세트 = N일 패턴
-                        if current_item and "세트" in row_text and "일" in row_text:
-                            match3 = re.search(r'(\d+)\s*세트\s*=\s*([\d.]+)\s*일', row_text)
-                            if match3:
-                                sets = float(match3.group(1))
-                                days = float(match3.group(2))
-                                # 1일 = sets/days 세트
-                                daily_val = sets / days
-                                dangagun_cache[current_item] = {"daily": daily_val, "unit": "세트/일"}
-                                continue
-                
+                # 단가산출근거 Q값 (parse_workbook_cached에서 추출)
+                dangagun_cache = _parsed["dangagun"]
                 st.session_state["dangagun_cache"] = dangagun_cache
                 
                 if dangagun_cache:
@@ -1317,18 +1371,13 @@ with tab2:
                 
                 # 계층 구조 파싱 (설정 기반 범용 엔진 — universal_parser.py)
                 hierarchy = []
-                _tmpl = detect_template(wb)
-                if _tmpl is not None:
-                    _uni_items = parse_items_generic(wb, _tmpl)
+                if _tmpl_data is not None:
+                    _uni_items = _tmpl_data["items"]
                     hierarchy = naeyeok_to_hierarchy(_uni_items)
-                    st.session_state["naeyeok_code_daily"] = parse_unit_price_generic(wb, _tmpl)
-                    st.session_state["naeyeok_labor_daily"] = parse_labor_derived_by_template(wb, _tmpl)
+                    st.session_state["naeyeok_code_daily"] = _tmpl_data["code_daily"]
+                    st.session_state["naeyeok_labor_daily"] = _tmpl_data["labor_daily"]
                     # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
-                    st.session_state["naeyeok_series_fallback"] = apply_series_fallback(
-                        _uni_items,
-                        st.session_state["naeyeok_code_daily"],
-                        st.session_state["naeyeok_labor_daily"],
-                    )
+                    st.session_state["naeyeok_series_fallback"] = _tmpl_data["series_fallback"]
                     st.session_state["naeyeok_code_by_item"] = {
                         (it["name"], it.get("spec", "")): it["code"]
                         for it in _uni_items if it.get("code")
@@ -1339,7 +1388,7 @@ with tab2:
                     # 매칭된다(실측: 아스팔트포장이 '석축헐기 및 복구' 값을 가져와 0.16㎡/일).
                     # 따라서 link_regex_alt가 있는 템플릿(표준형)에서는 code_alt만 사용하고,
                     # alt 개념이 없는 템플릿(코드매칭형)에서만 code로 폴백한다.
-                    _has_alt = bool(_tmpl.get("link_regex_alt"))
+                    _has_alt = _tmpl_data["has_alt"]
                     # 표준형처럼 '산근 N호표'(단가산출근거)와 '대가 N호표'(일위대가표)가
                     # 서로 다른 번호 체계인 양식에서는, 산근 번호를 일위대가 키로 폴백하면
                     # 엉뚱한 호표에 매칭된다(실측: '아스팔트포장 절단 82m'이 산근56을
@@ -1378,7 +1427,7 @@ with tab2:
                         st.session_state["crew_by_item"] = {}
                         st.session_state["manual_rates"] = {}
                     if _uni_items:
-                        st.info(f"✅ 템플릿 인식: {_tmpl['name']} — {len(_uni_items)}개 항목, {len(hierarchy)}개 대공종")
+                        st.info(f"✅ 템플릿 인식: {_tmpl_data['name']} — {len(_uni_items)}개 항목, {len(hierarchy)}개 대공종")
                 else:
                     st.warning("⚠️ 인식할 수 없는 엑셀 양식입니다. 지원 양식: 표준형(산근호표), 코드매칭형(내역서산근)")
                 
@@ -2121,7 +2170,10 @@ with tab2:
                                                     )
                                     
                                     # 직접 항목도 있으면 표시
-                                    direct_items = [item for item in row['세부항목'] if item not in sum([sub['items'] for sub in row['하위카테고리']], [])]
+                                    # 하위카테고리에 속하지 않은 항목만. 예전에는 항목마다 전체 목록과
+                                    # 딕셔너리 동등 비교를 해서 항목 수의 제곱에 비례해 느려졌다.
+                                    _in_sub = {id(i) for sub in row['하위카테고리'] for i in sub.get('items', [])}
+                                    direct_items = [item for item in row['세부항목'] if id(item) not in _in_sub]
                                     if direct_items:
                                         detail_items = []
                                         for item in direct_items:
@@ -2391,16 +2443,15 @@ with tab1:
                                   delta=days_to_months_text(result["total_days"]),
                                   delta_color="off")
             
+            _cond_md = "\n            ".join(f"- {l}" for l in applied_condition_lines(result))
             st.info(f"""
-            **📍 {result['region']} 지역 공기산정 결과**
+            **📍 {result.get('station') or result['region']} 공기산정 결과**
             - 착공일: {result['start_date'].strftime('%Y년 %m월 %d일')}
             - 준공일: {result['end_date'].strftime('%Y년 %m월 %d일')}
             - 총 공사기간: **{result['total_days']}일** {days_to_months_text(result['total_days'])}
             
             **적용된 비작업일 조건:**
-            - {'✅' if result['include_rain'] else '❌'} 강우일
-            - {'✅' if result['include_cold'] else '❌'} 한랭일
-            - {'✅' if result['include_hot'] else '❌'} 폭염일
+            {_cond_md}
             """)
         else:
             st.info("👉 **'비작업일수 계산기'** 탭에서 비작업일수를 계산하면 최종 공기산정 결과가 표시됩니다!")
@@ -2623,24 +2674,31 @@ with tab4:
     
     with col_b:
         # TAB 2에서 계산된 순작업일수 자동 입력.
-        # 주의: key가 있는 위젯은 첫 렌더 후 value= 인자를 무시하므로,
         # 순공기가 '새로 계산됐을 때만' 위젯 상태를 직접 동기화한다.
         # (사용자가 수동으로 고친 값은 다음 재계산 전까지 유지됨)
-        default_work_days = st.session_state.get("total_work_days", 100)
+        default_work_days = int(st.session_state.get("total_work_days", 100) or 0)
         if default_work_days >= 1 and st.session_state.get("_synced_work_days") != default_work_days:
-            st.session_state["weather_work_days"] = int(default_work_days)
+            st.session_state["weather_work_days"] = default_work_days
             st.session_state["_synced_work_days"] = default_work_days
+        # value= 인자는 넘기지 않고 세션 상태로만 값을 준다.
+        # 산정 결과가 0일(전부 '매칭 안 됨'이거나 전부 제외)일 때 value=0을 넘기면
+        # min_value=1 위반으로 예외가 나서, 뒤에 그려지는 탭(수동입력 관리 포함)이
+        # 통째로 사라졌다. 정작 수동입력이 필요한 상황에서 입력 화면이 막히는 셈이었다.
+        st.session_state.setdefault("weather_work_days", max(1, default_work_days))
         # max_value를 동적으로 설정 (값이 크면 max도 자동으로 늘림)
-        max_val = max(10000, default_work_days + 1000)
+        max_val = max(10000, default_work_days + 1000,
+                      int(st.session_state["weather_work_days"]))
         work_days = st.number_input(
             "순작업일수",
             min_value=1,
             max_value=max_val,
-            value=default_work_days,
             key="weather_work_days",
             help="TAB '엑셀 내역서 인식'에서 자동 계산된 값 (재계산 시 자동 갱신)"
         )
         st.session_state["work_days_input"] = work_days
+        if "work_result" in st.session_state and default_work_days <= 0:
+            st.caption("⚠️ 산정된 순작업일수가 0일입니다. '수동입력 관리' 탭에서 "
+                       "매칭 안 된 항목의 1일 작업량을 입력하세요.")
 
     # 순작업일수가 바뀌었는데 이전 계산 결과가 남아 있으면 안내.
     # 수동입력·조수 변경으로 작업일수가 달라져도 '비작업일수 계산' 버튼을 다시
@@ -2664,23 +2722,38 @@ with tab4:
         # datetime 변환
         start_dt = dt.combine(start_date, dt.min.time())
         
+        # 준비·정리·시운전은 달력 기준 기간이다(작업일수 산정 대상이 아니라 공사기간 구성요소).
+        _prep_days = int(round(prep_months * 30.4))
+        _wrap_days = int(round(wrapup_months * 30.4))
+        _comm_days = int(round(commission_months * 30.4))
+
+        # 공사기간(착공~준공) = 준비 → 본공사(작업+비작업) → 시운전 → 정리.
+        # 비작업일수는 본공사가 실제로 진행되는 구간으로 계산해야 계절이 맞고,
+        # 준공일-착공일도 총 공사기간과 일치한다. 예전에는 본공사를 착공일에 바로
+        # 시작시키고 총 공사기간에만 준비기간을 더해서, 화면의 착공~준공 날짜 차이가
+        # 총 공사기간보다 준비기간만큼 짧게 나왔다.
+        work_start = start_dt + timedelta(days=_prep_days)
+
         # 종료일 추정: 순작업일수 * 1.5
-        rough_end_date = start_dt + timedelta(days=int(work_days * 1.5))
+        rough_end_date = work_start + timedelta(days=int(work_days * 1.5))
         
         # 반복 계산: 정확한 종료일 찾기
         for _ in range(5):
             # 1. 기상조건 비작업일수 (A)
             if HAS_GUIDELINE_WEATHER and selected_station:
+                # 조건을 하나도 고르지 않았으면 기상 비작업일수는 0이어야 한다.
+                # get_weather_non_work_days는 빈 목록을 받으면 기본 조건으로 대체하므로,
+                # 없는 키를 넘겨 '조건 없음'(월별 행은 유지, 값은 0)으로 계산시킨다.
                 _wres = get_weather_non_work_days(
-                    selected_station, start_dt, rough_end_date,
-                    conditions=st.session_state.get("weather_conditions") or DEFAULT_CONDITIONS,
+                    selected_station, work_start, rough_end_date,
+                    conditions=st.session_state.get("weather_conditions") or ["__none__"],
                 )
                 weather_days = _wres["total"]
                 st.session_state["weather_detail"] = _wres
             else:
                 weather_days = get_total_non_work_days(
                     selected_region,
-                    start_dt,
+                    work_start,
                     rough_end_date,
                     check_rain=include_rain,
                     check_cold=include_cold,
@@ -2693,7 +2766,7 @@ with tab4:
             # 2. 가이드라인 공식 적용 (A + B - C)
             result = get_total_non_work_days_with_holidays(
                 weather_days,
-                start_dt,
+                work_start,
                 rough_end_date,
                 include_holidays=include_holidays,
                 min_weekly_rest=min_weekly_rest
@@ -2701,24 +2774,17 @@ with tab4:
             
             non_work_days = result["total"]
             
-            # 총 공사기간 = 순작업일수 + 비작업일수
-            calculated_end = start_dt + timedelta(days=int(work_days + non_work_days - 1))
+            # 본공사 종료일 = 본공사 시작일 + 순작업일수 + 비작업일수
+            calculated_end = work_start + timedelta(days=int(work_days + non_work_days - 1))
             
             # 수렴 체크
             if abs((rough_end_date - calculated_end).days) <= 1:
                 break
             rough_end_date = calculated_end
         
-        # 준비·정리·시운전은 달력 기준 기간이므로 비작업일수 계산과 무관하게 더한다.
-        # (작업일수 산정 대상이 아니라 공사기간 구성요소)
-        _prep_days = int(round(prep_months * 30.4))
-        _wrap_days = int(round(wrapup_months * 30.4))
-        _comm_days = int(round(commission_months * 30.4))
-        _extra_days = _prep_days + _wrap_days + _comm_days
-
-        # 시공 종료 후 시운전·정리기간이 이어지고, 착공 전 준비기간이 선행한다.
+        # 본공사 종료 후 시운전·정리기간이 이어진다(준비기간은 위에서 착공일 뒤에 배치).
         completion_date = calculated_end + timedelta(days=_comm_days + _wrap_days)
-        total_days = (completion_date - start_dt).days + 1 + _prep_days
+        total_days = (completion_date - start_dt).days + 1
         
         # 결과 저장
         st.session_state["weather_result"] = {
@@ -2729,6 +2795,12 @@ with tab4:
             "prep_days": _prep_days,
             "wrapup_days": _wrap_days,
             "commission_days": _comm_days,
+            "work_start": work_start,
+            "work_end": calculated_end,
+            "station": selected_station,
+            # 가이드라인 방식이면 실제 적용한 조건 목록, 구버전 방식이면 None
+            "conditions": (list(st.session_state.get("weather_conditions") or [])
+                           if (HAS_GUIDELINE_WEATHER and selected_station) else None),
             "work_days": work_days,
             "non_work_days": non_work_days,
             "weather_days": result["weather"],
@@ -2796,14 +2868,16 @@ with tab4:
             )
         
         # 적용 조건
+        _cond_md4 = "\n        ".join(f"- {l}" for l in applied_condition_lines(result))
+        _ws4 = result.get("work_start", result["start_date"])
+        _we4 = result.get("work_end", result["end_date"])
         st.info(f"""
         **적용된 조건:**
-        - {'✅' if result['include_rain'] else '❌'} 강우일
-        - {'✅' if result['include_cold'] else '❌'} 한랭일 (-10°C 이하)
-        - {'✅' if result['include_hot'] else '❌'} 폭염일 (33°C 이상)
+        {_cond_md4}
         - {'✅' if result.get('include_holidays', False) else '❌'} 법정공휴일
         - {'✅' if result.get('min_weekly_rest', False) else '❌'} 주 40시간 근무제 보장
-        - **기간**: {result['start_date'].strftime('%Y-%m-%d')} ~ {result['end_date'].strftime('%Y-%m-%d')}
+        - **공사기간(착공~준공)**: {result['start_date'].strftime('%Y-%m-%d')} ~ {result['end_date'].strftime('%Y-%m-%d')}
+        - **본공사 기간(비작업일수 산정 구간)**: {_ws4.strftime('%Y-%m-%d')} ~ {_we4.strftime('%Y-%m-%d')}
         """)
         
         # 월별 통합 상세 표
@@ -2811,66 +2885,75 @@ with tab4:
             from datetime import datetime as dt
             import pandas as pd
             
-            monthly_weather = get_monthly_breakdown(
-                result["region"],
-                result["start_date"],
-                result["end_date"],
-                check_rain=result["include_rain"],
-                check_cold=result["include_cold"],
-                check_hot=result["include_hot"]
-            )
-            
-            monthly_holidays = get_holiday_breakdown_monthly(
-                result["start_date"],
-                result["end_date"]
-            )
-            
-            if monthly_weather:
-                st.markdown("### 📅 월별 비작업일수 상세")
-                st.caption("📖 각 월의 기상조건 + 공휴일 + 중복일수 + 최종 비작업일수")
-                
-                # 월별 데이터 통합
-                holiday_dict = {h["월"]: h["법정공휴일"] for h in monthly_holidays} if monthly_holidays else {}
-                
-                monthly_data = []
-                from calendar import monthrange
-                
+            from calendar import monthrange
+
+            # 비작업일수를 실제로 산정한 본공사 구간 기준으로 표시한다.
+            _ws_m = result.get("work_start", result["start_date"])
+            _we_m = result.get("work_end", result["end_date"])
+            monthly_holidays = get_holiday_breakdown_monthly(_ws_m, _we_m)
+            holiday_dict = {h["월"]: h["법정공휴일"] for h in monthly_holidays} if monthly_holidays else {}
+
+            _wdet = st.session_state.get("weather_detail") or {}
+            _by_cond = _wdet.get("by_condition") or {}
+            _monthly_w = _wdet.get("monthly") or []
+            _guideline_mode = result.get("conditions") is not None or bool(_monthly_w)
+
+            # (월, 대상일수, 달력일수, 기상 A, 추가 열)
+            _months = []
+            monthly_weather = []
+            if _guideline_mode:
+                # 가이드라인 방식: 계산 때 쓴 조건별 월 값(weather_detail)을 그대로 쓴다.
+                # 예전에는 여기서 구버전 weather_data를 지역명으로 조회했는데, 지점의
+                # 시·도명('강원도')이 구버전 키('강원')와 달라 기상일수가 전부 0으로 나왔다.
+                for _mw in _monthly_w:
+                    _y, _mo = map(int, _mw["월"].split("-"))
+                    _dim = monthrange(_y, _mo)[1]
+                    _months.append((_mw["월"], int(_mw.get("일수", _dim)), _dim,
+                                    float(_mw.get("합계", 0) or 0), {}))
+            else:
+                monthly_weather = get_monthly_breakdown(
+                    result["region"], _ws_m, _we_m,
+                    check_rain=result["include_rain"],
+                    check_cold=result["include_cold"],
+                    check_hot=result["include_hot"],
+                )
                 for m in monthly_weather:
-                    month_str = m["month"]
-                    year, mon = map(int, month_str.split("-"))
-                    cal_days = monthrange(year, mon)[1]
-                    
-                    rain = m.get("rain", 0)
-                    cold = m.get("cold", 0)
-                    hot = m.get("hot", 0)
-                    weather_total = rain + cold + hot  # A
-                    
-                    holidays = holiday_dict.get(month_str, 0) if result.get("include_holidays", False) else 0  # B
-                    
-                    # 중복일수 (C = A × B ÷ 달력일수)
-                    overlap = round(weather_total * holidays / cal_days) if cal_days > 0 else 0
-                    
-                    # 월별 비작업일수
+                    _y, _mo = map(int, m["month"].split("-"))
+                    _dim = monthrange(_y, _mo)[1]
+                    rain, cold, hot = m.get("rain", 0), m.get("cold", 0), m.get("hot", 0)
+                    _months.append((m["month"], _dim, _dim, rain + cold + hot, {
+                        "🌧️ 강우": f"{rain:.1f}", "❄️ 한랭": f"{cold:.1f}", "🔥 폭염": f"{hot:.1f}",
+                    }))
+
+            if _months:
+                st.markdown("### 📅 월별 비작업일수 상세")
+                st.caption(
+                    "📖 본공사 구간의 월별 기상조건(A) + 공휴일(B) − 중복일수(C). "
+                    "첫·마지막 달은 해당 일수만큼 안분했고, 월별 반올림 때문에 합계가 "
+                    "전체 공식 결과와 1~2일 다를 수 있습니다."
+                )
+
+                monthly_data = []
+                for month_str, _days, cal_days, weather_total, _extra_cols in _months:
+                    _h_full = holiday_dict.get(month_str, 0) if result.get("include_holidays", False) else 0
+                    holidays = round(_h_full * _days / cal_days) if cal_days else 0  # B (부분 월 안분)
+                    # 중복일수 (C = A × B ÷ 대상일수)
+                    overlap = round(weather_total * holidays / _days) if _days > 0 else 0
                     month_non_work = round(weather_total + holidays - overlap)
-                    
                     # 주 40시간 근무제 보장
-                    weeks = cal_days / 7
-                    min_rest = round(weeks)
+                    min_rest = round(_days / 7)
                     if result.get("min_weekly_rest", False) and month_non_work < min_rest:
                         month_non_work = min_rest
-                    
                     monthly_data.append({
                         "월": month_str,
-                        "🌧️ 강우": f"{rain:.1f}",
-                        "❄️ 한랭": f"{cold:.1f}",
-                        "🔥 폭염": f"{hot:.1f}",
+                        **_extra_cols,
                         "🌤️ 기상(A)": f"{weather_total:.1f}",
                         "📅 공휴일(B)": f"{holidays}",
                         "⚠️ 중복(C)": f"{overlap}",
                         "📊 비작업": f"{month_non_work}",
-                        "📆 달력일": f"{cal_days}",
+                        "📆 대상일수": f"{_days}",
                     })
-                
+
                 df_monthly = pd.DataFrame(monthly_data)
                 st.dataframe(df_monthly, hide_index=True, width="stretch")
                 
@@ -2883,12 +2966,11 @@ with tab4:
                 # ──────────────────────────────────
                 st.markdown("### 📈 항목별 비작업일수 분석")
 
-                _wdet = st.session_state.get("weather_detail") or {}
-                _by_cond = _wdet.get("by_condition") or {}
-                _monthly_w = _wdet.get("monthly") or []
-                total_holiday = sum(holiday_dict.values())
+                # 법정공휴일은 공식의 B(부분 월 안분)와 같은 값을 쓴다. 월 전체 공휴일수를
+                # 단순 합산하면 위 B 지표와 숫자가 달라 보였다(실측 B 255일 vs 266일).
+                total_holiday = result.get("holiday_days", 0)
 
-                if _by_cond:
+                if _guideline_mode:
                     _labels, _values = [], []
                     for _ck, _cv in _by_cond.items():
                         _labels.append(CONDITION_LABELS.get(_ck, _ck))
@@ -2945,6 +3027,16 @@ with tab4:
                         st.info("법정공휴일이 포함되지 않았습니다.")
                 
                 # 가이드라인 공식 설명
+                if _guideline_mode:
+                    _conds_f = result.get("conditions")
+                    if _conds_f is None:
+                        _conds_f = list(_by_cond)
+                    _a_desc = " + ".join(CONDITION_LABELS.get(c, c) for c in _conds_f) or "적용 조건 없음"
+                    _src_desc = (f"가이드라인 부록3 기상청 관측자료 2015~2024 월평균 "
+                                 f"({result.get('station') or result['region']} 관측지점)")
+                else:
+                    _a_desc = "강우 + 한랭 + 폭염"
+                    _src_desc = "기상청 평년값 (1991-2020)"
                 with st.expander("📐 계산 공식 설명", expanded=False):
                     st.markdown(f"""
                     ### 가이드라인 19페이지 공식
@@ -2953,7 +3045,7 @@ with tab4:
                     
                     | 항목 | 내용 | 값 |
                     |------|------|-----|
-                    | **A** | 기상조건 비작업일수 (강우 + 한랭 + 폭염) | {result.get('weather_days', 0)}일 |
+                    | **A** | 기상조건 비작업일수 ({_a_desc}) | {result.get('weather_days', 0)}일 |
                     | **B** | 법정 공휴일수 (부록1 기준) | {result.get('holiday_days', 0)}일 |
                     | **C** | 중복일수 = A × B ÷ 달력일수 (소수점 반올림) | {result.get('overlap_days', 0)}일 |
                     | **계** | A + B - C | **{result.get('non_work_days', 0)}일** |
@@ -2963,7 +3055,7 @@ with tab4:
                     - 일반적으로 주 1일 휴식 보장 (월 4~5일)
                     
                     ### 데이터 출처
-                    - **기상 데이터**: 기상청 평년값 (1991-2020)
+                    - **기상 데이터**: {_src_desc}
                     - **법정공휴일**: 「관공서의 공휴일에 관한 규정」 (부록1, 2026-2035)
                     """)
         except Exception as e:
@@ -2974,8 +3066,25 @@ with tab4:
     # ──────────────────────────────────
     # 6. 지역 기상 정보 미리보기
     # ──────────────────────────────────
-    with st.expander(f"📊 {selected_region} 지역 연간 기상 통계", expanded=False):
-        if selected_region in RAIN_DAYS:
+    _stat_name = selected_station if (HAS_GUIDELINE_WEATHER and selected_station) else f"{selected_region} 지역"
+    with st.expander(f"📊 {_stat_name} 연간 기상 통계", expanded=False):
+        if HAS_GUIDELINE_WEATHER and selected_station:
+            # 가이드라인 방식: 선택한 조건의 관측지점 월평균 비작업일수.
+            # (구버전 RAIN_DAYS는 '강원' 같은 짧은 키라 '강원도 ○○' 지점에서는 표가 비었다)
+            _conds_s = st.session_state.get("weather_conditions") or []
+            if _conds_s:
+                _stat = {"월": [f"{m}월" for m in range(1, 13)]}
+                for _c in _conds_s:
+                    _stat[CONDITION_LABELS.get(_c, _c)] = list(
+                        WEATHER_NON_WORK.get(_c, {}).get(selected_station) or [0.0] * 12)
+                df_stats = pd.DataFrame(_stat)
+                df_stats["합계"] = df_stats.drop(columns=["월"]).sum(axis=1).round(1)
+                st.dataframe(df_stats, hide_index=True, width="stretch")
+                st.metric("연간 합계 (선택 조건 단순 합산)", f"{df_stats['합계'].sum():.1f}일")
+                st.caption("가이드라인 부록3, 2015~2024 월평균. 조건 간 중복은 보정하지 않고 단순 합산합니다.")
+            else:
+                st.info("선택된 기상조건이 없습니다.")
+        elif selected_region in RAIN_DAYS:
             import pandas as pd
             
             months = list(range(1, 13))
@@ -3032,10 +3141,18 @@ with tab5:
         _sched_rows = [r for r in _sched_rows if not is_non_work_category(r.get('공종명_pure') or '')]
 
         # 달력 환산: 앱의 공기 모델과 일관되게 배율을 잡는다.
-        # - 최장(병행) 모드: 최장 공종이 총공사기간을 채우고 나머지는 비례 배분
-        # - 합산(순차) 모드: 선택 공종 작업일수의 '합'이 총공사기간을 채우도록 배분
+        # - 최장(병행) 모드: 최장 공종이 본공사 기간을 채우고 나머지는 비례 배분
+        # - 합산(순차) 모드: 선택 공종 작업일수의 '합'이 본공사 기간을 채우도록 배분
+        # total_days에는 준비·시운전·정리가 이미 들어 있으므로 공정 막대는 본공사 기간
+        # (작업+비작업)에만 배분하고, 준비·시운전·정리는 아래에서 별도 행으로 붙인다.
+        # (예전에는 total_days 전체로 배분한 뒤 준비 4·3개월, 시운전 2개월 행을
+        #  고정값으로 또 붙여서 공정표가 산정 공기보다 길어졌다)
         _total_days = _wr.get('total_days') or 0
         _work_days = _wr.get('work_days') or 1
+        _prep_d = int(_wr.get('prep_days', 0) or 0)
+        _comm_d = int(_wr.get('commission_days', 0) or 0)
+        _wrap_d = int(_wr.get('wrapup_days', 0) or 0)
+        _constr_days = max(1, _total_days - _prep_d - _comm_d - _wrap_d)
         _start_date = _wr.get('start_date')
         _start_d = _start_date.date() if hasattr(_start_date, 'date') else _start_date
 
@@ -3043,11 +3160,13 @@ with tab5:
         _max_wd = max((int(r.get('작업일수(일)', 0) or 0) for r in _sched_rows), default=1) or 1
         _sum_wd = sum(int(r.get('작업일수(일)', 0) or 0) for r in _sched_rows) or 1
         _base_wd = _sum_wd if _is_sum_mode else _max_wd
-        _scale = _total_days / _base_wd  # 작업일수 → 달력일수 배율
+        _scale = _constr_days / _base_wd  # 작업일수 → 달력일수 배율
 
         st.info(
-            f"착공일 {_start_d} · 총공사기간 {_total_days}일 · "
-            f"{'선택 공종 합산' if _is_sum_mode else '최장 주공정'} {_base_wd}일 기준 배분 (배율 {_scale:.2f})"
+            f"착공일 {_start_d} · 총공사기간 {_total_days}일 "
+            f"(준비 {_prep_d} + 본공사 {_constr_days} + 시운전 {_comm_d} + 정리 {_wrap_d}) · "
+            f"본공사를 {'선택 공종 합산' if _is_sum_mode else '최장 주공정'} {_base_wd}일 기준 배분 "
+            f"(배율 {_scale:.2f})"
         )
 
         # ── 2) 표준 시퀀스 순서 + 순차(계단식) 시작월 자동 제안 ──
@@ -3084,12 +3203,15 @@ with tab5:
         _prev_start = 1
         _prev_months = 0
         _pipe_end = None  # 관로류 종료 개월차 (배수설비 의존성용)
+        _NON_WORK_GROUPS = ("공사준비", "시운전", "준공정리")
 
-        # 공사준비(착공 전) 행 — 실제 예정공정표 관행(인허가·용지보상·현장사무실 등)
-        _prefill.append({"구분": "공사준비", "공종": "인허가/용지보상 등", "조수": 0,
-                         "시작(개월차)": 1, "기간(개월)": 4, "작업일수": 120})
-        _prefill.append({"구분": "공사준비", "공종": "현장사무실/가설시설", "조수": 0,
-                         "시작(개월차)": 1, "기간(개월)": 3, "작업일수": 75})
+        # 공사준비 행 — 비작업일수 탭의 준비기간(착공 직후 인허가·용지보상·현장사무실 등).
+        # 본공사는 준비기간이 끝난 다음 달부터 시작한다.
+        _prep_m = int(round(_prep_d / 30.4))
+        _work_start_m = 1 + _prep_m
+        if _prep_d > 0:
+            _prefill.append({"구분": "공사준비", "공종": "공사준비(인허가·용지보상·가설시설 등)", "조수": 0,
+                             "시작(개월차)": 1, "기간(개월)": max(1, _prep_m), "작업일수": _prep_d})
 
         for r in _sched_rows:
             _nm = r.get('공종명_pure') or r.get('공종', '')
@@ -3111,8 +3233,8 @@ with tab5:
 
                 if any(kw in _label for kw in ("배수",)) and _pipe_end is not None:
                     _start = _pipe_end + 1
-                elif len([p for p in _prefill if p["구분"] != "공사준비"]) == 0:
-                    _start = 1
+                elif not any(p["구분"] not in _NON_WORK_GROUPS for p in _prefill):
+                    _start = _work_start_m
                 elif _grp_start is not None:
                     # 같은 공종의 라인들은 서로 병행 → 동일 시작월
                     _start = _grp_start
@@ -3133,13 +3255,19 @@ with tab5:
                 _longest = max(max(1, int(_math.ceil((w * _scale) / 30.4))) for _, w in _units)
                 _prev_start, _prev_months = _grp_start, _longest
 
-        # 시운전 행 — 처리장·정수장 등 시설공사는 준공 전 시운전 기간이 필요
-        _work_rows = [p for p in _prefill if p["구분"] != "공사준비"]
-        if _work_rows and any(any(k in p["공종"] for k in ("구조물", "정수", "처리", "기계", "설비"))
-                              for p in _work_rows):
-            _end_all = max(p["시작(개월차)"] + p["기간(개월)"] - 1 for p in _work_rows)
-            _prefill.append({"구분": "시운전", "공종": "시운전/시설인계", "조수": 0,
-                             "시작(개월차)": _end_all + 1, "기간(개월)": 2, "작업일수": 61})
+        # 시운전·준공정리 행 — 비작업일수 탭에 입력한 기간 그대로 본공사 뒤에 붙인다.
+        # (예전에는 공종명에 '구조물·처리·설비' 등이 있으면 시운전 2개월을 고정으로 붙여,
+        #  입력한 시운전 기간과 무관하게 공정표가 늘어났다)
+        _work_rows = [p for p in _prefill if p["구분"] not in _NON_WORK_GROUPS]
+        _end_all = max((p["시작(개월차)"] + p["기간(개월)"] - 1 for p in _work_rows),
+                       default=_work_start_m - 1)
+        for _grp_nm, _label_nm, _dd in (("시운전", "시운전/시설인계", _comm_d),
+                                        ("준공정리", "준공정리(현장정리·준공서류)", _wrap_d)):
+            if _dd > 0:
+                _mm = max(1, int(round(_dd / 30.4)))
+                _prefill.append({"구분": _grp_nm, "공종": _label_nm, "조수": 0,
+                                 "시작(개월차)": _end_all + 1, "기간(개월)": _mm, "작업일수": _dd})
+                _end_all += _mm
 
         if not _prefill:
             st.warning("주공정으로 선택된 공종 중 작업일수가 있는 항목이 없습니다.")
@@ -3268,7 +3396,7 @@ with tab5:
                         c2 = FIRST_MC + (_sm - 1 + _dm) * MONTH_W - 1
                         ws_s.merge_cells(start_row=_r, start_column=c1, end_row=_r, end_column=c2)
                         bar = ws_s.cell(row=_r, column=c1, value=_bar_txt)
-                        bar.fill = _prep_fill if _grp == "공사준비" else _bar_fill
+                        bar.fill = _prep_fill if _grp in _NON_WORK_GROUPS else _bar_fill
                         bar.font = Font(color="FFFFFF", size=9)
                         bar.alignment = Alignment(horizontal="center", vertical="center")
                         for cc in range(c1, c2 + 1):

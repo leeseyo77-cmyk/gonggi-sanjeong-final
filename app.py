@@ -542,7 +542,7 @@ def naeyeok_to_hierarchy(hier_items):
     return list(cats.values())
 
 
-def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit=""):
+def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_item_crew=True):
     """
     우선순위:
     0. 수동입력
@@ -553,6 +553,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit=""):
     
     item_unit: 실제 항목의 단위 (M, 개소, 본 등)
     crews: 대공종 단위 투입조수. 단, 항목별로 따로 지정된 조수가 있으면 그 값이 우선한다.
+    use_item_crew: False면 항목별 조수를 무시하고 crews를 그대로 쓴다(투입조수 추천 시뮬레이션용).
     """
     if not qty or qty <= 0:
         return 0, "-", "-"
@@ -596,13 +597,14 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit=""):
     # 같은 대공종 안에서도 장비·인원이 다른 항목이 있어(예: 대구경 추진 vs 소구경 부설)
     # 상세표에서 항목마다 조수를 조정할 수 있게 한다. 여기 한 곳에서 처리하면
     # 총계·소계·상세 등 모든 호출부에 동일하게 반영된다.
-    try:
-        _cm = st.session_state.get("crew_by_item", {})
-        _cv = _cm.get(f"{name}|{spec or ''}")
-        if _cv:
-            crews = int(_cv)
-    except Exception:
-        pass
+    if use_item_crew:
+        try:
+            _cm = st.session_state.get("crew_by_item", {})
+            _cv = _cm.get(f"{name}|{spec or ''}")
+            if _cv:
+                crews = int(_cv)
+        except Exception:
+            pass
 
     # 운반류는 본공정(토공·관부설 등)과 병행되므로 공기에서 제외 (토글 ON일 때).
     # 한 곳에서 처리 → 총계·sub합·상세 모든 호출부가 자동으로 동일하게 0일/병행 처리됨.
@@ -974,6 +976,324 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit=""):
 
     # 4순위: 매칭 안 됨 → 수동입력 필요
     return 0, "⚠️ 수동입력", "매칭 안 됨"
+
+
+# ══════════════════════════════════════════════════════════════
+# 목표 공기 기준 투입조수 추천
+# ══════════════════════════════════════════════════════════════
+def _non_work_for_window(wr, ws, we):
+    """비작업일수 탭에서 계산한 조건(wr)과 같은 방식으로 [ws, we] 구간의 비작업일수(A+B−C)."""
+    if we < ws:
+        return 0.0
+    station = wr.get("station")
+    conds = wr.get("conditions")
+    if HAS_GUIDELINE_WEATHER and station and conds is not None:
+        # 조건이 비었으면 기본 조건으로 대체되지 않도록 없는 키를 넘긴다(비작업일수 탭과 동일)
+        weather = get_weather_non_work_days(station, ws, we, conditions=conds or ["__none__"])["total"]
+    else:
+        weather = get_total_non_work_days(
+            wr.get("region", "서울"), ws, we,
+            check_rain=wr.get("include_rain", True),
+            check_cold=wr.get("include_cold", True),
+            check_hot=wr.get("include_hot", True),
+        )
+    if isinstance(weather, dict):
+        weather = weather.get("total", 0)
+    res = get_total_non_work_days_with_holidays(
+        weather, ws, we,
+        include_holidays=wr.get("include_holidays", True),
+        min_weekly_rest=wr.get("min_weekly_rest", True),
+    )
+    return float(res["total"])
+
+
+def target_work_days_from_months(wr, months):
+    """발주처 목표 공기(개월, 착공~준공)를 목표 순작업일수로 환산.
+
+    목표 공기 − 준비·시운전·정리 = 본공사 달력일수이고, 그 구간의 비작업일수를 뺀 것이
+    순작업일수다(비작업일수 탭의 공사기간 모델을 거꾸로 푼 것).
+    반환: (순작업일수, 본공사 달력일수, 비작업일수)
+    """
+    total = int(round(float(months) * 30.4))
+    prep = int(wr.get("prep_days", 0) or 0)
+    span = total - prep - int(wr.get("commission_days", 0) or 0) - int(wr.get("wrapup_days", 0) or 0)
+    if span <= 0:
+        return 0, span, 0.0
+    ws = wr.get("work_start") or (wr["start_date"] + timedelta(days=prep))
+    nw = _non_work_for_window(wr, ws, ws + timedelta(days=span - 1))
+    return max(0, int(span - nw)), span, nw
+
+
+def build_crew_model(rows, selected):
+    """투입조수 계산용 모델: 주공정 대공종 → 라인 → [(항목키, 1조 일수)].
+
+    앱의 공기 모델을 그대로 따른다: 대공종 작업일수 = 라인별(라인 안 항목은 순차 합) 일수의
+    최댓값. 조수는 crew_by_item과 같은 항목(이름|규격) 단위라 같은 항목의 모든 라인에 공통이다.
+    1조 일수 d1을 항목마다 한 번만 구해 두면 c조 일수는 ceil(d1/c)로 바로 나온다
+    (ceil(ceil(x)/c) = ceil(x/c)이므로 calc_days_priority(…, c)와 값이 정확히 같다).
+    반환: {"cats": [{"name", "lines"}], "base": {키: 현재 조수}, "meta": {키: 표시용 정보}}
+    """
+    cm = st.session_state.get("crew_by_item", {})
+    rows_sel = [r for r in rows if r.get("공종명_pure") in selected] or list(rows)
+    d1_cache, base, meta, cats = {}, {}, {}, []
+    for r in rows_sel:
+        cat_name = r.get("공종명_pure") or r.get("공종", "")
+        lines = {}
+        for it in r.get("세부항목", []):
+            nm, sp = it["name"], it.get("spec", "")
+            ck = (nm, sp, it.get("qty", 0), it.get("unit", ""))
+            if ck not in d1_cache:
+                d1_cache[ck] = int(calc_days_priority(nm, sp, it.get("qty", 0), 1, it.get("unit", ""),
+                                                      use_item_crew=False)[0])
+            d1 = d1_cache[ck]
+            if d1 <= 0:
+                continue
+            key = f"{nm}|{sp}"
+            ln = it.get("district") or "(공통)"
+            cur = int(cm.get(key) or r.get("crew", DEFAULT_CREW) or DEFAULT_CREW)
+            base[key] = max(base.get(key, 0), cur)
+            m = meta.setdefault(key, {"대공종": cat_name, "세부공종": nm, "규격": sp,
+                                      "단위": it.get("unit", ""), "d1": [], "라인": set()})
+            m["d1"].append(d1)
+            m["라인"].add(ln)
+            lines.setdefault(ln, []).append((key, d1))
+        cats.append({"name": cat_name, "lines": lines})
+    return {"cats": cats, "base": base, "meta": meta}
+
+
+def _crew_line_days(lst, crew):
+    return sum(-(-d1 // crew[k]) for k, d1 in lst)
+
+
+def _crew_cat_days(cat, crew):
+    return max((_crew_line_days(l, crew) for l in cat["lines"].values()), default=0)
+
+
+def eval_crews(model, crew, combine_sum):
+    """조수 조합(crew)의 대공종별 일수와 주공정 일수(최장이면 max, 합산이면 sum)."""
+    per = [_crew_cat_days(c, crew) for c in model["cats"]]
+    return per, (sum(per) if combine_sum else max(per, default=0))
+
+
+def recommend_crews(model, combine_sum, target, cap):
+    """목표 순작업일수 안에 주공정이 끝나도록 항목별 투입조수를 추천한다.
+
+    - 최장(병행): 목표를 넘는 라인 중 초과가 가장 큰 라인에서 가장 긴 항목부터 1조씩 늘린다.
+    - 합산(순차): 대공종 일수의 합만 목표 안에 들면 되므로, 합이 목표를 넘는 동안 각 대공종의
+      가장 긴 라인에서 가장 긴 항목부터 늘린다. 대공종마다 목표를 비율로 쪼개면 작은 공종까지
+      억지로 줄이게 된다(실측: 풍각 80개 항목 변경 → 24개).
+    상한(cap)에 닿았거나 1조를 늘려도 일수가 줄지 않는 항목은 건드리지 않는다.
+    반환: {항목키: 추천 조수} (모든 항목)
+    """
+    crew = dict(model["base"])
+
+    def _cands(lst):
+        """상한 미만이면서 1조 늘리면 일수가 실제로 줄어드는 항목의 (현재 일수, 키)."""
+        out = []
+        for k, d1 in lst:
+            c = crew[k]
+            if c < cap and -(-d1 // c) > -(-d1 // (c + 1)):
+                out.append((-(-d1 // c), k))
+        return out
+
+    if combine_sum:
+        while eval_crews(model, crew, True)[1] > target:
+            best = None
+            for cat in model["cats"]:
+                if not cat["lines"]:
+                    continue
+                for cand in _cands(max(cat["lines"].values(), key=lambda l: _crew_line_days(l, crew))):
+                    if best is None or cand > best:
+                        best = cand
+            if best is None:
+                break
+            crew[best[1]] += 1
+    else:
+        stuck = set()
+        while True:
+            worst = None
+            for ci, cat in enumerate(model["cats"]):
+                for ln, lst in cat["lines"].items():
+                    over = _crew_line_days(lst, crew) - target
+                    if over > 0 and (ci, ln) not in stuck and (worst is None or over > worst[0]):
+                        worst = (over, ci, ln, lst)
+            if worst is None:
+                break
+            _, ci, ln, lst = worst
+            # 이 라인이 목표에 들어올 때까지 가장 긴 항목부터 조수를 늘린다
+            while _crew_line_days(lst, crew) > target:
+                cands = _cands(lst)
+                if not cands:
+                    stuck.add((ci, ln))
+                    break
+                crew[max(cands)[1]] += 1
+    return crew
+
+
+def critical_keys(model, combine_sum, target, crew_rec):
+    """목표 공기를 좌우하는(크리티컬) 항목 키.
+
+    최장(병행)은 목표를 넘는 라인의 항목, 합산(순차)은 대공종마다 가장 긴 라인의 항목이
+    주공정 일수를 결정한다. 추천으로 조수가 바뀐 항목도 포함한다.
+    """
+    base = model["base"]
+    keys = set()
+    for cat in model["cats"]:
+        if not cat["lines"]:
+            continue
+        if combine_sum:
+            lst = max(cat["lines"].values(), key=lambda l: _crew_line_days(l, base))
+            keys.update(k for k, _ in lst)
+        else:
+            for lst in cat["lines"].values():
+                if _crew_line_days(lst, base) > target:
+                    keys.update(k for k, _ in lst)
+    keys.update(k for k in crew_rec if crew_rec[k] != base[k])
+    return keys
+
+
+@st.fragment
+def render_crew_recommendation(wr):
+    """공기산정 탭: 목표 공기 기준 크리티컬 공종 투입조수 추천 + 사용자 조정."""
+    work = st.session_state.get("work_result")
+    if not work:
+        return
+    st.markdown("---")
+    st.markdown("### 👷 목표 공기 기준 투입조수 추천")
+    st.caption(
+        "발주처 목표 공기를 넣으면 공기를 좌우하는 크리티컬 공종(🔴)의 투입조수를 추천합니다. "
+        "'적용 조수' 칸을 고치면 결과가 바로 다시 계산되니, 현장 여건에 맞게 조정한 뒤 반영하세요. "
+        "준비·시운전·정리 기간과 비작업일수는 '비작업일수 계산기'의 설정을 그대로 씁니다."
+    )
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        months = st.number_input(
+            "발주처 목표 공기 (개월, 착공~준공)", min_value=0.0, max_value=240.0, value=0.0, step=0.5,
+            key="target_months_input",
+        )
+    with _c2:
+        cap = st.number_input(
+            "항목당 최대 투입조수", min_value=1, max_value=50, value=3, step=1, key="crew_cap_input",
+            help="한 세부 공종에 동시에 붙일 수 있는 최대 조수(라인마다 적용). "
+                 "회사 실무 기준(구간당 조수 등)이 정해지면 그 값으로 바꾸세요.",
+        )
+    if months <= 0:
+        st.info("목표 공기(개월)를 입력하면 세부 공종별 추천 투입조수를 계산합니다.")
+        return
+    target, span, nw = target_work_days_from_months(wr, months)
+    if target <= 0:
+        st.error("목표 공기가 준비·시운전·정리 기간보다 짧습니다. 목표 공기나 비작업일수 탭의 기간 설정을 확인하세요.")
+        return
+    sel = set(st.session_state.get("selected_major") or [])
+    combine_sum = st.session_state.get("combine_mode", "최장(병행)").startswith("합산")
+    model = build_crew_model(work["rows"], sel)
+    base = model["base"]
+    if not base:
+        st.info("주공정 대공종에 작업일수가 계산된 항목이 없습니다.")
+        return
+    rec = recommend_crews(model, combine_sum, target, int(cap))
+    crit = critical_keys(model, combine_sum, target, rec)
+
+    # 결과 지표는 편집표 위에 보이도록 자리를 먼저 잡고, 편집값을 읽은 뒤 채운다
+    result_box = st.container()
+
+    show_all = st.toggle(
+        "크리티컬이 아닌 항목도 표시", value=False, key="crew_show_all",
+        help="끄면 공기를 좌우하는 항목(🔴)만, 켜면 주공정 대공종의 모든 항목을 보여 줍니다.",
+    )
+    rows_df = []
+    for k, m in model["meta"].items():
+        if not (show_all or k in crit):
+            continue
+        d1 = max(m["d1"])
+        rows_df.append({
+            "_key": k,
+            "크리티컬": "🔴" if k in crit else "",
+            "대공종": m["대공종"], "세부공종": m["세부공종"], "규격": m["규격"], "단위": m["단위"],
+            "라인 수": len(m["라인"]),
+            "현재 조수": base[k], "현재 일수": -(-d1 // base[k]),
+            "추천 조수": rec[k], "추천 후 일수": -(-d1 // rec[k]),
+            "적용 조수": rec[k],
+        })
+    rows_df.sort(key=lambda x: (x["크리티컬"] == "", -x["현재 일수"]))
+
+    # 적용 조수 = 편집표 값(표에 없는 항목은 현재 조수 그대로)
+    crew_user = dict(base)
+    st.session_state.setdefault("crew_edit_nonce", 0)
+    if rows_df:
+        # 목표·상한·모드가 바뀌면 추천값이 달라지므로 편집 내용을 새로 시작한다(키에 포함)
+        _ekey = (f"crew_editor_{target}_{int(cap)}_{int(combine_sum)}_{int(show_all)}_"
+                 f"{st.session_state['crew_edit_nonce']}")
+        _df = pd.DataFrame(rows_df)
+        edited = st.data_editor(
+            _df, hide_index=True, width="stretch", key=_ekey,
+            disabled=[c for c in _df.columns if c != "적용 조수"],
+            column_config={
+                "_key": None,
+                "적용 조수": st.column_config.NumberColumn(
+                    "적용 조수 ✏️", min_value=1, max_value=200, step=1,
+                    help="추천값이 채워져 있습니다. 현장 여건에 맞게 고치면 위 결과가 바로 다시 계산됩니다.",
+                ),
+            },
+        )
+        for _, row in edited.iterrows():
+            v = row["적용 조수"]
+            crew_user[row["_key"]] = max(1, int(v)) if pd.notna(v) else rec[row["_key"]]
+        st.caption("라인이 여러 개인 항목은 라인마다 적용 조수만큼 동시에 투입하는 것으로 계산합니다 "
+                   "(현장 동시 투입 조 = 적용 조수 × 라인 수).")
+
+    per_now, tot_now = eval_crews(model, base, combine_sum)
+    per_rec, tot_rec = eval_crews(model, rec, combine_sum)
+    per_usr, tot_usr = eval_crews(model, crew_user, combine_sum)
+
+    with result_box:
+        _m = st.columns(4)
+        _m[0].metric("목표 순작업일수", f"{target}일", delta=f"본공사 {span}일 − 비작업 {nw:.1f}일",
+                     delta_color="off")
+        _m[1].metric("현재 주공정", f"{tot_now}일", delta=f"목표 대비 {tot_now - target:+d}일",
+                     delta_color="inverse")
+        _m[2].metric("추천안", f"{tot_rec}일", delta=f"목표 대비 {tot_rec - target:+d}일",
+                     delta_color="inverse")
+        _m[3].metric("조정안 (적용 조수)", f"{tot_usr}일", delta=f"목표 대비 {tot_usr - target:+d}일",
+                     delta_color="inverse")
+        if tot_usr <= target:
+            st.success(f"✅ 조정안으로 목표 공기 안에 주공정이 끝납니다 (여유 {target - tot_usr}일).")
+        else:
+            st.warning(f"⚠️ 조정안은 목표보다 {tot_usr - target}일 깁니다. "
+                       "🔴 표시 공종의 적용 조수를 늘려 보세요.")
+        if tot_rec > target:
+            st.info(f"ℹ️ 항목당 최대 {int(cap)}조 상한 때문에 추천안도 목표에 못 미칩니다. "
+                    "상한을 올리거나 목표 공기·주공정 선택을 다시 검토하세요.")
+        if not rows_df:
+            st.caption("목표를 넘는 크리티컬 공종이 없습니다. 조수를 조정하려면 '크리티컬이 아닌 항목도 표시'를 켜세요.")
+
+    cat_rows = []
+    for i, cat in enumerate(model["cats"]):
+        _crit_cat = (not combine_sum) and per_now[i] > target
+        row = {"대공종": ("🔴 " if _crit_cat else "") + cat["name"], "라인 수": len(cat["lines"]),
+               "현재 일수": per_now[i], "추천 후": per_rec[i], "조정 후": per_usr[i]}
+        if not combine_sum:
+            row["판정(조정 후)"] = "✅" if per_usr[i] <= target else f"🔴 {per_usr[i] - target}일 초과"
+        cat_rows.append(row)
+    st.markdown("**대공종별 작업일수**" + (" — 합산(순차) 모드: 대공종 일수의 합을 목표와 비교합니다"
+                                          if combine_sum else ""))
+    st.dataframe(pd.DataFrame(cat_rows), hide_index=True, width="stretch")
+
+    changes = {k: v for k, v in crew_user.items() if v != base.get(k)}
+    _b1, _b2 = st.columns([1, 2])
+    with _b1:
+        if st.button("↩️ 추천값으로 되돌리기", width="stretch", key="crew_reset_edit"):
+            st.session_state["crew_edit_nonce"] += 1
+            st.rerun(scope="fragment")
+    with _b2:
+        if st.button(f"✅ 적용 조수 반영 ({len(changes)}개 항목)", type="primary", width="stretch",
+                     key="apply_crew_recommendation", disabled=not changes):
+            st.session_state.setdefault("crew_by_item", {})
+            st.session_state["crew_by_item"].update(changes)
+            st.session_state["crew_edit_nonce"] += 1
+            st.rerun()
+    st.caption("반영 후 '비작업일수 계산기'에서 계산을 다시 누르면 총 공사기간이 갱신됩니다. "
+               "상세표의 '투입조수' 열에서도 항목별로 다시 조정할 수 있습니다.")
 
 # ══════════════════════════════════════════════════════════════
 # 비작업일수
@@ -1824,7 +2144,9 @@ with tab2:
                                                 if existing:
                                                     existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
                                                 else:
-                                                    merged_by_name[sub_name]['items'].append(item)
+                                                    # 복사본을 합친다. 원본을 넣으면 아래 수량 합산이 원본 항목을
+                                                    # 바꿔 work_result의 수량이 라인 합계로 부풀었다(투입조수 추천에서 발견).
+                                                    merged_by_name[sub_name]['items'].append(dict(item))
                                             # sub_categories도 합치기 (name 기준으로 중복 제거)
                                             for sub_sub in sub.get('sub_categories', []):
                                                 sub_sub_name = sub_sub['name']
@@ -1842,10 +2164,11 @@ with tab2:
                                                         if existing_item:
                                                             existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
                                                         else:
-                                                            existing_sub_sub['items'].append(item)
+                                                            existing_sub_sub['items'].append(dict(item))
                                                 else:
                                                     # 새로운 sub_sub 추가
-                                                    merged_by_name[sub_name]['sub_categories'].append(sub_sub)
+                                                    merged_by_name[sub_name]['sub_categories'].append(
+                                                        {**sub_sub, 'items': [dict(i) for i in sub_sub.get('items', [])]})
                                         
                                         # 합쳐진 sub_category 표시
                                         for sub_name, sub_data in merged_by_name.items():
@@ -2475,6 +2798,8 @@ with tab1:
             **적용된 비작업일 조건:**
             {_cond_md}
             """)
+
+            render_crew_recommendation(result)
         else:
             st.info("👉 **'비작업일수 계산기'** 탭에서 비작업일수를 계산하면 최종 공기산정 결과가 표시됩니다!")
     else:

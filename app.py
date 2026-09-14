@@ -1249,7 +1249,8 @@ def parse_workbook_cached(file_bytes: bytes):
     """
     all_rows, col_info = parse_by_keyword(BytesIO(file_bytes))
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
-    parsed = {"dangagun": _extract_dangagun(wb), "template": None}
+    parsed = {"dangagun": _extract_dangagun(wb), "template": None,
+              "sheets": list(wb.sheetnames)}
     tmpl = detect_template(wb)
     if tmpl is not None:
         items = parse_items_generic(wb, tmpl)
@@ -1428,8 +1429,13 @@ with tab2:
                         st.session_state["manual_rates"] = {}
                     if _uni_items:
                         st.info(f"✅ 템플릿 인식: {_tmpl_data['name']} — {len(_uni_items)}개 항목, {len(hierarchy)}개 대공종")
+                        if not _tmpl_data["code_daily"] and not _tmpl_data["labor_daily"]:
+                            st.caption(
+                                "ℹ️ 이 파일에는 단가산출근거·일위대가 시트가 없어 Q값·노무비 역산을 쓸 수 없습니다. "
+                                "1일 작업량은 표준품셈·가이드라인으로만 매칭되므로 '매칭 안 됨' 항목이 많을 수 있습니다."
+                            )
                 else:
-                    st.warning("⚠️ 인식할 수 없는 엑셀 양식입니다. 지원 양식: 표준형(산근호표), 코드매칭형(내역서산근)")
+                    st.warning("⚠️ 인식할 수 없는 엑셀 양식입니다. 지원 양식: 표준형(산근호표), 코드매칭형(내역서산근), 내역서 단독형(설계내역서·도급내역서)")
                 
                 if hierarchy:
                     # 중간 번호 기준 그룹핑 (1.1.X, 1.2.X, 2.1.X... 구분)
@@ -2352,6 +2358,22 @@ with tab2:
                                 total_days = sum(item["일수"] for item in display_items)
                                 st.metric(f"{group_names.get(group, group)} 총 작업일수", f"{total_days}일")
                     
+            else:
+                # 어떤 양식으로도 읽지 못한 파일. 예전에는 이 분기가 없어서 진행 막대가
+                # 60%에서 멈춘 채 아무 안내도 없었다(실측: 동부+남천 준공내역서).
+                progress_bar.empty()
+                status_text.empty()
+                _sheets = ", ".join(_parsed.get("sheets") or []) or "(없음)"
+                st.warning(
+                    "⚠️ 내역서 양식을 인식하지 못했습니다.\n\n"
+                    f"**이 파일의 시트:** {_sheets}\n\n"
+                    "**지원 양식** (시트 이름 기준)\n"
+                    "- 표준형: `설계내역서` + `단가산출근거`\n"
+                    "- 코드매칭형: `내역서` + `일위대가_산근`\n"
+                    "- 내역서 단독형: `설계내역서` 또는 `도급내역서` "
+                    "(머리행에 공종·명칭·규격·수량·단위)\n\n"
+                    "내역서 시트 이름이 다르면 위 이름 중 하나로 바꿔 저장한 뒤 다시 올려주세요."
+                )
         except (zipfile.BadZipFile, InvalidFileException):
             st.error(
                 "❌ 이 파일은 .xlsx 형식이 아닙니다 (구버전 .xls로 추정).\n\n"

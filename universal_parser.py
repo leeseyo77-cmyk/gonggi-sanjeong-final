@@ -100,6 +100,21 @@ _Q_PER_DAY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 'A = N 단위/일'로 일당 시공량을 직접 적은 표기.
+#   ○ 1일 시공량 :  A= 4 EA/일          (화성·명륜 — 수밀시험, 안전휀스)
+#   -일당 시공량: A=450 m/일            (본대·의성·정수장·풍각 — 관로 부설류)
+# 후자는 바로 아래 'Q=A/8 hr = 56.25 m/hr'도 있지만, 표준형 단위 문자클래스에
+# 영문 m이 없어 /hr 정규식이 놓치고 있었다(실측 12개 호표).
+_A_PER_DAY_RE = re.compile(
+    r"(?:1\s*일|일\s*당)\s*시공량\s*[:：]?\s*A\s*=\s*([\d,.]+)\s*([가-힣㎡㎥A-Za-z0-9]+)\s*/\s*일"
+)
+
+# 산식 끝의 최종값이 일당인 Q식: 'Q=N*250 ㎏ /1600 ㎏/㎥ = 14.18 ㎥/일'
+# (본대 — 인력 소운반류 15개 호표). Q 바로 뒤가 숫자가 아니라 _Q_PER_DAY_RE가 놓쳤다.
+_Q_EXPR_PER_DAY_RE = re.compile(
+    r"^\s*Q\s*\d*\s*=.*=\s*([\d,.]+)\s*([가-힣㎡㎥A-Za-z0-9]+)\s*/\s*일\s*$"
+)
+
 
 # 조립식 간이흙막이 등 '공용일수' 방식 블록.
 #   L = 30 m
@@ -194,6 +209,17 @@ def _extract_q_from_block(rows, start: int, end: int, formula_col: int, q_forwar
                     val_d = base
                 if val_d > 0:
                     found_day = (val_d, unit_d)
+        if found_day is None:
+            for _rx in (_A_PER_DAY_RE, _Q_EXPR_PER_DAY_RE):
+                ma = _rx.search(cell.strip())
+                if ma:
+                    try:
+                        va = _to_float(ma.group(1))
+                    except ValueError:
+                        continue
+                    if va > 0:
+                        found_day = (va, ma.group(2))
+                        break
         if found_fwd is None and found_inv is None:
             mi = q_inverse_re.search(cell)
             if mi:
@@ -293,19 +319,92 @@ TEMPLATES: List[Dict[str, Any]] = [
             "key_type": "str",
         },
     },
+    {
+        # 단가근거 시트 없이 내역서만 있는 파일(준공내역서, 도급내역서만 있는 파일 등).
+        # 항목·계층은 표준형과 같은 방식(로마숫자 지구 + 번호 계층)으로 읽고,
+        # 열 위치는 머리행에서 찾는다(detect_header). Q값·노무비 역산은 없으므로
+        # 1일작업량은 표준품셈·가이드라인 등 앱의 다른 출처로만 매칭된다.
+        # 실측: 2.준공내역서(총괄분)-동부+남천 — 시트명 '도급내역서', A열이 코드열이라
+        # 표준형보다 열이 한 칸씩 밀려 있었다.
+        # TEMPLATES 순서상 마지막이라 단가근거까지 갖춘 양식이 항상 먼저 잡힌다.
+        "id": "item_sheet_only",
+        "name": "내역서 단독형(단가근거 없음)",
+        "item_sheet_names": ["도급내역서", "설계내역서"],
+        "unit_price_sheet_names": [],
+        "detect_header": True,
+        "name_col": 1,
+        "spec_col": 2,
+        "qty_col": 3,
+        "unit_col": 4,
+        "leaf_strategy": "regex_hierarchy",
+        "hierarchy_strategy": "district_roman",
+        "gong_jong_col": 0,
+        "hierarchy_leaf_regex": None,
+        "link_strategy": "text_regex",
+        "link_regex": r"산근\s*(\d+)\s*호표",
+        "link_regex_alt": r"대가\s*(\d+)\s*호표",
+        "link_key_type": "int",
+        "unit_price_block_start_col": 1,
+        "unit_price_block_start_regex": r"제\s*(\d+)\s*호표",
+        "unit_price_formula_col": 1,
+        "unit_char_class": r"가-힣㎡㎥",
+    },
 ]
 
 
 def detect_template(wb) -> Optional[Dict[str, Any]]:
-    """워크북 시트명으로 등록된 템플릿 중 매칭되는 것을 찾는다."""
+    """워크북 시트명으로 등록된 템플릿 중 매칭되는 것을 찾는다.
+
+    단가근거 시트 목록이 빈 템플릿(내역서 단독형)은 항목 시트만 있으면 매칭된다.
+    """
     if wb is None:
         return None
     names = set(wb.sheetnames)
     for tmpl in TEMPLATES:
-        if any(s in names for s in tmpl["item_sheet_names"]) and \
-           any(s in names for s in tmpl["unit_price_sheet_names"]):
+        if not any(s in names for s in tmpl["item_sheet_names"]):
+            continue
+        ups = tmpl["unit_price_sheet_names"]
+        if not ups or any(s in names for s in ups):
             return tmpl
     return None
+
+
+# 머리행 글자(공백 제거 후) → 템플릿 열 설정 키
+_HEADER_KEYS = {
+    "gong_jong_col": ("공종",),
+    "name_col": ("명칭", "품명", "공종명"),
+    "spec_col": ("규격",),
+    "qty_col": ("수량",),
+    "unit_col": ("단위",),
+}
+
+
+def _resolve_header_columns(ws, tmpl: Dict[str, Any]) -> Dict[str, Any]:
+    """머리행(공종·명칭·규격·수량·단위)을 찾아 열 위치를 반영한 템플릿 사본을 돌려준다.
+
+    detect_header가 켜진 템플릿에만 적용한다. 회사마다 열이 한두 칸씩 밀린
+    양식을 템플릿을 새로 만들지 않고 읽기 위함. 머리행을 못 찾으면 기본값 그대로.
+    """
+    if not tmpl.get("detect_header"):
+        return tmpl
+    for row in ws.iter_rows(min_row=1, max_row=30, values_only=True):
+        cols: Dict[str, int] = {}
+        for i, v in enumerate(row):
+            if not isinstance(v, str):
+                continue
+            s = re.sub(r"\s+", "", v)
+            for key, words in _HEADER_KEYS.items():
+                if key not in cols and s in words:
+                    cols[key] = i
+        if {"name_col", "qty_col", "unit_col"} <= cols.keys():
+            resolved = dict(tmpl)
+            resolved.update(cols)
+            if "gong_jong_col" not in cols:
+                resolved["gong_jong_col"] = max(0, cols["name_col"] - 1)
+            if "spec_col" not in cols:
+                resolved["spec_col"] = cols["name_col"] + 1
+            return resolved
+    return tmpl
 
 
 def _get_sheet(wb, name_candidates):
@@ -385,7 +484,15 @@ def _parse_items_major_number_prefix(ws, tmpl: Dict[str, Any]) -> List[Dict]:
       - 명륜형: '[주간공사]'/'[야간공사]'(구분) + ' 1. 토     공'(들여쓰기·내부공백 있음)
     대공종 판정에서 들여쓰기를 요구하지 않으며, 이름 중간 공백은 하나로 정규화한다.
     """
-    major_re = re.compile(r"^\d+\.\s*(.+)$")
+    # 'N. 이름'만 대공종. '6.1.하수처리시설'처럼 번호가 두 단계 이상이면 대공종의
+    # 하위 구분이므로 제외한다(화성 처리시설 실측: 이를 대공종으로 잡아
+    # 이후 모든 항목이 '2.침사조및유량조정조' 하나로 몰렸다).
+    major_re = re.compile(r"^\d+\.(?!\d)\s*(.+)$")
+    # '◈시운전비'·'◈부지임대료' 같은 최상위 구분. 뒤따르는 항목이 앞 대공종
+    # (주요자재 등)에 섞이지 않도록 별도 대공종으로 둔다.
+    section_re = re.compile(r"^◈\s*(.+)$")
+    # 머리행 비고열의 번호 없는 'No.' 표식 (실제 항목은 'No.2'처럼 번호가 붙는다)
+    header_tag_re = re.compile(r"^\s*No\.?\s*$", re.IGNORECASE)
     bracket_re = re.compile(r"^\[(.+)\]$")
     name_col = tmpl["name_col"]
     spec_col = tmpl["spec_col"]
@@ -411,6 +518,10 @@ def _parse_items_major_number_prefix(ws, tmpl: Dict[str, Any]) -> List[Dict]:
         tag = row[leaf_tag_col] if len(row) > leaf_tag_col else None
         qty = row[qty_col] if len(row) > qty_col else None
         is_leaf = tag not in (None, "") and isinstance(qty, (int, float))
+        # 화성 처리시설처럼 머리행('1.토공 | 1 식')의 비고열에도 'No.'가 찍힌 양식이 있다.
+        # 이를 항목으로 받으면 머리행이 '1 식'짜리 항목이 되고 대공종 전환도 막힌다.
+        if is_leaf and isinstance(tag, str) and header_tag_re.match(tag):
+            is_leaf = False
 
         if not is_leaf:
             # 라인 표시(■ 등)는 들여쓰기 0에서만 인식 (본문 항목명과 혼동 방지)
@@ -428,7 +539,7 @@ def _parse_items_major_number_prefix(ws, tmpl: Dict[str, Any]) -> List[Dict]:
             # 단위가 빈 하위 분류를 대공종으로 오인하면 커버리지가 크게 떨어진다(화성 실측).
             _u = row[unit_col] if len(row) > unit_col else None
             _u = str(_u).strip() if _u else ""
-            m = major_re.match(stripped)
+            m = major_re.match(stripped) or section_re.match(stripped)
             if m and _u == "식":
                 current_major = re.sub(r"\s+", " ", m.group(1)).strip()
             continue
@@ -691,6 +802,7 @@ def parse_items_generic(wb, tmpl: Dict[str, Any]) -> List[Dict]:
     ws = _get_sheet(wb, tmpl["item_sheet_names"])
     if ws is None:
         return []
+    tmpl = _resolve_header_columns(ws, tmpl)
     strategy = tmpl["hierarchy_strategy"]
     if strategy == "major_number_prefix":
         return _parse_items_major_number_prefix(ws, tmpl)

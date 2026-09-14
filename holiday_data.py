@@ -163,7 +163,9 @@ def get_total_non_work_days_with_holidays(
             "formula": "A + B - C"
         }
     """
-    A = weather_non_work_days
+    # 기상 비작업일수는 월별 안분 합이라 1155.2000000001 같은 부동소수점 찌꺼기가 섞인다.
+    # 그대로 두면 화면에 '1846.1999999999998일'처럼 표시되므로 소수 1자리로 맞춘다.
+    A = round(float(weather_non_work_days or 0), 1)
     B = get_total_holidays(start_date, end_date) if include_holidays else 0
     
     # 달력 일수
@@ -174,8 +176,9 @@ def get_total_non_work_days_with_holidays(
     
     C = calc_overlap_days(A, B, calendar_days)
     
-    total = A + B - C
-    
+    total = round(A + B - C, 1)
+    formula_value = total
+
     # 주 40시간 근무제 보장 (한 주에 최소 1일 휴식)
     if min_weekly_rest:
         weeks = calendar_days / 7
@@ -189,7 +192,7 @@ def get_total_non_work_days_with_holidays(
         "holidays": B,
         "overlap": C,
         "calendar_days": calendar_days,
-        "formula": f"{A} + {B} - {C} = {A + B - C}"
+        "formula": f"{A} + {B} - {C} = {formula_value}"
     }
 
 

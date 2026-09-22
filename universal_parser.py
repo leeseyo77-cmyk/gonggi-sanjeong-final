@@ -493,6 +493,8 @@ def _parse_items_major_number_prefix(ws, tmpl: Dict[str, Any]) -> List[Dict]:
     section_re = re.compile(r"^◈\s*(.+)$")
     # 머리행 비고열의 번호 없는 'No.' 표식 (실제 항목은 'No.2'처럼 번호가 붙는다)
     header_tag_re = re.compile(r"^\s*No\.?\s*$", re.IGNORECASE)
+    # '6.1.하수처리시설'처럼 대공종 아래 단계 — 구조물·동 단위
+    subnum_re = re.compile(r"^\d+\.\d+(?:\.\d+)*\.?\s*(.+)$")
     bracket_re = re.compile(r"^\[(.+)\]$")
     name_col = tmpl["name_col"]
     spec_col = tmpl["spec_col"]
@@ -505,6 +507,7 @@ def _parse_items_major_number_prefix(ws, tmpl: Dict[str, Any]) -> List[Dict]:
 
     current_major = None
     current_line = ""
+    current_subgroup = None    # 구조물·동 단위(대공종 아래 단계)
     items: List[Dict] = []
 
     for row in ws.iter_rows(values_only=True):
@@ -528,6 +531,7 @@ def _parse_items_major_number_prefix(ws, tmpl: Dict[str, Any]) -> List[Dict]:
             if indent == 0 and line_symbol and stripped.startswith(line_symbol):
                 spec = str(row[line_spec_col]).strip() if len(row) > line_spec_col and row[line_spec_col] else ""
                 current_line = spec
+                current_subgroup = None
                 continue
             # '[주간공사]' 같은 대괄호 구분을 라인으로 사용
             mb = bracket_re.match(stripped)
@@ -542,6 +546,11 @@ def _parse_items_major_number_prefix(ws, tmpl: Dict[str, Any]) -> List[Dict]:
             m = major_re.match(stripped) or section_re.match(stripped)
             if m and _u == "식":
                 current_major = re.sub(r"\s+", " ", m.group(1)).strip()
+                current_subgroup = None
+            elif _u == "식":
+                ms = subnum_re.match(stripped)
+                if ms:
+                    current_subgroup = re.sub(r"\s+", " ", ms.group(1)).strip()
             continue
 
         if is_leaf:
@@ -552,6 +561,7 @@ def _parse_items_major_number_prefix(ws, tmpl: Dict[str, Any]) -> List[Dict]:
             items.append({
                 "name": stripped, "spec": spec, "qty": qty, "unit": unit,
                 "code": code, "category": current_major, "line": current_line,
+                "subgroup": current_subgroup,
             })
     return items
 
@@ -626,6 +636,10 @@ def _parse_items_district_roman(ws, tmpl: Dict[str, Any]) -> List[Dict]:
     # 분리해서 봐야 하므로, 이 상위 구분을 항목에 함께 기록한다.
     parent_code_re = {1: None, 2: _lv1, 3: _lv2}[_best]
     sub_re = re.compile(r"^\d+\)$")
+    # 대공종보다 한 단계 이상 깊은 번호(대공종이 '1.3 구조물공사'면 '1.3.3 오존접촉조').
+    # 처리장 내역서는 이 자리에 구조물·동 단위가 온다. 이름을 남겨 두면 앱에서
+    # 구조물별 병행 계산(큰 동이 공기를 지배)에 쓸 수 있다.
+    deeper_re = re.compile(r"^\d+(?:\.\d+){%d,}$" % _best)
     hash_paren_re = re.compile(r"^\(\d+\)$")
     hash_name_re = re.compile(r"^#\d+")
     hash_gj_re = re.compile(r"^#\d+")
@@ -645,6 +659,7 @@ def _parse_items_district_roman(ws, tmpl: Dict[str, Any]) -> List[Dict]:
     current_category = None
     current_sub_category = None
     current_sub_sub_category = None
+    current_subgroup = None    # 구조물·동 단위(대공종 아래 번호)
 
     def _merge_or_append(container_items: List[Dict], item: Dict):
         existing = next((i for i in container_items
@@ -664,6 +679,7 @@ def _parse_items_district_roman(ws, tmpl: Dict[str, Any]) -> List[Dict]:
             current_district = gj
             current_sub_category = None
             current_sub_sub_category = None
+            current_subgroup = None
             continue
 
         if parent_code_re is not None and parent_code_re.match(gj):
@@ -687,6 +703,12 @@ def _parse_items_district_roman(ws, tmpl: Dict[str, Any]) -> List[Dict]:
                     hierarchy.append(current_category)
             current_category = {'level': gj, 'name': name, 'parent': current_parent, 'items': [], 'sub_categories': []}
             current_sub_category = None
+            current_subgroup = None
+            continue
+
+        # 대공종보다 깊은 번호는 구조물·동 단위로 이름만 기록한다(병행 계산 옵션에서 사용)
+        if deeper_re.match(gj):
+            current_subgroup = name
             continue
 
         is_hash_separator = bool(
@@ -747,7 +769,8 @@ def _parse_items_district_roman(ws, tmpl: Dict[str, Any]) -> List[Dict]:
                         code_alt = int(m2.group(1)) if key_type == "int" else m2.group(1)
 
             item = {'name': name, 'spec': spec, 'qty': qty, 'unit': unit,
-                    'district': current_district, 'code': code, 'code_alt': code_alt}
+                    'district': current_district, 'code': code, 'code_alt': code_alt,
+                    'subgroup': current_subgroup}
 
             if (current_sub_sub_category and current_sub_category and
                     "추진" in current_sub_category.get('name', '') and
@@ -783,7 +806,7 @@ def _parse_items_district_roman(ws, tmpl: Dict[str, Any]) -> List[Dict]:
                 'name': it['name'], 'spec': it.get('spec', ''), 'qty': it.get('qty', 0),
                 'unit': it.get('unit', ''), 'code': it.get('code'), 'code_alt': it.get('code_alt'),
                 'category': top_category_name, 'line': it.get('district', district),
-                'parent': parent_name,
+                'parent': parent_name, 'subgroup': it.get('subgroup'),
             })
         for sub in container.get('sub_categories', []):
             _walk(sub, top_category_name, sub.get('district', district), parent_name)
@@ -844,7 +867,7 @@ def _main(argv):
     force_id = argv[2] if len(argv) > 2 else None
 
     print(f"[로드] {path}")
-    wb = load_workbook(path, read_only=True, data_only=True)
+    wb = load_workbook(path, read_only=True, data_only=True, keep_links=False)
 
     if force_id:
         tmpl = next((t for t in TEMPLATES if t["id"] == force_id), None)

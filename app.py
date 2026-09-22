@@ -229,6 +229,12 @@ NON_WORK_CATEGORY_KEYWORDS = (
     "관리비", "작성비", "임대료", "지반조사", "시운전비", "관리 활동비",
 )
 
+# 하위 단계 이름이 구조물(오존접촉조·맨홀펌프장 등)이 아니라 '작업 종류'로 보이는 낱말.
+# 구조물별 병행 계산을 켰을 때 순차 작업일 가능성을 안내하는 데만 쓴다(계산에는 영향 없음).
+SEQ_SUBGROUP_RE = re.compile(
+    r"포장|자재|운반|설치|철거|시험|도색|보호|경계석|측구|시멘트|골재|아스팔트|강관|뚜껑|활동비"
+)
+
 
 # 기본 투입조수. 1조 기준으로 산정하고, 필요한 공종만 조수를 올리는 방식이
 # 실무 감각에 맞고 과소 산정을 막는다.
@@ -538,6 +544,8 @@ def naeyeok_to_hierarchy(hier_items):
             "qty": it.get("qty", 0),
             "unit": it.get("unit", ""),
             "district": it.get("line", ""),
+            # 구조물·동 단위(대공종 아래 단계). 병행 계산 옵션에서 라인처럼 쓴다.
+            "subgroup": it.get("subgroup") or "",
         })
     return list(cats.values())
 
@@ -1049,7 +1057,8 @@ def build_crew_model(rows, selected):
             if d1 <= 0:
                 continue
             key = f"{nm}|{sp}"
-            ln = it.get("district") or "(공통)"
+            # 작업일수 계산과 같은 병행 단위(라인 또는 라인·구조물)를 쓴다
+            ln = it.get("_ukey") or it.get("district") or "(공통)"
             cur = int(cm.get(key) or r.get("crew", DEFAULT_CREW) or DEFAULT_CREW)
             base[key] = max(base.get(key, 0), cur)
             m = meta.setdefault(key, {"대공종": cat_name, "세부공종": nm, "규격": sp,
@@ -1343,7 +1352,8 @@ def parse_by_keyword(file):
     print(f"📂 parse_by_keyword 시작")
     print(f"{'🔥'*30}\n")
     
-    wb = openpyxl.load_workbook(file, data_only=True)  # read_only=False로 변경
+    # keep_links=False: xls에서 변환한 파일에 남은 깨진 외부 링크 때문에 열기 자체가 실패하는 것을 막는다
+    wb = openpyxl.load_workbook(file, data_only=True, keep_links=False)
     skip_sheets = ["목차","안내","INITIAL","초기","index"]
     priority = ["설계내역서","내역서","공사비내역서"]
     target_sheet = None
@@ -1568,7 +1578,7 @@ def parse_workbook_cached(file_bytes: bytes):
       parsed["template"]: 인식된 템플릿의 파싱 결과 (인식 실패 시 None)
     """
     all_rows, col_info = parse_by_keyword(BytesIO(file_bytes))
-    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True, keep_links=False)
     parsed = {"dangagun": _extract_dangagun(wb), "template": None,
               "sheets": list(wb.sheetnames)}
     tmpl = detect_template(wb)
@@ -1747,6 +1757,9 @@ with tab2:
                         st.session_state["excluded_items"] = set()
                         st.session_state["crew_by_item"] = {}
                         st.session_state["manual_rates"] = {}
+                        # 대공종 구성이 달라지므로 구조물 병행 선택도 새로 잡는다
+                        st.session_state.pop("parallel_subgroup_cats", None)
+                        st.session_state.pop("parallel_subgroup_widget", None)
                     if _uni_items:
                         st.info(f"✅ 템플릿 인식: {_tmpl_data['name']} — {len(_uni_items)}개 항목, {len(hierarchy)}개 대공종")
                         if not _tmpl_data["code_daily"] and not _tmpl_data["labor_daily"]:
@@ -1891,7 +1904,52 @@ with tab2:
                         key="exclude_haul_widget",
                     )
                     st.session_state["exclude_haul"] = exclude_haul
-                    
+
+                    # 구조물·동별 병행 계산 대상.
+                    # 처리장 내역서는 '1.3 구조물공사' 아래 '1.3.3 오존접촉조'처럼 구조물 단위가 들어 있다.
+                    # 이런 단위는 관로의 라인처럼 동시에 시공하므로, 합치면 큰 동 기준이 아니라
+                    # 여러 동의 물량을 더한 값으로 공기가 나온다(실측: 제1정수장 구조물공사).
+                    _sub_by_cat = {}
+                    for _c in hierarchy:
+                        _names = set()
+                        for _i2 in _c.get('items', []):
+                            if _i2.get('subgroup'):
+                                _names.add(_i2['subgroup'])
+                        for _s2 in _c.get('sub_categories', []):
+                            for _i2 in _s2.get('items', []):
+                                if _i2.get('subgroup'):
+                                    _names.add(_i2['subgroup'])
+                        if len(_names) > 1:
+                            _sub_by_cat[_c['name']] = _names
+                    if _sub_by_cat:
+                        # 처음에는 하위 단계가 있는 대공종을 모두 켜 두고, 아닌 것은 사용자가 뺀다.
+                        _prev_par = st.session_state.get("parallel_subgroup_cats")
+                        _par_default = (sorted(_sub_by_cat.keys()) if _prev_par is None
+                                        else [c for c in _prev_par if c in _sub_by_cat])
+                        _par_cats = st.multiselect(
+                            "🏗️ 구조물·동별 병행 계산할 대공종",
+                            options=sorted(_sub_by_cat.keys()),
+                            default=_par_default,
+                            key="parallel_subgroup_widget",
+                            help="고른 대공종은 하위 단계(구조물·동)를 관로의 라인처럼 동시 시공으로 봅니다. "
+                                 "가장 오래 걸리는 구조물이 그 공종의 작업일수가 됩니다. "
+                                 "포장공의 '아스팔트 포장/콘크리트 포장'처럼 같은 팀이 차례로 하는 "
+                                 "구분은 목록에서 빼세요.",
+                        )
+                        st.session_state["parallel_subgroup_cats"] = _par_cats
+                        if _par_cats:
+                            st.caption("🔀 병행 단위: " + " · ".join(
+                                f"{c}({len(_sub_by_cat[c])}개)" for c in _par_cats))
+                        # 하위 단계가 구조물이 아니라 '작업 종류'로 보이면 알려 준다(순차일 가능성)
+                        _seq_like = [c for c in _par_cats
+                                     if sum(1 for s in _sub_by_cat[c] if SEQ_SUBGROUP_RE.search(s))
+                                     >= max(2, len(_sub_by_cat[c]) / 2)]
+                        if _seq_like:
+                            st.caption("⚠️ 확인 필요 — 하위 단계가 구조물이 아니라 작업 종류로 보입니다: "
+                                       + ", ".join(_seq_like) + " · 차례로 하는 작업이면 위 목록에서 빼세요")
+                    else:
+                        st.session_state["parallel_subgroup_cats"] = []
+
                     st.markdown("---")
                     st.markdown("### 📊 공종별 작업일수 계산 결과")
 
@@ -1934,10 +1992,16 @@ with tab2:
                         # 라인(A-LINE 등)·지구(Ⅰ/Ⅱ 등)는 지리적으로 분리된 구간이라 동시 시공한다.
                         # 따라서 같은 공종 안에서 라인별로 일수를 나눠 합산한 뒤, 최장 라인을 그
                         # 공종의 작업일수로 삼는다 (라인 내부는 순차 → 합산, 라인 간은 병행 → 최대).
+                        # 구조물·동별 병행으로 고른 대공종은 하위 단계(구조물)도 라인처럼 나눈다.
+                        _use_sub = cat_name in set(st.session_state.get("parallel_subgroup_cats", []))
                         _line_days = {}
                         for item in all_cat_items:
                             _d = calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), cat_crew, item.get('unit', ''))[0]
                             _ln = item.get('district') or '(공통)'
+                            if _use_sub and item.get('subgroup'):
+                                _ln = item['subgroup'] if _ln == '(공통)' else f"{_ln} · {item['subgroup']}"
+                            # 투입조수 추천·예정공정표가 같은 단위를 쓰도록 항목에 남긴다
+                            item['_ukey'] = _ln
                             _line_days[_ln] = _line_days.get(_ln, 0) + _d
                         cat_total_days = max(_line_days.values()) if _line_days else 0
                         

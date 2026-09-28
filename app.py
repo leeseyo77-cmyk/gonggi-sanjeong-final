@@ -1065,6 +1065,22 @@ def target_work_days_from_months(wr, months):
     return max(0, int(span - nw)), span, nw
 
 
+def months_for_work_days(wr, work_days):
+    """순작업일수를 착공~준공 개월로 되돌린다(목표 환산의 역함수, 이분탐색)."""
+    if work_days <= 0:
+        return 0.0
+    lo, hi = 0.0, 300.0
+    if target_work_days_from_months(wr, hi)[0] < work_days:
+        return hi
+    for _ in range(22):
+        mid = (lo + hi) / 2
+        if target_work_days_from_months(wr, mid)[0] >= work_days:
+            hi = mid
+        else:
+            lo = mid
+    return round(hi, 1)
+
+
 def build_crew_model(rows, selected):
     """투입조수 계산용 모델: 주공정 대공종 → 라인 → [(항목키, 1조 일수)].
 
@@ -4302,6 +4318,55 @@ with tab7:
         else:
             st.warning("토목 내역서를 먼저 올리면 전체 공기에 반영됩니다. 지금은 분야별 작업일수만 계산합니다.")
 
+        # 실무 기준 공기(사용자 제공): 처리시설 규모별 표준 범위. 산정 결과가 현실적인지
+        # 대조하고, 목표 공기를 정해 분야별 조수를 역산하는 출발점으로 쓴다.
+        _SCALE_GUIDE = [
+            (500, "소규모 (500㎥/일 이하)", 18, 24),
+            (3000, "중규모 (500~3,000㎥/일)", 24, 36),
+            (10000, "중대규모 (3,000~10,000㎥/일)", 36, 48),
+            (10 ** 9, "대규모 (10,000㎥/일 이상)", 48, 60),
+        ]
+
+        def _scale_band(cap_q):
+            for _lim, _nm, _lo, _hi in _SCALE_GUIDE:
+                if cap_q <= _lim:
+                    return _nm, _lo, _hi
+            return _SCALE_GUIDE[-1][1], _SCALE_GUIDE[-1][2], _SCALE_GUIDE[-1][3]
+
+        _tm_pend = st.session_state.pop("proj_target_months_apply", None)
+        if _tm_pend is not None:
+            st.session_state["proj_target_months"] = float(_tm_pend)
+        with st.expander("🎯 목표 공기 — 시설 규모 기준", expanded=False):
+            st.caption("처리시설 실무 공기: 소규모·중규모는 2~3년 이내, 대규모(1만㎥/일)는 4~5년. "
+                       "처리용량을 넣으면 그 범위를 제안하고, 목표 공기를 정하면 아래 '공정 연결'에서 "
+                       "분야별 조수를 역산합니다.")
+            _s1, _s2 = st.columns(2)
+            with _s1:
+                _cap_q = int(st.number_input(
+                    "처리용량 (㎥/일, 0 = 미입력)", min_value=0, max_value=10 ** 7, value=0,
+                    step=100, key="plant_capacity"))
+            with _s2:
+                # 규모 버튼이 세션에 값을 넣으므로 value= 없이 기본값만 seed 한다
+                st.session_state.setdefault("proj_target_months", 0.0)
+                _tm = float(st.number_input(
+                    "목표 전체 공기 (개월, 착공~준공)", min_value=0.0, max_value=240.0,
+                    step=1.0, key="proj_target_months",
+                    help="0이면 목표 대조를 하지 않습니다."))
+            if _cap_q > 0:
+                _nm, _lo, _hi = _scale_band(_cap_q)
+                st.info(f"📏 {_nm} → 실무 표준 공기 **{_lo}~{_hi}개월** "
+                        f"({_lo / 12:.1f}~{_hi / 12:.1f}년)")
+                _b1, _b2 = st.columns(2)
+                if _b1.button(f"목표를 {_lo}개월(빠른 쪽)로", width="stretch", key="tm_lo"):
+                    st.session_state["proj_target_months_apply"] = float(_lo)
+                    st.rerun()
+                if _b2.button(f"목표를 {_hi}개월(여유 쪽)로", width="stretch", key="tm_hi"):
+                    st.session_state["proj_target_months_apply"] = float(_hi)
+                    st.rerun()
+
+        # 목표 공기에 맞춰 계산한 분야별 목표 일수(아래 '공정 연결'의 버튼이 넣어 준다)
+        _pend_tgt = st.session_state.pop("disc_target_pending", None) or {}
+
         # 공종마다 동시에 붙일 수 있는 조수는 작업 성격이 정한다. 공종을 하나하나 지정하지
         # 않도록 유형을 자동 분류하고, 사용자는 유형 4개의 상한만 조정한다.
         _CAP_HELP = {
@@ -4355,6 +4420,9 @@ with tab7:
                     st.caption(f"✅ {_uf.name} — 항목 {len(_r['items'])}개 · "
                                f"기준 노임 {_r['base_wage']:,.0f}원")
                 if _items:
+                    if _dc in _pend_tgt:       # 목표 공기에서 역산한 값 주입(위젯 생성 전)
+                        st.session_state[f"disc_how_{_dc}"] = "목표 일수로 자동"
+                        st.session_state[f"disc_tgt_{_dc}"] = int(_pend_tgt[_dc])
                     # 1조 기준 단위(동·설비)별 일수 — 배분의 출발점이자 편집표의 기준값
                     _u_base = dp.discipline_days(_items, _mode_now, crews=1)["per_unit"]
                     _nu = max(1, len(_u_base))
@@ -4369,19 +4437,20 @@ with tab7:
                     _tgt = 0
                     with _h2:
                         if _how.startswith("목표"):
+                            st.session_state.setdefault(f"disc_tgt_{_dc}", 365)
                             _tgt = int(st.number_input(
                                 "목표 작업일수(이 분야)", min_value=1, max_value=20000,
-                                value=365, step=10, key=f"disc_tgt_{_dc}"))
+                                step=10, key=f"disc_tgt_{_dc}"))
                             _pl = dp.plan_crews(_items, _mode_now, caps=_caps, target_days=_tgt)
                         else:
                             _ck = f"disc_tc_{_dc}"
                             # 단위 수가 바뀌면(파일 교체) 저장된 값이 최소값보다 작아질 수 있다
-                            if _ck in st.session_state and int(st.session_state[_ck] or 0) < _nu:
+                            if int(st.session_state.get(_ck) or 0) < _nu:
                                 st.session_state[_ck] = _nu
                             _pl = dp.plan_crews(
                                 _items, _mode_now, caps=_caps,
                                 total_crews=int(st.number_input(
-                                    "총 투입 조수", min_value=_nu, max_value=_nu * 30, value=_nu,
+                                    "총 투입 조수", min_value=_nu, max_value=_nu * 30,
                                     step=1, key=_ck,
                                     help=f"동·설비가 {_nu}개라 단위당 1조씩 최소 {_nu}조입니다.")))
                     _rec = _pl["crew_by_unit"]
@@ -4510,6 +4579,55 @@ with tab7:
                        "전기는 기계 완료 후(수배전반이 건물 안이면 건축 마감 후) 착수합니다. "
                        "분야별 '공기에 반영'을 끄면 그 분야는 이 연결에서 빠집니다. "
                        "비작업일수·준비·시운전 기간은 '비작업일수 계산기'에서 더해집니다.")
+            # ── 목표 공기 대조 및 분야별 조수 역산 ─────────────────────────────
+            _wr_t = st.session_state.get("weather_result")
+            _tm_v = float(st.session_state.get("proj_target_months", 0) or 0)
+            if _tm_v > 0:
+                if _wr_t:
+                    _tgt_days, _tspan, _tnw = target_work_days_from_months(_wr_t, _tm_v)
+                    _now_m = months_for_work_days(_wr_t, _total)
+                else:
+                    _tgt_days = int(_tm_v * 21)     # 비작업일수 미계산 — 월 21일 작업 가정
+                    _now_m = round(_total / 21.0, 1)
+                    st.caption("ℹ️ 비작업일수를 아직 계산하지 않아 월 21일 작업으로 어림했습니다.")
+                _q1, _q2 = st.columns(2)
+                _q1.metric("목표 순작업일수", f"{_tgt_days}일", delta=f"목표 {_tm_v:g}개월",
+                           delta_color="off")
+                _q2.metric("산정 공기(환산)", f"{_now_m:g}개월",
+                           delta=f"목표 대비 {_now_m - _tm_v:+.1f}개월",
+                           delta_color="inverse")
+                _avail = _tgt_days - _civil_days
+                if _tgt_days <= 0:
+                    st.error("목표 공기가 준비·시운전 기간보다 짧습니다.")
+                elif _avail <= 0:
+                    st.error(f"토목({_civil_days}일)만으로 목표({_tgt_days}일)를 넘습니다 — "
+                             f"'공기산정' 탭의 투입조수 추천으로 토목을 {_civil_days - _tgt_days + 1}일 "
+                             "이상 줄여야 합니다.")
+                else:
+                    # 토목 이후 구간 배분: 전기가 건축 후행이면 둘이 나눠 쓴다
+                    _tg = {}
+                    _b_now, _e_now = _arch_stage, _elec
+                    if _elec_after_arch and _b_now and _e_now:
+                        _b_share = max(1, int(_avail * _b_now / (_b_now + _e_now)))
+                        _tg["전기"] = max(1, _avail - _b_share)
+                    else:
+                        _b_share = _avail
+                        if _e_now:
+                            _tg["전기"] = _avail
+                    for _d in ("건축", "건축기계설비"):
+                        if (_disc_res.get(_d) or {}).get("use", True) and _disc_res.get(_d):
+                            _tg[_d] = _b_share
+                    for _d in ("기계", "조경"):
+                        if (_disc_res.get(_d) or {}).get("use", True) and _disc_res.get(_d):
+                            _tg[_d] = _avail
+                    _tg = {_k: int(_v) for _k, _v in _tg.items() if _disc_res.get(_k)}
+                    st.caption("분야별 허용 일수(토목 이후 " + f"{_avail}일 배분): "
+                               + " · ".join(f"{_k} {_v}일" for _k, _v in _tg.items()))
+                    if _tg and st.button("👷 목표 공기에 맞춰 분야별 조수 자동 추천",
+                                         width="stretch", key="apply_disc_targets"):
+                        st.session_state["disc_target_pending"] = _tg
+                        st.rerun()
+
             if st.button(f"📥 전체 순작업일수({_total}일)를 비작업일수 계산기에 적용", type="primary",
                          width="stretch", key="apply_project_work_days"):
                 # 순작업일수 위젯은 이 탭보다 먼저 만들어져 직접 대입할 수 없다.

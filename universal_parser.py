@@ -1041,19 +1041,24 @@ def parse_labor_derived_rates(wb, sheet_name: str = "일위대가_호표",
 
 
 
-def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple[float, str, str]]:
+def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool = False):
     """
     템플릿 설정(tmpl["labor"])에 따라 노무비 역산으로 일작업량을 구한다.
     두 가지 블록 구조를 모두 지원:
       (a) block_code_col 지정  → 헤더행에 코드·수량·노무비가 함께 있는 형태 (화성 양식)
       (b) block_start_regex 지정 → '제 N호표' 헤더 + 별도 합계행에 노무비 (표준형 양식)
     반환: {키: (일작업량, 단위, 사용직종)}
+    with_trace=True면 ({키: 값}, {키: 근거}) — 근거에는 호표·제목·기준수량·직종별 인수
+    (또는 노무비·적용직종·노임단가)·계산식·일위대가표 행번호가 들어간다. 화면에서
+    "이 값이 어디서 나왔는지" 확인하는 용도.
     """
     cfg = tmpl.get("labor")
+    traces: Dict[Any, Dict[str, Any]] = {}
+    _empty = ({}, {}) if with_trace else {}
     if not wb or not cfg:
-        return {}
+        return _empty
     if cfg["wage_sheet"] not in wb.sheetnames or cfg["block_sheet"] not in wb.sheetnames:
-        return {}
+        return _empty
 
     # 1) 노임표 (동일 직종 중복 시 낮은 단가 = 보수적)
     wages: Dict[str, float] = {}
@@ -1066,7 +1071,7 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple
             if k and (k not in wages or rt < wages[k]):
                 wages[k] = float(rt)
     if not wages:
-        return {}
+        return _empty
 
     rows = [r for r in wb[cfg["block_sheet"]].iter_rows(values_only=True)]
     result: Dict[Any, Tuple[float, str, str]] = {}
@@ -1139,7 +1144,7 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple
             if _t and (_t, _sp) not in _block_by_title:
                 _block_by_title[(_t, _sp)] = (_i, _e)
 
-    def _manhours(s, e, depth=0):
+    def _manhours(s, e, depth=0, acc=None, mult=1.0):
         """블록 [s+1, e) 안에서 단위가 '인'인 행의 수량(=소요 인수) 합.
 
         노무비 합계에는 야간할증·요율(설치간격)·공구손료·공장관리비 같은
@@ -1161,21 +1166,27 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple
                 continue
             if u == "인":
                 tot += float(q)
+                if acc is not None:   # 근거 표시용 직종별 인수
+                    _t = str(r[0] or "").strip() or "인부"
+                    acc[_t] = acc.get(_t, 0.0) + float(q) * mult
             elif depth < 2 and u not in ("", "%"):
                 nm = str(r[0] or "").strip()
                 sp = str(r[1] or "").strip() if len(r) > 1 and r[1] else ""
                 sub = _block_by_title.get((nm, sp))
                 if sub and sub[0] != s:
-                    tot += float(q) * _manhours(sub[0], sub[1], depth + 1)
+                    tot += float(q) * _manhours(sub[0], sub[1], depth + 1, acc, mult * float(q))
         return tot
 
-    def _emit(key, title, unit, base_qty, labor_cost, manhours=0.0, explicit_base=None):
+    def _emit(key, title, unit, base_qty, labor_cost, manhours=0.0, explicit_base=None,
+              trades=None, row_idx=None, spec=""):
         unit_s = str(unit).strip() if unit else ""
         if not unit_s or unit_s in _NON_WORK_UNITS:
             return
         if not (isinstance(base_qty, (int, float)) and base_qty > 0):
             return
         job = pick_labor_type(str(title or ""), "")
+        _head = {"호표": key, "제목": str(title or "").strip(), "규격": str(spec or "").strip(),
+                 "단위": unit_s, "행": (row_idx + 1) if row_idx is not None else None}
 
         # 1순위: 직접 인수 기반 (할증·요율 배제, 야간=주간 동일값)
         if manhours and manhours > 0:
@@ -1183,6 +1194,15 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple
             daily = _bq / manhours
             if daily > 0 and key not in result:
                 result[key] = (round(daily, 4), unit_s, job)
+                traces[key] = {
+                    **_head, "방식": "직접 인수 합산", "기준수량": _bq,
+                    # 인수가 0.0004처럼 아주 작은 호표가 있어 자릿수를 넉넉히 남긴다(검산용)
+                    "인수합": round(manhours, 6),
+                    "직종별 인수": sorted(((t, round(v, 6)) for t, v in (trades or {}).items()),
+                                     key=lambda x: -x[1]),
+                    "일작업량": round(daily, 4),
+                    "식": f"{_bq:g} ÷ {manhours:.6g}인 = {daily:.4g}{unit_s}/인·일",
+                }
             return
 
         # 2순위: 노무비 ÷ 노임단가 (하위가 다른 일위대가를 참조해 직접 인수가 없는 블록)
@@ -1194,6 +1214,12 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple
         daily = (base_qty * w) / labor_cost
         if daily > 0 and key not in result:
             result[key] = (round(daily, 4), unit_s, job)
+            traces[key] = {
+                **_head, "방식": "노무비 ÷ 노임단가", "기준수량": base_qty,
+                "노무비": round(float(labor_cost)), "적용직종": job, "노임단가": round(float(w)),
+                "일작업량": round(daily, 4),
+                "식": f"{base_qty:g} × {w:,.0f}원 ÷ {labor_cost:,.0f}원 = {daily:.4g}{unit_s}/인·일",
+            }
 
     if "block_code_col" in cfg:
         # (a) 헤더행 일체형 — 코드행 = 블록 시작, 다음 코드행 직전까지가 그 블록
@@ -1214,12 +1240,15 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple
             _lac = cfg["labor_amount_col"]
             _lab_raw = r[_lac] if len(r) > _lac else None
             _lab_net = _labor_excl_surcharge(i, e, _lac)
+            _acc = {}
+            _mh = _manhours(i, e, acc=_acc)
             _emit(code,
                   r[cfg["title_col"]] if len(r) > cfg["title_col"] else "",
                   r[cfg["unit_col"]] if len(r) > cfg["unit_col"] else "",
                   r[cfg["qty_col"]] if len(r) > cfg["qty_col"] else None,
                   _lab_net if _lab_net else _lab_raw,
-                  _manhours(i, e), _explicit_base(i, e))
+                  _mh, _explicit_base(i, e), trades=_acc, row_idx=i,
+                  spec=r[1] if len(r) > 1 else "")
     else:
         # (b) '제 N호표' 블록형 — 합계행의 노무비 사용
         pat = re.compile(cfg["block_start_regex"])
@@ -1251,9 +1280,13 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple
                     if isinstance(v, (int, float)) and v > 0:
                         labor_cost = v
             key = int(no) if cfg.get("key_type") == "int" else no
-            _emit(key, title, unit, cfg.get("base_qty", 1.0), labor_cost, _manhours(ti, e), _explicit_base(ti, e))
+            _acc = {}
+            _mh = _manhours(ti, e, acc=_acc)
+            _emit(key, title, unit, cfg.get("base_qty", 1.0), labor_cost, _mh, _explicit_base(ti, e),
+                  trades=_acc, row_idx=ti,
+                  spec=rows[ti][1] if len(rows[ti]) > 1 else "")
 
-    return result
+    return (result, traces) if with_trace else result
 
 
 # ---------------------------------------------------------------------------

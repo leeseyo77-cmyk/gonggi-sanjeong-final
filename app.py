@@ -260,6 +260,33 @@ def days_to_months_text(days) -> str:
     return f"≒ {m:.1f}개월"
 
 
+def labor_key_for(name, spec):
+    """항목이 노무비 역산에서 쓰는 일위대가 키. calc_days_priority와 같은 규칙."""
+    _lk = st.session_state.get("naeyeok_labor_key_by_item", {}).get((name, spec or ""))
+    if _lk is None and not st.session_state.get("labor_key_strict", False):
+        _lk = st.session_state.get("naeyeok_code_by_item", {}).get((name, spec or ""))
+    return _lk
+
+
+def labor_trace_text(tr) -> str:
+    """노무비 역산 근거를 한 줄로. 일위대가표에서 직접 확인할 수 있게 호표·행번호를 넣는다."""
+    if not tr:
+        return ""
+    head = f"제{tr['호표']}호표" if isinstance(tr.get("호표"), int) else f"코드 {tr.get('호표')}"
+    head += f" 「{tr.get('제목', '')}」"
+    if tr.get("규격"):
+        head += f" ({tr['규격']})"
+    if tr.get("행"):
+        head += f" · 일위대가표 {tr['행']}행"
+    if tr.get("방식") == "직접 인수 합산":
+        trades = ", ".join(f"{t} {v:g}인" for t, v in (tr.get("직종별 인수") or [])[:6]) or "-"
+        return (f"🔎 {head} · 기준 {tr['기준수량']:g}{tr['단위']} · 인수 {trades} "
+                f"(합 {tr['인수합']:g}인) → {tr['식']}")
+    return (f"🔎 {head} · 기준 {tr['기준수량']:g}{tr['단위']} · 노무비(할증 제외) "
+            f"{tr.get('노무비', 0):,}원 ÷ {tr.get('적용직종', '')} 노임 "
+            f"{tr.get('노임단가', 0):,}원 → {tr['식']}")
+
+
 def applied_condition_lines(result) -> list:
     """비작업일수 계산에 실제로 적용한 기상조건을 '✅ 조건명' 목록으로 반환(표시용).
 
@@ -1585,13 +1612,14 @@ def parse_workbook_cached(file_bytes: bytes):
     if tmpl is not None:
         items = parse_items_generic(wb, tmpl)
         code_daily = parse_unit_price_generic(wb, tmpl)
-        labor_daily = parse_labor_derived_by_template(wb, tmpl)
+        labor_daily, labor_trace = parse_labor_derived_by_template(wb, tmpl, with_trace=True)
         parsed["template"] = {
             "name": tmpl["name"],
             "has_alt": bool(tmpl.get("link_regex_alt")),
             "items": items,
             "code_daily": code_daily,
             "labor_daily": labor_daily,
+            "labor_trace": labor_trace,
             # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
             "series_fallback": apply_series_fallback(items, code_daily, labor_daily),
         }
@@ -1707,6 +1735,8 @@ with tab2:
                     hierarchy = naeyeok_to_hierarchy(_uni_items)
                     st.session_state["naeyeok_code_daily"] = _tmpl_data["code_daily"]
                     st.session_state["naeyeok_labor_daily"] = _tmpl_data["labor_daily"]
+                    # 노무비 역산 근거(호표·기준수량·직종별 인수·계산식) — 추정값 검토 화면에서 사용
+                    st.session_state["naeyeok_labor_trace"] = _tmpl_data.get("labor_trace", {})
                     # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
                     st.session_state["naeyeok_series_fallback"] = _tmpl_data["series_fallback"]
                     st.session_state["naeyeok_code_by_item"] = {
@@ -2397,6 +2427,8 @@ with tab2:
                                                                     "sub_name": sub_name,
                                                                     "추정값": _di3.get("1일작업량", ""),
                                                                     "작업일수": int(_di3.get("작업일수", 0) or 0),
+                                                                    # 역산 근거(호표)를 찾기 위한 일위대가 키
+                                                                    "lab_key": labor_key_for(_it3['name'], _it3.get('spec', '')),
                                                                 })
 
                                                     if unmatched_items and not _is_material_cat:
@@ -4012,8 +4044,39 @@ with tab6:
                                     st.session_state["pending_rate"][_mk4] = (_val4, _it4.get("unit", ""))
                                 else:
                                     st.session_state["pending_rate"].pop(_mk4, None)
+                            # 이 값이 어디서 나왔는지 — 연결된 호표·기준수량·인수(또는 노무비÷노임)
+                            _tr4 = (st.session_state.get("naeyeok_labor_trace") or {}).get(
+                                _it4.get("lab_key"))
+                            if _tr4:
+                                st.caption(labor_trace_text(_tr4))
                         st.caption("※ 0으로 두면 추정값을 그대로 사용합니다.")
                         _render_apply_rates("lr")
+
+                # 호표별 역산 근거 전체 — 일위대가표와 대조해 검증할 때 쓴다
+                _tr_all = st.session_state.get("naeyeok_labor_trace") or {}
+                if _tr_all:
+                    with st.expander(f"🔎 노무비 역산 근거 전체 ({len(_tr_all)}개 호표)", expanded=False):
+                        st.caption(
+                            "앱이 1일 작업량을 어떻게 구했는지 호표별로 보여 줍니다. "
+                            "'직접 인수 합산'은 일위대가 블록에서 단위가 '인'인 행의 인수를 더해 "
+                            "기준수량 ÷ 인수합으로 계산한 값(1인 기준)이고, "
+                            "'노무비 ÷ 노임단가'는 인수 행이 없을 때 쓰는 방식입니다. "
+                            "일위대가표의 해당 행을 열어 직접 확인할 수 있습니다."
+                        )
+                        _rows_tr = [{
+                            "호표/코드": _k,
+                            "제목": _t.get("제목", ""), "규격": _t.get("규격", ""),
+                            "기준수량": _t.get("기준수량"), "단위": _t.get("단위", ""),
+                            "방식": _t.get("방식", ""),
+                            "인수합(인)": _t.get("인수합"),
+                            "직종별 인수": ", ".join(f"{a} {b:g}" for a, b in (_t.get("직종별 인수") or [])[:5]),
+                            "노무비(할증제외,원)": _t.get("노무비"), "적용직종": _t.get("적용직종", ""),
+                            "노임단가(원)": _t.get("노임단가"),
+                            "1일작업량": _t.get("일작업량"),
+                            "계산식": _t.get("식", ""),
+                            "일위대가표 행": _t.get("행"),
+                        } for _k, _t in _tr_all.items()]
+                        st.dataframe(pd.DataFrame(_rows_tr), hide_index=True, width="stretch")
 
             _review_section()
 

@@ -19,6 +19,12 @@ except Exception:
     HAS_PUMSEM_CREW = False
 
 try:
+    import discipline_parser as dp
+    HAS_DISCIPLINE = True
+except Exception:
+    HAS_DISCIPLINE = False
+
+try:
     from daily_work_rates import DAILY_WORK, WORK_KEY_MAP
     HAS_DAILY_WORK = True
 except Exception:
@@ -1625,6 +1631,17 @@ def parse_workbook_cached(file_bytes: bytes):
         }
     return all_rows, col_info, parsed
 
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def parse_discipline_cached(file_bytes: bytes, discipline: str):
+    """기계·건축·전기 분야 내역서(공종별내역서형) 파싱. 파일 내용 기준으로 캐시한다."""
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True, keep_links=False)
+    if not HAS_DISCIPLINE or not dp.detect_gjb(wb):
+        return {"ok": False, "sheets": list(wb.sheetnames), "items": [], "base_wage": 0, "units": []}
+    out = dp.parse_gjb(wb, discipline)
+    out["ok"] = True
+    return out
+
 # ══════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════
@@ -1669,13 +1686,14 @@ st.sidebar.info("📅 **공사 시작일**은 TAB '비작업일수 계산기'에
 st.title("상하수도 공사기간 산정 시스템")
 st.markdown("---")
 
-tab2, tab6, tab4, tab1, tab3, tab5 = st.tabs([
+tab2, tab6, tab4, tab1, tab3, tab5, tab7 = st.tabs([
     "📂 엑셀 내역서 인식",
     "📝 수동입력 관리",
     "🌧 비작업일수 계산기",
     "📋 공기산정",
     "🔍 주요공종 CP 분석",
-    "📅 예정공정표"
+    "📅 예정공정표",
+    "🏢 사업 전체 공기"
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -3127,6 +3145,13 @@ with tab4:
         # 산정 결과가 0일(전부 '매칭 안 됨'이거나 전부 제외)일 때 value=0을 넘기면
         # min_value=1 위반으로 예외가 나서, 뒤에 그려지는 탭(수동입력 관리 포함)이
         # 통째로 사라졌다. 정작 수동입력이 필요한 상황에서 입력 화면이 막히는 셈이었다.
+        # '사업 전체 공기' 탭에서 넘어온 값(토목+기계+건축+전기)을 위젯 생성 전에 반영한다
+        _proj_apply = st.session_state.pop("project_work_days_apply", None)
+        if _proj_apply:
+            st.session_state["weather_work_days"] = int(_proj_apply)
+            # 토목 값으로 다시 덮어쓰지 않도록 동기화 기준을 맞춰 둔다
+            st.session_state["_synced_work_days"] = default_work_days
+            st.session_state["_proj_applied_days"] = int(_proj_apply)
         st.session_state.setdefault("weather_work_days", max(1, default_work_days))
         # max_value를 동적으로 설정 (값이 크면 max도 자동으로 늘림)
         max_val = max(10000, default_work_days + 1000,
@@ -3139,6 +3164,8 @@ with tab4:
             help="TAB '엑셀 내역서 인식'에서 자동 계산된 값 (재계산 시 자동 갱신)"
         )
         st.session_state["work_days_input"] = work_days
+        if st.session_state.get("_proj_applied_days") == int(work_days):
+            st.caption("🏢 '사업 전체 공기' 탭에서 적용한 값입니다(토목+기계+건축+전기).")
         if "work_result" in st.session_state and default_work_days <= 0:
             st.caption("⚠️ 산정된 순작업일수가 0일입니다. '수동입력 관리' 탭에서 "
                        "매칭 안 된 항목의 1일 작업량을 입력하세요.")
@@ -4239,3 +4266,166 @@ with tab6:
                 for sub_tab, mk in zip(sub_tabs, sub_tab_keys):
                     with sub_tab:
                         render_manual_input_page(mk, group_data[mk])
+
+# ══════════════════════════════════════════════════════════════
+# TAB 7: 사업 전체 공기 (토목 + 기계 + 건축 + 전기)
+# ══════════════════════════════════════════════════════════════
+# 공사 순서(사용자 기준): 토목 → 건축 → 기계 → 전기.
+# 단 건축과 기계는 동시 시공이 가능하고(토목구조물에 들어가는 기계는 토목 직후 먼저),
+# 전기는 기계가 끝난 뒤 시작한다. 수배전반이 건물 안이면 건축 마감도 선행 조건이다.
+# 관로사업은 건축이 없으므로 건축 파일을 올리지 않으면 그 단계가 자동으로 빠진다.
+_DISC_SPECS = [
+    ("기계", "⚙️ 기계(공정) — 토목 직후 착수", "unit_parallel",
+     "수조·구조물에 들어가는 공정기계입니다. 설비 단위(유입설비·반응조설비 등) 안은 순차, 단위끼리는 병행으로 계산합니다."),
+    ("건축", "🏛️ 건축 — 토목 후, 기계와 병행", "seq",
+     "동 안의 공종도, 동끼리도 순차로 계산합니다(실무 기준)."),
+    ("건축기계설비", "🌀 건축기계설비 — 건축과 병행", "unit_parallel",
+     "냉난방·환기·위생·소화 등 건물에 들어가는 설비입니다."),
+    ("전기", "⚡ 전기·계측제어 — 기계 완료 후", "unit_parallel",
+     "설비 단위 안은 순차, 단위끼리는 병행으로 계산합니다."),
+    ("조경", "🌳 조경 — 건축·기계와 병행", "unit_parallel",
+     "보통 공기를 지배하지 않습니다. 필요하면 '공기에 반영'을 꺼서 빼세요."),
+]
+
+with tab7:
+    st.subheader("🏢 사업 전체 공기")
+    st.caption(
+        "분야별 내역서를 올리면 분야별 작업일수를 산정하고, 공사 순서로 이어 사업 전체 순작업일수를 계산합니다. "
+        "토목은 '엑셀 내역서 인식' 탭의 결과를 그대로 씁니다."
+    )
+    if not HAS_DISCIPLINE:
+        st.error("discipline_parser.py를 불러오지 못했습니다.")
+    else:
+        _civil_days = int(st.session_state.get("total_work_days", 0) or 0)
+        if _civil_days > 0:
+            st.info(f"🏗️ 토목 순작업일수: **{_civil_days}일** (엑셀 내역서 인식 탭 결과)")
+        else:
+            st.warning("토목 내역서를 먼저 올리면 전체 공기에 반영됩니다. 지금은 분야별 작업일수만 계산합니다.")
+
+        _disc_res = {}
+        for _dc, _label, _mode, _hint in _DISC_SPECS:
+            with st.expander(_label, expanded=False):
+                st.caption(_hint)
+                _ups = st.file_uploader(
+                    f"{_dc} 내역서 (.xlsx, 여러 개 가능)", type=["xlsx"],
+                    accept_multiple_files=True, key=f"disc_up_{_dc}",
+                )
+                _cc1, _cc2 = st.columns([1, 1.6])
+                with _cc1:
+                    _crews = st.number_input(
+                        "투입조수", min_value=1, max_value=200, value=1, step=1,
+                        key=f"disc_crew_{_dc}",
+                        help="1조 = 직종별 1인. 조수를 늘리면 그만큼 작업일수가 줄어듭니다.",
+                    )
+                with _cc2:
+                    st.markdown("&nbsp;", unsafe_allow_html=True)
+                    _use = st.checkbox(
+                        "공기에 반영", value=True, key=f"disc_use_{_dc}",
+                        help="끄면 작업일수는 계산해서 보여 주되 전체 공기에는 넣지 않습니다. "
+                             "기계처럼 미리 제작해 두고 건축 마감 전에 설치할 수 있어 공기를 "
+                             "지배하지 않는 분야, 조경처럼 뒤따라가는 분야에 쓰세요.",
+                    )
+                _items = []
+                for _uf in _ups or []:
+                    _r = parse_discipline_cached(_uf.getvalue(), _dc)
+                    if not _r.get("ok"):
+                        st.warning(f"⚠️ {_uf.name}: '공종별내역서'+'일위대가' 양식이 아닙니다 "
+                                   f"(시트: {', '.join(_r.get('sheets', [])[:6])})")
+                        continue
+                    _items.extend(_r["items"])
+                    st.caption(f"✅ {_uf.name} — 항목 {len(_r['items'])}개 · "
+                               f"기준 노임 {_r['base_wage']:,.0f}원")
+                if _items:
+                    _res = dp.discipline_days(_items, _mode, crews=int(_crews))
+                    _disc_res[_dc] = {"total": _res["total"], "res": _res, "n": len(_items),
+                                      "use": bool(_use)}
+                    _work = [i for i in _items if i["days1"] > 0]
+                    st.metric(f"{_dc} 작업일수" + ("" if _use else " (공기 미반영)"),
+                              f"{_res['total']}일",
+                              delta=f"공기 대상 {len(_work)}개 / 전체 {len(_items)}개 항목",
+                              delta_color="off")
+                    _pk_rows = [{
+                        "설비·동": p["unit_name"], "공종": p["group"], "항목수": p["n_items"],
+                        "주 직종": p["lead_trade"], "작업량(인·일)": p["workload"], "일수": p["days"],
+                    } for p in sorted(_res["packages"], key=lambda x: -x["days"])]
+                    st.dataframe(pd.DataFrame(_pk_rows), hide_index=True, width="stretch")
+
+        st.markdown("---")
+        st.markdown("### 🔗 공정 연결")
+        def _disc_days(_name):
+            """'공기에 반영'을 끈 분야는 0일로 본다(계산·표시는 그대로 유지)."""
+            _r = _disc_res.get(_name) or {}
+            return _r.get("total", 0) if _r.get("use", True) else 0
+
+        _mech = _disc_days("기계")
+        _arch = _disc_days("건축")
+        _amec = _disc_days("건축기계설비")
+        _elec = _disc_days("전기")
+        _land = _disc_days("조경")
+        _off = [(_d, _r.get("total", 0)) for _d, _r in _disc_res.items()
+                if not _r.get("use", True)]
+        if _off:
+            st.caption("🚫 공기 미반영: " + ", ".join(f"{_d} {_t}일" for _d, _t in _off)
+                       + " — 사전 제작해 두고 건축 마감 전에 설치하는 기계, 뒤따라가는 조경처럼 "
+                         "공기를 지배하지 않는 분야는 각 분야에서 '공기에 반영'을 끄면 여기서 빠집니다.")
+        _arch_stage = max(_arch, _amec)          # 건축과 건축기계설비는 병행
+        _elec_after_arch = False
+        if _elec and _arch_stage:
+            _elec_after_arch = st.checkbox(
+                "수배전반이 건축물 안에 있음 — 전기는 건축 마감 후 착수", value=True,
+                key="elec_after_arch",
+                help="끄면 전기는 기계 완료 후 바로 착수하고, 건축과 겹쳐 진행하는 것으로 봅니다.",
+            )
+        # 전기의 선행: 기계 완료 후(수배전반이 건물 안이면 건축 마감까지 기다림).
+        _elec_pred = max(_arch_stage, _mech) if _elec_after_arch else _mech
+        # 토목 이후 구간은 병행 갈래 중 가장 긴 쪽이 지배한다.
+        _after_civil = max(_arch_stage, _land, _mech, _elec_pred + _elec)
+        _total = _civil_days + _after_civil
+
+        if not any((_mech, _arch_stage, _elec, _land)):
+            if _disc_res:
+                st.info("올린 분야가 모두 '공기 미반영'입니다 — 토목만 전체 공기에 들어갑니다.")
+            else:
+                st.info("분야별 내역서를 올리면 공정 연결과 전체 공기가 계산됩니다.")
+        else:
+            _stage_rows = []
+            _c_end = _civil_days
+            if _civil_days:
+                _stage_rows.append({"단계": "🏗️ 토목", "작업일수": _civil_days,
+                                    "시작(일차)": 1, "종료(일차)": _c_end, "선행": "-"})
+            _mech_end = _c_end + _mech
+            if _mech:
+                _stage_rows.append({"단계": "⚙️ 기계(공정)", "작업일수": _mech,
+                                    "시작(일차)": _c_end + 1, "종료(일차)": _mech_end, "선행": "토목"})
+            if _arch:
+                _stage_rows.append({"단계": "🏛️ 건축", "작업일수": _arch,
+                                    "시작(일차)": _c_end + 1, "종료(일차)": _c_end + _arch, "선행": "토목"})
+            if _amec:
+                _stage_rows.append({"단계": "🌀 건축기계설비", "작업일수": _amec,
+                                    "시작(일차)": _c_end + 1, "종료(일차)": _c_end + _amec,
+                                    "선행": "건축과 병행"})
+            if _land:
+                _stage_rows.append({"단계": "🌳 조경", "작업일수": _land,
+                                    "시작(일차)": _c_end + 1, "종료(일차)": _c_end + _land,
+                                    "선행": "토목 후 · 건축과 병행"})
+            if _elec:
+                _e_start = _c_end + _elec_pred + 1
+                _stage_rows.append({"단계": "⚡ 전기·계측", "작업일수": _elec,
+                                    "시작(일차)": _e_start, "종료(일차)": _e_start + _elec - 1,
+                                    "선행": "기계 완료 후" + (" · 건축 마감 후" if _elec_after_arch else "")})
+            st.dataframe(pd.DataFrame(_stage_rows), hide_index=True, width="stretch")
+
+            _m1, _m2 = st.columns(2)
+            _m1.metric("사업 전체 순작업일수", f"{_total}일",
+                       delta=f"토목 {_civil_days} + 이후 {_after_civil}", delta_color="off")
+            _m2.metric("토목만", f"{_civil_days}일")
+            st.caption("건축·기계·조경은 동시 시공으로 보고 가장 긴 쪽을 씁니다. "
+                       "전기는 기계 완료 후(수배전반이 건물 안이면 건축 마감 후) 착수합니다. "
+                       "분야별 '공기에 반영'을 끄면 그 분야는 이 연결에서 빠집니다. "
+                       "비작업일수·준비·시운전 기간은 '비작업일수 계산기'에서 더해집니다.")
+            if st.button(f"📥 전체 순작업일수({_total}일)를 비작업일수 계산기에 적용", type="primary",
+                         width="stretch", key="apply_project_work_days"):
+                # 순작업일수 위젯은 이 탭보다 먼저 만들어져 직접 대입할 수 없다.
+                # 대기값으로 넘기고 다시 실행하면 비작업일수 탭이 위젯 생성 전에 반영한다.
+                st.session_state["project_work_days_apply"] = int(_total)
+                st.rerun()

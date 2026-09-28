@@ -36,6 +36,29 @@ DEFAULT_WAGE = 200_000          # 노임을 하나도 못 찾았을 때 쓰는 �
 _COST_TYPE_RE = re.compile(r"기자재|설치비|배관|자재비|철거비|지지대|잡철물|공사비|도급|관급")
 _LEAD_NUM_RE = re.compile(r"^(\d+(?:\.\d+)*)\s*[.)]?\s*")
 
+# ── 동시 투입 조수 ──────────────────────────────────────────────────────────
+# 한 공종에 동시에 몇 조까지 붙일 수 있는지는 작업 성격이 정한다(면·선·점).
+# 사용자가 공종을 일일이 지정하지 않도록 공종명·주직종으로 유형을 자동 분류하고,
+# 유형별 기본 상한만 화면에서 조정하게 한다.
+CREW_TYPES = ("면 작업", "선 작업", "설비 단위", "장비 의존")
+DEFAULT_CAPS = {"면 작업": 4, "선 작업": 3, "설비 단위": 1, "장비 의존": 2}
+_TYPE_RULES = (
+    ("장비 의존", re.compile(r"양중|크레인|인양|프리캐스트|말뚝|파일|항타|발파|준설|셔블|굴삭|굴착기")),
+    ("선 작업", re.compile(r"배관|관로|케이블|전선|전로|배선|트레이|덕트|접지|포설|용접|보온|피복|밸브")),
+    ("설비 단위", re.compile(r"기자재|기기|수배전|배전반|분전반|판넬|패널|MCC|시운전|계측|계장|제어|설치비|기계설비공|플랜트")),
+    ("면 작업", re.compile(r"가설|토공|굴착|되메|흙막이|철근|콘크리트|거푸집|형틀|조적|미장|방수|수장|타일|도장|도배|포장|마감|창호|유리|지붕|석공|금속|목공|단열|잡공사|조경|식재|잔디|블록|보통인부")),
+)
+
+
+def crew_type(group: str = "", lead_trade: str = "", name: str = "") -> str:
+    """공종명·주직종으로 동시 투입 유형을 추정한다. 못 고르면 중간값(선 작업)."""
+    txt = f"{group} {lead_trade} {name}"
+    for t, rx in _TYPE_RULES:
+        if rx.search(txt):
+            return t
+    return "선 작업"
+
+
 _HDR = {
     "name": ("품명", "공종명", "명칭", "공종"),
     "spec": ("규격",),
@@ -276,25 +299,108 @@ def build_packages(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(pk.values())
 
 
+def package_plan(items: List[Dict[str, Any]], caps: Optional[Dict[str, int]] = None,
+                 type_by_pkg: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """패키지(설비·동 × 공종)별 주직종 작업량과 동시 투입 유형·상한."""
+    cap_map = dict(DEFAULT_CAPS)
+    cap_map.update(caps or {})
+    out = []
+    for p in build_packages(items):
+        lead, w = max(p["trades"].items(), key=lambda x: x[1])
+        key = package_key(p["discipline"], p["unit_name"], p["group"])
+        t = (type_by_pkg or {}).get(key) or crew_type(p["group"], lead)
+        out.append({"key": key, "discipline": p["discipline"], "unit_name": p["unit_name"],
+                    "group": p["group"], "n_items": p["n_items"], "lead_trade": lead,
+                    "workload": round(w, 1), "_w": w, "type": t, "cap": int(cap_map.get(t, 99))})
+    return out
+
+
 def discipline_days(items: List[Dict[str, Any]], mode: str, crews: int = 1,
-                    crew_by_pkg: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+                    crew_by_pkg: Optional[Dict[str, int]] = None,
+                    crew_by_unit: Optional[Dict[str, int]] = None,
+                    caps: Optional[Dict[str, int]] = None,
+                    type_by_pkg: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """분야 작업일수.
 
     작업 묶음(공종) 일수 = ceil(최대 직종 작업량 ÷ 투입조수)   — 1조 = 직종별 1인
     설비·동 단위 일수    = 단위 안 공종 일수의 합(공종 순차)
-    mode "seq"          : 단위끼리도 순차(건축 — 동도 순차)
-    mode "unit_parallel": 단위끼리 병행(기계·전기 — 설비 단위별 병행)
+    mode "seq"          : 단위끼리도 순차(건축에서 동을 순차로 볼 때)
+    mode "unit_parallel": 단위끼리 병행(기계·전기 설비 단위, 건축 동 병행)
+
+    조수는 단위(동·설비)마다 하나로 본다 — 단위 안 공종은 순차라 같은 조가 옮겨 다닌다.
+    공종 유형별 상한(caps)에 걸리면 그 공종은 조수를 더 줘도 줄지 않는다.
+    caps·crew_by_unit을 주지 않으면 예전처럼 상한 없이 균일 조수로 계산한다.
     """
+    cap_on = caps is not None or crew_by_unit is not None
     crew_by_pkg = crew_by_pkg or {}
     per_unit: Dict[str, int] = defaultdict(int)
     rows = []
-    for p in build_packages(items):
-        lead, w = max(p["trades"].items(), key=lambda x: x[1])
-        c = max(1, int(crew_by_pkg.get(package_key(p["discipline"], p["unit_name"], p["group"]), crews)))
-        d = math.ceil(w / c - 1e-9)
+    for p in package_plan(items, caps, type_by_pkg):
+        if p["key"] in crew_by_pkg:
+            c = max(1, int(crew_by_pkg[p["key"]]))
+        else:
+            cu = int((crew_by_unit or {}).get(p["unit_name"], crews))
+            c = max(1, min(cu, p["cap"]) if cap_on else cu)
+        d = math.ceil(p["_w"] / c - 1e-9)
         per_unit[p["unit_name"]] += d
         rows.append({"discipline": p["discipline"], "unit_name": p["unit_name"], "group": p["group"],
-                     "n_items": p["n_items"], "lead_trade": lead, "workload": round(w, 1),
-                     "crews": c, "days": d})
+                     "n_items": p["n_items"], "lead_trade": p["lead_trade"], "workload": p["workload"],
+                     "type": p["type"], "cap": p["cap"], "crews": c, "days": d})
     total = sum(per_unit.values()) if mode == "seq" else max(per_unit.values(), default=0)
     return {"per_unit": dict(per_unit), "packages": rows, "total": int(total)}
+
+
+def plan_crews(items: List[Dict[str, Any]], mode: str, caps: Optional[Dict[str, int]] = None,
+               type_by_pkg: Optional[Dict[str, str]] = None,
+               total_crews: Optional[int] = None, target_days: Optional[int] = None,
+               max_per_unit: Optional[int] = None) -> Dict[str, Any]:
+    """단위(동·설비)별 투입조수를 물량 비례로 자동 배분한다.
+
+    사용자는 총 조수(또는 목표 일수)만 정하고, 어느 동에 몇 조를 넣을지는 여기서 정한다.
+    가장 오래 걸리는 단위에 1조씩 붙이므로 물량이 많은 동에 자동으로 더 들어간다.
+    동별 균등 배분보다 훨씬 짧고(실측: 광주 건축 8조 781일 → 313일), 물량을 전부 합쳐
+    나누는 방식(270일)과 달리 조가 동 사이를 넘나든다고 가정하지 않는다.
+    total_crews를 주면 그만큼만 배분하고, target_days를 주면 목표를 만족할 때까지 늘린다.
+    """
+    plan = package_plan(items, caps, type_by_pkg)
+    units: List[str] = []
+    for p in plan:
+        if p["unit_name"] not in units:
+            units.append(p["unit_name"])
+    if not units:
+        return {"crew_by_unit": {}, "per_unit": {}, "total_crews": 0, "total_days": 0,
+                "packages": plan, "units": []}
+    by_unit: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for p in plan:
+        by_unit[p["unit_name"]].append(p)
+
+    def _udays(u: str, c: int) -> int:
+        return sum(math.ceil(p["_w"] / max(1, min(c, p["cap"])) - 1e-9) for p in by_unit[u])
+
+    crew = {u: 1 for u in units}
+
+    def _obj():
+        ds = {u: _udays(u, crew[u]) for u in units}
+        return (sum(ds.values()) if mode == "seq" else max(ds.values())), ds
+
+    cap_u = int(max_per_unit) if max_per_unit else 10 ** 6
+    budget = int(total_crews) if total_crews else 10 ** 6
+    while sum(crew.values()) < budget:
+        cur, ds = _obj()
+        if target_days is not None and cur <= target_days:
+            break
+        best = None
+        for u in units:
+            if crew[u] >= cap_u:
+                continue
+            if mode != "seq" and ds[u] < cur:
+                continue        # 병행이면 최장 단위를 줄여야만 전체가 준다
+            gain = ds[u] - _udays(u, crew[u] + 1)
+            if gain > 0 and (best is None or gain > best[0]):
+                best = (gain, u)
+        if best is None:
+            break               # 상한에 다 걸려 더 줄지 않는다
+        crew[best[1]] += 1
+    tot, ds = _obj()
+    return {"crew_by_unit": crew, "per_unit": ds, "total_crews": sum(crew.values()),
+            "total_days": int(tot), "packages": plan, "units": units}

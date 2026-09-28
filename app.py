@@ -4302,6 +4302,25 @@ with tab7:
         else:
             st.warning("토목 내역서를 먼저 올리면 전체 공기에 반영됩니다. 지금은 분야별 작업일수만 계산합니다.")
 
+        # 공종마다 동시에 붙일 수 있는 조수는 작업 성격이 정한다. 공종을 하나하나 지정하지
+        # 않도록 유형을 자동 분류하고, 사용자는 유형 4개의 상한만 조정한다.
+        _CAP_HELP = {
+            "면 작업": "가설·토공·철근콘크리트·마감 등 구역을 나눠 동시 투입하기 쉬운 작업",
+            "선 작업": "배관·케이블·트레이 등 구간을 나눌 수 있으나 간섭이 있는 작업",
+            "설비 단위": "기자재·수배전반·계측처럼 설비 하나에 여러 조를 붙이기 어려운 작업",
+            "장비 의존": "양중·항타 등 장비 대수가 조수를 제한하는 작업",
+        }
+        with st.expander("⚙️ 동시 투입 조수 상한 (공종 유형별)", expanded=False):
+            st.caption("공종명·주직종으로 유형을 자동 분류합니다. 상한은 '한 동(설비)의 한 공종'에 "
+                       "동시에 붙일 수 있는 조수이며, 분류 결과는 각 분야의 공종 표에서 볼 수 있습니다.")
+            _caps = {}
+            _cap_cols = st.columns(len(dp.CREW_TYPES))
+            for _i, _t in enumerate(dp.CREW_TYPES):
+                _caps[_t] = int(_cap_cols[_i].number_input(
+                    _t, min_value=1, max_value=20, value=int(dp.DEFAULT_CAPS[_t]), step=1,
+                    key=f"crew_cap_{_t}", help=_CAP_HELP.get(_t, ""),
+                ))
+
         _disc_res = {}
         for _dc, _label, _mode, _hint in _DISC_SPECS:
             with st.expander(_label, expanded=False):
@@ -4310,15 +4329,15 @@ with tab7:
                     f"{_dc} 내역서 (.xlsx, 여러 개 가능)", type=["xlsx"],
                     accept_multiple_files=True, key=f"disc_up_{_dc}",
                 )
-                _cc1, _cc2 = st.columns([1, 1.6])
+                _cc1, _cc2 = st.columns([1.4, 1])
+                _mode_now = _mode
                 with _cc1:
-                    _crews = st.number_input(
-                        "투입조수", min_value=1, max_value=200, value=1, step=1,
-                        key=f"disc_crew_{_dc}",
-                        help="1조 = 직종별 1인. 조수를 늘리면 그만큼 작업일수가 줄어듭니다.",
-                    )
+                    if _mode == "seq":
+                        _mode_now = "unit_parallel" if st.checkbox(
+                            "동(棟)을 동시 시공", value=True, key=f"disc_par_{_dc}",
+                            help="끄면 동을 하나씩 순차로 짓는 것으로 봅니다(동 물량을 모두 더함).",
+                        ) else "seq"
                 with _cc2:
-                    st.markdown("&nbsp;", unsafe_allow_html=True)
                     _use = st.checkbox(
                         "공기에 반영", value=True, key=f"disc_use_{_dc}",
                         help="끄면 작업일수는 계산해서 보여 주되 전체 공기에는 넣지 않습니다. "
@@ -4336,16 +4355,67 @@ with tab7:
                     st.caption(f"✅ {_uf.name} — 항목 {len(_r['items'])}개 · "
                                f"기준 노임 {_r['base_wage']:,.0f}원")
                 if _items:
-                    _res = dp.discipline_days(_items, _mode, crews=int(_crews))
+                    # 1조 기준 단위(동·설비)별 일수 — 배분의 출발점이자 편집표의 기준값
+                    _u_base = dp.discipline_days(_items, _mode_now, crews=1)["per_unit"]
+                    _nu = max(1, len(_u_base))
+                    _h1, _h2 = st.columns([1.2, 1])
+                    with _h1:
+                        _how = st.radio(
+                            "투입조수 정하기", ["총 조수 직접", "목표 일수로 자동"],
+                            horizontal=True, key=f"disc_how_{_dc}",
+                            help="어느 동·설비에 몇 조를 넣을지는 앱이 정합니다 — 물량이 많은 쪽에 "
+                                 "자동으로 더 많이 배분합니다(동별 균등 배분보다 훨씬 짧습니다).",
+                        )
+                    _tgt = 0
+                    with _h2:
+                        if _how.startswith("목표"):
+                            _tgt = int(st.number_input(
+                                "목표 작업일수(이 분야)", min_value=1, max_value=20000,
+                                value=365, step=10, key=f"disc_tgt_{_dc}"))
+                            _pl = dp.plan_crews(_items, _mode_now, caps=_caps, target_days=_tgt)
+                        else:
+                            _ck = f"disc_tc_{_dc}"
+                            # 단위 수가 바뀌면(파일 교체) 저장된 값이 최소값보다 작아질 수 있다
+                            if _ck in st.session_state and int(st.session_state[_ck] or 0) < _nu:
+                                st.session_state[_ck] = _nu
+                            _pl = dp.plan_crews(
+                                _items, _mode_now, caps=_caps,
+                                total_crews=int(st.number_input(
+                                    "총 투입 조수", min_value=_nu, max_value=_nu * 30, value=_nu,
+                                    step=1, key=_ck,
+                                    help=f"동·설비가 {_nu}개라 단위당 1조씩 최소 {_nu}조입니다.")))
+                    _rec = _pl["crew_by_unit"]
+                    _ed_rows = [{"동·설비": _u, "1조 기준(일)": _d,
+                                 "추천 조수": int(_rec.get(_u, 1)), "적용 조수": int(_rec.get(_u, 1))}
+                                for _u, _d in sorted(_u_base.items(), key=lambda x: -x[1])]
+                    _sig = f"{_mode_now}|{_pl['total_crews']}|{sorted(_caps.items())}|{len(_items)}|{_nu}"
+                    _ed = st.data_editor(
+                        pd.DataFrame(_ed_rows), hide_index=True, width="stretch",
+                        key=f"disc_ed_{_dc}_{abs(hash(_sig))}",
+                        column_config={"적용 조수": st.column_config.NumberColumn(
+                            min_value=1, max_value=99, step=1, help="현장 여건에 맞게 직접 고치세요")},
+                        disabled=["동·설비", "1조 기준(일)", "추천 조수"],
+                    )
+                    _cbu = {_r["동·설비"]: max(1, int(_r["적용 조수"] or 1)) for _, _r in _ed.iterrows()}
+                    _res = dp.discipline_days(_items, _mode_now, crew_by_unit=_cbu, caps=_caps)
+                    _applied = sum(_cbu.values())
                     _disc_res[_dc] = {"total": _res["total"], "res": _res, "n": len(_items),
-                                      "use": bool(_use)}
+                                      "use": bool(_use), "crews": _applied}
                     _work = [i for i in _items if i["days1"] > 0]
                     st.metric(f"{_dc} 작업일수" + ("" if _use else " (공기 미반영)"),
                               f"{_res['total']}일",
-                              delta=f"공기 대상 {len(_work)}개 / 전체 {len(_items)}개 항목",
+                              delta=f"총 {_applied}조 · 공기 대상 {len(_work)}개 / 전체 {len(_items)}개 항목",
                               delta_color="off")
+                    if not _tgt and _pl["total_crews"] < int(st.session_state.get(f"disc_tc_{_dc}", 0) or 0):
+                        st.caption(f"ℹ️ 유형별 상한 때문에 {_pl['total_crews']}조만 쓰였습니다 — "
+                                   "더 넣어도 줄지 않습니다.")
+                    if _tgt and _pl["total_days"] > _tgt:
+                        st.caption(f"ℹ️ 유형별 상한 때문에 목표({_tgt}일)에 못 미쳐 "
+                                   f"{_pl['total_days']}일에서 멈췄습니다 — 위 '동시 투입 조수 상한'을 "
+                                   "올리거나 동 분할·목표를 다시 보세요.")
                     _pk_rows = [{
-                        "설비·동": p["unit_name"], "공종": p["group"], "항목수": p["n_items"],
+                        "설비·동": p["unit_name"], "공종": p["group"], "유형": p["type"],
+                        "상한": p["cap"], "조수": p["crews"], "항목수": p["n_items"],
                         "주 직종": p["lead_trade"], "작업량(인·일)": p["workload"], "일수": p["days"],
                     } for p in sorted(_res["packages"], key=lambda x: -x["days"])]
                     st.dataframe(pd.DataFrame(_pk_rows), hide_index=True, width="stretch")
@@ -4381,6 +4451,23 @@ with tab7:
         # 토목 이후 구간은 병행 갈래 중 가장 긴 쪽이 지배한다.
         _after_civil = max(_arch_stage, _land, _mech, _elec_pred + _elec)
         _total = _civil_days + _after_civil
+
+        # 토목 이후 병행 구간(건축·건축기계·기계·조경)은 조가 동시에 들어간다 — 인력 총량 점검
+        _par_crews = sum(int((_disc_res.get(_d) or {}).get("crews", 0))
+                         for _d in ("건축", "건축기계설비", "기계", "조경")
+                         if (_disc_res.get(_d) or {}).get("use", True))
+        if _par_crews:
+            _lim = int(st.number_input(
+                "현장 동시 최대 조수 (0 = 제한 없음)", min_value=0, max_value=999, value=0, step=1,
+                key="site_crew_limit",
+                help="토목 이후 병행 구간에 동시에 들어가는 조수 합계를 점검합니다. "
+                     "1조 = 직종별 1인이므로 인원이 아니라 조 단위입니다."))
+            _msg = f"👷 토목 이후 병행 구간 동시 투입 조수: **{_par_crews}조**"
+            if _lim and _par_crews > _lim:
+                st.warning(_msg + f" — 현장 상한 {_lim}조를 넘습니다. 분야별 조수를 줄이거나 "
+                                  "목표 공기를 늘려야 합니다.")
+            else:
+                st.caption(_msg)
 
         if not any((_mech, _arch_stage, _elec, _land)):
             if _disc_res:

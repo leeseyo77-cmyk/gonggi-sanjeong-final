@@ -1399,19 +1399,6 @@ def calc_completion_date(start, work_days):
 # 엑셀 파서
 # ══════════════════════════════════════════════════════════════
 def parse_by_keyword(file):
-    # 🔥 디버그: 파일 로그
-    import datetime
-    log_file = "debug_log.txt"
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(f"\n{'='*60}\n")
-        f.write(f"파싱 시작: {datetime.datetime.now()}\n")
-        f.write(f"{'='*60}\n")
-    
-    # 🔥 디버그: 파싱 시작
-    print(f"\n{'🔥'*30}")
-    print(f"📂 parse_by_keyword 시작")
-    print(f"{'🔥'*30}\n")
-    
     # keep_links=False: xls에서 변환한 파일에 남은 깨진 외부 링크 때문에 열기 자체가 실패하는 것을 막는다
     wb = openpyxl.load_workbook(file, data_only=True, keep_links=False)
     skip_sheets = ["목차","안내","INITIAL","초기","index"]
@@ -2323,10 +2310,6 @@ with tab2:
                                             for item in sub_items:
                                                 d, _, _ = calc_days_priority(item['name'], item.get('spec', ''), item.get('qty', 0), row['crew'], item.get('unit', ''))
                                                 sub_days += d
-                                                
-                                                # 추진공 디버깅 (큰 작업일수만)
-                                                if "추진" in sub_name and d > 100:
-                                                    print(f"⚠️ 큰 작업일수: {sub_name} - {item['name']} ({item.get('spec', '')}) qty={item.get('qty', 0)} unit={item.get('unit', '')} → {d}일")
                                             
                                             # sub_sub_categories가 있으면 그것도 포함
                                             for sub_sub in sub_data.get('sub_categories', []):
@@ -4346,7 +4329,7 @@ with tab7:
         # 실무 기준 공기(사용자 제공): 처리시설 규모별 표준 범위. 산정 결과가 현실적인지
         # 대조하고, 목표 공기를 정해 분야별 조수를 역산하는 출발점으로 쓴다.
         _SCALE_GUIDE = [
-            (500, "소규모 (500㎥/일 이하)", 18, 24),
+            (500, "소규모 (500㎥/일 이하)", 24, 36),
             (3000, "중규모 (500~3,000㎥/일)", 24, 36),
             (10000, "중대규모 (3,000~10,000㎥/일)", 36, 48),
             (10 ** 9, "대규모 (10,000㎥/일 이상)", 48, 60),
@@ -4362,7 +4345,7 @@ with tab7:
         if _tm_pend is not None:
             st.session_state["proj_target_months"] = float(_tm_pend)
         with st.expander("🎯 목표 공기 — 시설 규모 기준", expanded=False):
-            st.caption("처리시설 실무 공기: 소규모·중규모는 2~3년 이내, 대규모(1만㎥/일)는 4~5년. "
+            st.caption("처리시설 실무 공기: 소규모·중규모는 2~3년(소규모도 최소 24개월), 대규모(1만㎥/일)는 4~5년. "
                        "처리용량을 넣으면 그 범위를 제안하고, 목표 공기를 정하면 아래 '공정 연결'에서 "
                        "분야별 조수를 역산합니다.")
             _s1, _s2 = st.columns(2)

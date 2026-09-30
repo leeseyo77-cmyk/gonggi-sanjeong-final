@@ -9,3 +9,11 @@ debug_log.txt
 backup/
 Start_Here_Mac.app/
 PROFILE.py
+
+# 로컬 참고자료(샘플 내역서·표준품셈 PDF 등) — 저장소에 올리지 않는다
+샘플파일/
+*.pdf
+desktop.ini
+
+# 테스트 산출물
+tests/_out/

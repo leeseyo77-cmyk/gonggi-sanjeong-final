@@ -1212,16 +1212,21 @@ def critical_keys(model, combine_sum, target, crew_rec):
 
 @st.fragment
 def render_crew_recommendation(wr):
-    """공기산정 탭: 목표 공기 기준 크리티컬 공종 투입조수 추천 + 사용자 조정."""
+    """공기산정 탭: 목표 공기 기준 크리티컬 공종의 필요 투입조수 역산 + 사용자 조정.
+
+    조수의 적정값은 현장 경험이 정한다. 여기서는 '목표를 맞추려면 몇 조가 필요한가'를
+    계산해 보여 줄 뿐이며, 그 값이 현실적인지는 사용자가 판단한다.
+    """
     work = st.session_state.get("work_result")
     if not work:
         return
     st.markdown("---")
-    st.markdown("### 👷 목표 공기 기준 투입조수 추천")
+    st.markdown("### 👷 목표 공기 기준 투입조수 역산")
     st.caption(
-        "발주처 목표 공기를 넣으면 공기를 좌우하는 크리티컬 공종(🔴)의 투입조수를 추천합니다. "
-        "'적용 조수' 칸을 고치면 결과가 바로 다시 계산되니, 현장 여건에 맞게 조정한 뒤 반영하세요. "
-        "준비·시운전·정리 기간과 비작업일수는 '비작업일수 계산기'의 설정을 그대로 씁니다."
+        "투입조수는 현장 경험으로 정하는 값입니다. 여기서는 목표 공기를 맞추려면 공기를 좌우하는 "
+        "크리티컬 공종(🔴)에 **몇 조가 필요한지 역산**해 보여 줍니다. 그 조수가 현실적인지는 직접 "
+        "판단하고, '적용 조수' 칸에 경험값을 넣으세요. 필요 조수가 비현실적으로 크면 목표 공기가 "
+        "무리라는 근거로 쓰면 됩니다. 준비·시운전·정리 기간과 비작업일수는 '비작업일수 계산기' 설정을 씁니다."
     )
     _c1, _c2 = st.columns(2)
     with _c1:
@@ -1233,10 +1238,10 @@ def render_crew_recommendation(wr):
         cap = st.number_input(
             "항목당 최대 투입조수", min_value=1, max_value=50, value=3, step=1, key="crew_cap_input",
             help="한 세부 공종에 동시에 붙일 수 있는 최대 조수(라인마다 적용). "
-                 "회사 실무 기준(구간당 조수 등)이 정해지면 그 값으로 바꾸세요.",
+                 "기본 3조는 실무 근거가 없는 임시값입니다 — 회사·현장 기준으로 바꾸세요.",
         )
     if months <= 0:
-        st.info("목표 공기(개월)를 입력하면 세부 공종별 추천 투입조수를 계산합니다.")
+        st.info("목표 공기(개월)를 입력하면 세부 공종별로 필요한 투입조수를 역산합니다.")
         return
     target, span, nw = target_work_days_from_months(wr, months)
     if target <= 0:
@@ -1270,7 +1275,7 @@ def render_crew_recommendation(wr):
             "대공종": m["대공종"], "세부공종": m["세부공종"], "규격": m["규격"], "단위": m["단위"],
             "라인 수": len(m["라인"]),
             "현재 조수": base[k], "현재 일수": -(-d1 // base[k]),
-            "추천 조수": rec[k], "추천 후 일수": -(-d1 // rec[k]),
+            "필요 조수": rec[k], "필요 조수 시 일수": -(-d1 // rec[k]),
             "적용 조수": rec[k],
         })
     rows_df.sort(key=lambda x: (x["크리티컬"] == "", -x["현재 일수"]))
@@ -1290,7 +1295,7 @@ def render_crew_recommendation(wr):
                 "_key": None,
                 "적용 조수": st.column_config.NumberColumn(
                     "적용 조수 ✏️", min_value=1, max_value=200, step=1,
-                    help="추천값이 채워져 있습니다. 현장 여건에 맞게 고치면 위 결과가 바로 다시 계산됩니다.",
+                    help="목표를 맞추는 필요 조수(역산값)가 채워져 있습니다. 경험값으로 고치면 위 결과가 바로 다시 계산됩니다.",
                 ),
             },
         )
@@ -1310,7 +1315,7 @@ def render_crew_recommendation(wr):
                      delta_color="off")
         _m[1].metric("현재 주공정", f"{tot_now}일", delta=f"목표 대비 {tot_now - target:+d}일",
                      delta_color="inverse")
-        _m[2].metric("추천안", f"{tot_rec}일", delta=f"목표 대비 {tot_rec - target:+d}일",
+        _m[2].metric("역산안 (필요 조수)", f"{tot_rec}일", delta=f"목표 대비 {tot_rec - target:+d}일",
                      delta_color="inverse")
         _m[3].metric("조정안 (적용 조수)", f"{tot_usr}일", delta=f"목표 대비 {tot_usr - target:+d}일",
                      delta_color="inverse")
@@ -1319,9 +1324,15 @@ def render_crew_recommendation(wr):
         else:
             st.warning(f"⚠️ 조정안은 목표보다 {tot_usr - target}일 깁니다. "
                        "🔴 표시 공종의 적용 조수를 늘려 보세요.")
+        # 필요 조수가 상한에 닿는다 = 목표가 빠듯하다(또는 무리다)는 신호
+        _at_cap = [k for k in rec if rec[k] >= int(cap) and rec[k] != base.get(k)]
         if tot_rec > target:
-            st.info(f"ℹ️ 항목당 최대 {int(cap)}조 상한 때문에 추천안도 목표에 못 미칩니다. "
-                    "상한을 올리거나 목표 공기·주공정 선택을 다시 검토하세요.")
+            st.error(f"🔴 항목당 최대 {int(cap)}조까지 넣어도 목표보다 {tot_rec - target}일 깁니다 — "
+                     "목표 공기가 무리일 수 있습니다. 상한이 현장 기준보다 낮은지, 목표 공기·주공정 "
+                     "선택이 맞는지 검토하세요.")
+        elif _at_cap:
+            st.warning(f"⚠️ {len(_at_cap)}개 공종이 상한({int(cap)}조)까지 필요합니다 — 목표가 빠듯합니다. "
+                       "현장에서 그만큼 동시에 투입할 수 있는지 확인하세요.")
         if not rows_df:
             st.caption("목표를 넘는 크리티컬 공종이 없습니다. 조수를 조정하려면 '크리티컬이 아닌 항목도 표시'를 켜세요.")
 
@@ -1329,7 +1340,7 @@ def render_crew_recommendation(wr):
     for i, cat in enumerate(model["cats"]):
         _crit_cat = (not combine_sum) and per_now[i] > target
         row = {"대공종": ("🔴 " if _crit_cat else "") + cat["name"], "라인 수": len(cat["lines"]),
-               "현재 일수": per_now[i], "추천 후": per_rec[i], "조정 후": per_usr[i]}
+               "현재 일수": per_now[i], "역산 후": per_rec[i], "조정 후": per_usr[i]}
         if not combine_sum:
             row["판정(조정 후)"] = "✅" if per_usr[i] <= target else f"🔴 {per_usr[i] - target}일 초과"
         cat_rows.append(row)
@@ -1340,7 +1351,7 @@ def render_crew_recommendation(wr):
     changes = {k: v for k, v in crew_user.items() if v != base.get(k)}
     _b1, _b2 = st.columns([1, 2])
     with _b1:
-        if st.button("↩️ 추천값으로 되돌리기", width="stretch", key="crew_reset_edit"):
+        if st.button("↩️ 역산값으로 되돌리기", width="stretch", key="crew_reset_edit"):
             st.session_state["crew_edit_nonce"] += 1
             st.rerun(scope="fragment")
     with _b2:
@@ -3896,6 +3907,15 @@ with tab5:
                                 cell = ws_s.cell(row=rr, column=FIRST_MC + m * MONTH_W + k)
                                 if cell.border is None or cell.border.left is None or cell.border.left.style is None:
                                     cell.border = _border
+                    # 조수는 앱이 판단한 값이 아니라 가정값임을 산출물에 남긴다
+                    _note_r = _r + 1
+                    ws_s.cell(row=_note_r, column=COL0 - 1,
+                              value="※ 막대의 'N조'는 현장 경험에 따른 투입조수 가정값이며, 작업일수는 "
+                                    "이 가정으로 계산했습니다.").font = Font(size=9, italic=True)
+                    _dsum = st.session_state.get("disc_crew_summary")
+                    if _dsum:
+                        ws_s.cell(row=_note_r + 1, column=COL0 - 1,
+                                  value=f"※ 타분야 투입조수 가정: {_dsum}").font = Font(size=9, italic=True)
                     ws_s.column_dimensions[get_column_letter(COL0 - 1)].width = 14
                     ws_s.column_dimensions[get_column_letter(COL0)].width = 26
                     for m in range(_max_month * MONTH_W):
@@ -4380,7 +4400,9 @@ with tab7:
             "설비 단위": "기자재·수배전반·계측처럼 설비 하나에 여러 조를 붙이기 어려운 작업",
             "장비 의존": "양중·항타 등 장비 대수가 조수를 제한하는 작업",
         }
-        with st.expander("⚙️ 동시 투입 조수 상한 (공종 유형별)", expanded=False):
+        with st.expander("⚙️ 동시 투입 조수 상한 (공종 유형별 · 임시값)", expanded=False):
+            st.warning("⚠️ 기본값(면 작업 4 · 선 작업 3 · 설비 단위 1 · 장비 의존 2조)은 **실무 근거가 없는 "
+                       "임시값**입니다. 회사·현장 기준으로 바꿔 쓰세요. 역산 결과는 이 상한에 크게 좌우됩니다.")
             st.caption("공종명·주직종으로 유형을 자동 분류합니다. 상한은 '한 동(설비)의 한 공종'에 "
                        "동시에 붙일 수 있는 조수이며, 분류 결과는 각 분야의 공종 표에서 볼 수 있습니다.")
             _caps = {}
@@ -4427,7 +4449,7 @@ with tab7:
                                f"기준 노임 {_r['base_wage']:,.0f}원")
                 if _items:
                     if _dc in _pend_tgt:       # 목표 공기에서 역산한 값 주입(위젯 생성 전)
-                        st.session_state[f"disc_how_{_dc}"] = "목표 일수로 자동"
+                        st.session_state[f"disc_how_{_dc}"] = "목표 일수로 역산"
                         st.session_state[f"disc_tgt_{_dc}"] = int(_pend_tgt[_dc])
                     # 1조 기준 단위(동·설비)별 일수 — 배분의 출발점이자 편집표의 기준값
                     _u_base = dp.discipline_days(_items, _mode_now, crews=1)["per_unit"]
@@ -4435,10 +4457,10 @@ with tab7:
                     _h1, _h2 = st.columns([1.2, 1])
                     with _h1:
                         _how = st.radio(
-                            "투입조수 정하기", ["총 조수 직접", "목표 일수로 자동"],
+                            "투입조수 정하기", ["총 조수 직접", "목표 일수로 역산"],
                             horizontal=True, key=f"disc_how_{_dc}",
-                            help="어느 동·설비에 몇 조를 넣을지는 앱이 정합니다 — 물량이 많은 쪽에 "
-                                 "자동으로 더 많이 배분합니다(동별 균등 배분보다 훨씬 짧습니다).",
+                            help="총 조수는 경험값으로 직접 넣고, 동·설비별 배분만 앱이 물량 비례로 "
+                                 "나눕니다. '목표 일수로 역산'은 목표를 맞추는 데 필요한 조수를 계산합니다.",
                         )
                     _tgt = 0
                     with _h2:
@@ -4461,7 +4483,7 @@ with tab7:
                                     help=f"동·설비가 {_nu}개라 단위당 1조씩 최소 {_nu}조입니다.")))
                     _rec = _pl["crew_by_unit"]
                     _ed_rows = [{"동·설비": _u, "1조 기준(일)": _d,
-                                 "추천 조수": int(_rec.get(_u, 1)), "적용 조수": int(_rec.get(_u, 1))}
+                                 "배분 조수": int(_rec.get(_u, 1)), "적용 조수": int(_rec.get(_u, 1))}
                                 for _u, _d in sorted(_u_base.items(), key=lambda x: -x[1])]
                     _sig = f"{_mode_now}|{_pl['total_crews']}|{sorted(_caps.items())}|{len(_items)}|{_nu}"
                     _ed = st.data_editor(
@@ -4469,7 +4491,7 @@ with tab7:
                         key=f"disc_ed_{_dc}_{abs(hash(_sig))}",
                         column_config={"적용 조수": st.column_config.NumberColumn(
                             min_value=1, max_value=99, step=1, help="현장 여건에 맞게 직접 고치세요")},
-                        disabled=["동·설비", "1조 기준(일)", "추천 조수"],
+                        disabled=["동·설비", "1조 기준(일)", "배분 조수"],
                     )
                     _cbu = {_r["동·설비"]: max(1, int(_r["적용 조수"] or 1)) for _, _r in _ed.iterrows()}
                     _res = dp.discipline_days(_items, _mode_now, crew_by_unit=_cbu, caps=_caps)
@@ -4485,9 +4507,17 @@ with tab7:
                         st.caption(f"ℹ️ 유형별 상한 때문에 {_pl['total_crews']}조만 쓰였습니다 — "
                                    "더 넣어도 줄지 않습니다.")
                     if _tgt and _pl["total_days"] > _tgt:
-                        st.caption(f"ℹ️ 유형별 상한 때문에 목표({_tgt}일)에 못 미쳐 "
-                                   f"{_pl['total_days']}일에서 멈췄습니다 — 위 '동시 투입 조수 상한'을 "
-                                   "올리거나 동 분할·목표를 다시 보세요.")
+                        st.error(f"🔴 상한까지 넣어도 목표({_tgt}일)보다 {_pl['total_days'] - _tgt}일 깁니다 "
+                                 f"({_pl['total_days']}일) — 목표가 무리일 수 있습니다. 상한이 현장 기준보다 "
+                                 "낮은지 확인하세요.")
+                    elif _tgt:
+                        # 단위 안 모든 공종이 상한에 닿았다 = 더 넣을 수 없을 만큼 빠듯하다
+                        _full = [_u for _u, _c in _rec.items()
+                                 if _c > 1 and _c >= max((p["cap"] for p in _pl["packages"]
+                                                          if p["unit_name"] == _u), default=99)]
+                        if _full:
+                            st.warning(f"⚠️ 상한까지 채워야 목표에 맞습니다: {', '.join(_full[:4])} — "
+                                       "목표가 빠듯합니다. 현장에서 가능한 조수인지 확인하세요.")
                     _pk_rows = [{
                         "설비·동": p["unit_name"], "공종": p["group"], "유형": p["type"],
                         "상한": p["cap"], "조수": p["crews"], "항목수": p["n_items"],
@@ -4575,7 +4605,17 @@ with tab7:
                 _stage_rows.append({"단계": "⚡ 전기·계측", "작업일수": _elec,
                                     "시작(일차)": _e_start, "종료(일차)": _e_start + _elec - 1,
                                     "선행": "기계 완료 후" + (" · 건축 마감 후" if _elec_after_arch else "")})
+            _stage_disc = {"⚙️ 기계(공정)": "기계", "🏛️ 건축": "건축", "🌀 건축기계설비": "건축기계설비",
+                           "🌳 조경": "조경", "⚡ 전기·계측": "전기"}
+            for _sr in _stage_rows:
+                _d = _stage_disc.get(_sr["단계"])
+                _sr["투입조수(가정)"] = (f"{(_disc_res.get(_d) or {}).get('crews', 0)}조" if _d
+                                     else "공기산정 탭 설정")
             st.dataframe(pd.DataFrame(_stage_rows), hide_index=True, width="stretch")
+            st.caption("투입조수는 경험에 따른 **가정값**입니다. 결과를 보고·제출할 때 이 가정을 함께 밝히세요.")
+            st.session_state["disc_crew_summary"] = " · ".join(
+                f"{_d} {(_r or {}).get('crews', 0)}조" for _d, _r in _disc_res.items()
+                if (_r or {}).get("use", True))
 
             _m1, _m2 = st.columns(2)
             _m1.metric("사업 전체 순작업일수", f"{_total}일",
@@ -4607,7 +4647,7 @@ with tab7:
                     st.error("목표 공기가 준비·시운전 기간보다 짧습니다.")
                 elif _avail <= 0:
                     st.error(f"토목({_civil_days}일)만으로 목표({_tgt_days}일)를 넘습니다 — "
-                             f"'공기산정' 탭의 투입조수 추천으로 토목을 {_civil_days - _tgt_days + 1}일 "
+                             f"'공기산정' 탭의 투입조수 역산으로 토목을 {_civil_days - _tgt_days + 1}일 "
                              "이상 줄여야 합니다.")
                 else:
                     # 토목 이후 구간 배분: 전기가 건축 후행이면 둘이 나눠 쓴다
@@ -4629,7 +4669,7 @@ with tab7:
                     _tg = {_k: int(_v) for _k, _v in _tg.items() if _disc_res.get(_k)}
                     st.caption("분야별 허용 일수(토목 이후 " + f"{_avail}일 배분): "
                                + " · ".join(f"{_k} {_v}일" for _k, _v in _tg.items()))
-                    if _tg and st.button("👷 목표 공기에 맞춰 분야별 조수 자동 추천",
+                    if _tg and st.button("👷 목표 공기에 맞춰 분야별 필요 조수 역산",
                                          width="stretch", key="apply_disc_targets"):
                         st.session_state["disc_target_pending"] = _tg
                         st.rerun()

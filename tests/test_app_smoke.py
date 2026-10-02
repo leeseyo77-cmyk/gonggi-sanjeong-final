@@ -3,7 +3,7 @@
 샘플이 없거나 GONGGI_SKIP_APP=1이면 건너뛴다.
 실행: python -m unittest discover -s tests -v
 
-기준값(2,517일·4,078일 등)은 현재 산정 모델의 결과다. 모델을 의도적으로 바꿨다면
+기준값(2,198일·3,759일 등)은 현재 산정 모델의 결과다. 모델을 의도적으로 바꿨다면
 결과를 확인한 뒤 여기 숫자를 갱신한다.
 """
 import os
@@ -24,7 +24,8 @@ class CivilTest(unittest.TestCase):
     def test_civil_work_days_baseline(self):
         at = app_test(civil=GWANGJU["토목"])
         self.assertEqual(exceptions(at), [])
-        self.assertEqual(at.session_state["total_work_days"], 2517)
+        # 노무비 역산은 병목 직종 기준(1조 = 직종별 1인). 1인 합산 기준이던 때는 2,517일
+        self.assertEqual(at.session_state["total_work_days"], 2198)
 
 
 @unittest.skipIf(SKIP, WHY)
@@ -34,17 +35,17 @@ class ProjectTabTest(unittest.TestCase):
                       discs={"건축": GWANGJU["건축"], "전기": GWANGJU["전기"]})
         self.assertEqual(exceptions(at), [])
         # 기본: 토목 + 건축(동 병행) — 전기는 공기 미반영
-        self.assertEqual(metric(at, "사업 전체 순작업일수"), "4078일")
+        self.assertEqual(metric(at, "사업 전체 순작업일수"), "3759일")
 
-        # 전기를 켜면 건축 마감 후 착수(기본) → 2,517 + 1,561 + 984
+        # 전기를 켜면 건축 마감 후 착수(기본) → 2,198 + 1,561 + 984
         widget(at, "checkbox", "disc_use_전기").set_value(True).run()
         self.assertEqual(exceptions(at), [])
-        self.assertEqual(metric(at, "사업 전체 순작업일수"), "5062일")
+        self.assertEqual(metric(at, "사업 전체 순작업일수"), "4743일")
 
         # 비작업일수 계산기로 넘기기
         button(at, "📥 전체 순작업일수").click().run()
         self.assertEqual(exceptions(at), [])
-        self.assertEqual(at.session_state["weather_work_days"], 5062)
+        self.assertEqual(at.session_state["weather_work_days"], 4743)
 
     def test_crew_allocation_goes_to_larger_building(self):
         at = app_test(civil=GWANGJU["토목"], discs={"건축": GWANGJU["건축"]})

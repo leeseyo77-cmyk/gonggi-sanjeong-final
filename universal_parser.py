@@ -1189,19 +1189,28 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
                  "단위": unit_s, "행": (row_idx + 1) if row_idx is not None else None}
 
         # 1순위: 직접 인수 기반 (할증·요율 배제, 야간=주간 동일값)
+        # 품셈의 직종별 인수는 여러 직종이 '함께' 드는 조합이다(예: 방수 ㎡당 미장공 0.04 + 도장공
+        # 0.03 + 보통인부 0.03 + 특별인부 0.02). 1조(직종별 1인)가 하루에 하는 양은 가장 많이 드는
+        # 직종(병목)이 정한다. 인수를 모두 더해 나누면 '1인이 모든 직종 일을 다 하는' 셈이 되어
+        # 작업일수가 보통 1.5배, 많게는 3배 이상 길게 나왔다(샘플 7개 실측). 건축·기계·전기
+        # (discipline_parser)도 같은 기준이므로 앱 전체에서 1조의 정의가 같아진다.
         if manhours and manhours > 0:
             _bq = explicit_base if (explicit_base and explicit_base > 0) else base_qty
-            daily = _bq / manhours
+            _tv = {t: v for t, v in (trades or {}).items() if v > 0}
+            lead_t, lead_mh = max(_tv.items(), key=lambda x: x[1]) if _tv else ("", manhours)
+            daily = _bq / lead_mh
             if daily > 0 and key not in result:
                 result[key] = (round(daily, 4), unit_s, job)
                 traces[key] = {
-                    **_head, "방식": "직접 인수 합산", "기준수량": _bq,
+                    **_head, "방식": "직종별 인수(병목 직종)", "기준수량": _bq,
                     # 인수가 0.0004처럼 아주 작은 호표가 있어 자릿수를 넉넉히 남긴다(검산용)
                     "인수합": round(manhours, 6),
-                    "직종별 인수": sorted(((t, round(v, 6)) for t, v in (trades or {}).items()),
+                    "직종별 인수": sorted(((t, round(v, 6)) for t, v in _tv.items()),
                                      key=lambda x: -x[1]),
+                    "병목 직종": lead_t, "병목 인수": round(lead_mh, 6),
+                    "1인 기준 일작업량": round(_bq / manhours, 4),
                     "일작업량": round(daily, 4),
-                    "식": f"{_bq:g} ÷ {manhours:.6g}인 = {daily:.4g}{unit_s}/인·일",
+                    "식": f"{_bq:g} ÷ {lead_mh:.6g}인({lead_t or '인부'}) = {daily:.4g}{unit_s}/조·일",
                 }
             return
 

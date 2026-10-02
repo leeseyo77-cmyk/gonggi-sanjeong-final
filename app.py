@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import openpyxl
 import zipfile
+import zlib
 from openpyxl.utils.exceptions import InvalidFileException
 from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback
 import math
@@ -341,6 +342,17 @@ def _rate_to_float(rate_text):
         return None
 
 
+def rerun_after_render():
+    """앱 전체를 다시 실행하되, 이번 실행을 끝까지 마친 뒤에 한다(파일 맨 끝에서 처리).
+
+    탭 중간에서 st.rerun()을 바로 부르면 그 뒤 탭(사업 전체 공기)의 위젯이 이번 실행에서
+    그려지지 않는다. Streamlit은 st.rerun()을 '실행 완료'로 보고 그려지지 않은 위젯의 상태를
+    지우므로, 분야별 업로드 파일·조수·체크박스가 초기화됐다('비작업일수 계산'을 누를 때 등).
+    프래그먼트 안의 st.rerun()은 그 프래그먼트 위젯만 정리하므로 그대로 둬도 된다.
+    """
+    st.session_state["_rerun_after_render"] = True
+
+
 @st.fragment
 def render_detail_table(detail_items, source_items, base_crew, key):
     """상세공종 표를 '1일작업량 수정'과 '투입조수' 열만 편집 가능하게 렌더링.
@@ -514,7 +526,7 @@ def _render_apply_rates(scope_key: str):
                 else:
                     st.session_state["manual_rates"].pop(_ik, None)
             st.session_state["pending_rate"] = {}
-            st.rerun()
+            rerun_after_render()
 
 
 def is_non_work_category(cat_name: str) -> bool:
@@ -2543,7 +2555,7 @@ with tab2:
                                                                             "unit": unit_input
                                                                         }
                                                                         st.success("✅ 저장됨!")
-                                                                        st.rerun()
+                                                                        rerun_after_render()
                                                             
                                                             # 계산 결과 미리보기
                                                             if daily_rate > 0:
@@ -3023,7 +3035,7 @@ with tab4:
                              disabled=(_pick == _cur)):
                     st.session_state["selected_station"] = _pick
                     st.session_state["selected_region"] = _pick.split(" ")[0]
-                    st.rerun()
+                    rerun_after_render()
             if _pick != _cur:
                 st.caption(f"선택: {_pick} → **지역 적용**을 누르면 반영됩니다.")
 
@@ -3297,7 +3309,7 @@ with tab4:
         st.success(f"✅ 준공일: **{completion_date.strftime('%Y년 %m월 %d일')}**")
         # 공기산정 탭(tab1)이 이 탭보다 먼저 실행되므로, 방금 저장한 weather_result를
         # 같은 실행에서 못 읽는다. 즉시 rerun 해서 모든 탭이 새 값으로 다시 렌더되게 한다.
-        st.rerun()
+        rerun_after_render()
     
     # ──────────────────────────────────
     # 5. 결과 표시
@@ -3640,14 +3652,25 @@ with tab5:
         _max_wd = max((int(r.get('작업일수(일)', 0) or 0) for r in _sched_rows), default=1) or 1
         _sum_wd = sum(int(r.get('작업일수(일)', 0) or 0) for r in _sched_rows) or 1
         _base_wd = _sum_wd if _is_sum_mode else _max_wd
-        _scale = _constr_days / _base_wd  # 작업일수 → 달력일수 배율
+        # 사업 전체 공기 탭에서 반영 분야(건축 등)를 넘겨받았고 그 합계를 비작업일수 계산기에
+        # 적용했다면, 본공사 기간은 토목+후속 분야 몫이다 → 토목 막대는 그 비율만큼만 차지한다.
+        _ps = st.session_state.get("project_sched") or {}
+        _ps_discs = _ps.get("disciplines") or []
+        _proj_applied = bool(_ps_discs) and st.session_state.get("_proj_applied_days") == int(_work_days)
+        _den = int(_work_days) if _proj_applied else _base_wd
+        _scale = _constr_days / max(1, _den)  # 작업일수 → 달력일수 배율
 
         st.info(
             f"착공일 {_start_d} · 총공사기간 {_total_days}일 "
             f"(준비 {_prep_d} + 본공사 {_constr_days} + 시운전 {_comm_d} + 정리 {_wrap_d}) · "
             f"본공사를 {'선택 공종 합산' if _is_sum_mode else '최장 주공정'} {_base_wd}일 기준 배분 "
             f"(배율 {_scale:.2f})"
+            + (f" · 사업 전체 공기(토목+{'·'.join(d['name'] for d in _ps_discs)}) 기준" if _proj_applied else "")
         )
+        if _ps_discs and not _proj_applied:
+            st.caption(f"ℹ️ '사업 전체 공기' 탭의 {'·'.join(d['name'] for d in _ps_discs)} 막대도 함께 그립니다. "
+                       "다만 비작업일수 계산기에 사업 전체 순작업일수를 아직 적용하지 않아 공정표가 산정 "
+                       "공기보다 길어집니다 — 그 탭의 '전체 순작업일수 적용' 버튼을 누르세요.")
 
         # ── 2) 표준 시퀀스 순서 + 순차(계단식) 시작월 자동 제안 ──
         # 샘플 예정공정표처럼 토공→관로→구조물→포장이 계단식으로 이어지도록,
@@ -3689,8 +3712,12 @@ with tab5:
         # 본공사는 준비기간이 끝난 다음 달부터 시작한다.
         _prep_m = int(round(_prep_d / 30.4))
         _work_start_m = 1 + _prep_m
+        # 토목 완료 시점(0부터 센 개월). 사업 전체 공기 탭이 넘긴 토목 일수, 없으면 산정 기준 일수
+        # (그때는 본공사 기간 끝과 같다).
+        _civ_end_f = _prep_m + int(_ps.get("civil_days") or _base_wd) * _scale / 30.4
+        _civ_end_m = max(_work_start_m, int(_math.ceil(_civ_end_f - 1e-9)))
         if _prep_d > 0:
-            _prefill.append({"구분": "공사준비", "공종": "공사준비(인허가·용지보상·가설시설 등)", "조수": 0,
+            _prefill.append({"분야": "가설공사", "구분": "공사준비", "공종": "공사준비(인허가·용지보상·가설시설 등)", "조수": 0,
                              "시작(개월차)": 1, "기간(개월)": max(1, _prep_m), "작업일수": _prep_d})
 
         for r in _sched_rows:
@@ -3721,10 +3748,15 @@ with tab5:
                 else:
                     _start = _prev_start + max(1, int(_math.ceil(_prev_months * _OVERLAP)))
 
+                if not _is_sum_mode:
+                    # 최장(병행) 모드의 토목 공기는 가장 긴 라인 그 자체다. 계단식으로 늦게 시작한 공종이
+                    # 토목 완료 시점을 넘기면 공정표가 산정 공기보다 길어지고 후속 분야(건축)와 겹친다.
+                    _start = max(_work_start_m, min(_start, _civ_end_m - _months + 1))
+
                 if _grp_start is None:
                     _grp_start = _start
 
-                _prefill.append({"구분": _nm, "공종": _label, "조수": _crew,
+                _prefill.append({"분야": "토목공사", "구분": _nm, "공종": _label, "조수": _crew,
                                  "시작(개월차)": _start, "기간(개월)": _months, "작업일수": _wd})
 
                 if any(kw in _label for kw in ("관로", "관접합", "부설")):
@@ -3735,17 +3767,36 @@ with tab5:
                 _longest = max(max(1, int(_math.ceil((w * _scale) / 30.4))) for _, w in _units)
                 _prev_start, _prev_months = _grp_start, _longest
 
+        # 분야(건축 등) 행 — 사업 전체 공기 탭의 결과. 토목 완료 시점부터 동·설비 단위별로
+        # 공종을 차례로 잇는다(동끼리는 병행, '동 순차'면 동도 차례로). 실수 개월로 이어 붙인 뒤
+        # 시작·끝을 정수 개월로 바꿔, 짧은 공종이 모두 1개월로 올림돼 전체가 늘어나는 것을 막는다.
+        _DISC_SECTION = {"건축": "건축공사", "건축기계설비": "건축기계설비", "기계": "기계공사",
+                         "전기": "전기 및 계측제어공사", "조경": "조경공사"}
+        for _dd in _ps_discs:
+            _t0 = _civ_end_f + int(_dd.get("start", 0)) * _scale / 30.4
+            _cur = {}
+            for _p in _dd.get("packages", []):
+                _ukey = "_all" if _dd.get("mode") == "seq" else _p["unit"]
+                _s_f = _cur.get(_ukey, _t0)
+                _e_f = _s_f + _p["days"] * _scale / 30.4
+                _cur[_ukey] = _e_f
+                _sm_i = int(_math.floor(_s_f + 1e-9)) + 1
+                _em_i = max(_sm_i, int(_math.ceil(_e_f - 1e-9)))
+                _prefill.append({"분야": _DISC_SECTION.get(_dd["name"], _dd["name"]), "구분": _p["unit"],
+                                 "공종": _p["group"], "조수": int(_p["crews"]), "시작(개월차)": _sm_i,
+                                 "기간(개월)": _em_i - _sm_i + 1, "작업일수": int(_p["days"])})
+
         # 시운전·준공정리 행 — 비작업일수 탭에 입력한 기간 그대로 본공사 뒤에 붙인다.
         # (예전에는 공종명에 '구조물·처리·설비' 등이 있으면 시운전 2개월을 고정으로 붙여,
         #  입력한 시운전 기간과 무관하게 공정표가 늘어났다)
         _work_rows = [p for p in _prefill if p["구분"] not in _NON_WORK_GROUPS]
         _end_all = max((p["시작(개월차)"] + p["기간(개월)"] - 1 for p in _work_rows),
                        default=_work_start_m - 1)
-        for _grp_nm, _label_nm, _dd in (("시운전", "시운전/시설인계", _comm_d),
-                                        ("준공정리", "준공정리(현장정리·준공서류)", _wrap_d)):
+        for _sec_nm, _grp_nm, _label_nm, _dd in (("종합시운전", "시운전", "시운전/시설인계", _comm_d),
+                                                 ("가설공사", "준공정리", "준공정리(현장정리·준공서류)", _wrap_d)):
             if _dd > 0:
                 _mm = max(1, int(round(_dd / 30.4)))
-                _prefill.append({"구분": _grp_nm, "공종": _label_nm, "조수": 0,
+                _prefill.append({"분야": _sec_nm, "구분": _grp_nm, "공종": _label_nm, "조수": 0,
                                  "시작(개월차)": _end_all + 1, "기간(개월)": _mm, "작업일수": _dd})
                 _end_all += _mm
 
@@ -3761,14 +3812,17 @@ with tab5:
                 width="stretch",
                 num_rows="dynamic",
                 column_config={
-                    "구분": st.column_config.TextColumn(),
+                    "분야": st.column_config.TextColumn(help="공정표 왼쪽 첫 열(가설·토목·건축·종합시운전 등)"),
+                    "구분": st.column_config.TextColumn(help="왼쪽 둘째 열(대공종·동 이름)"),
                     "공종": st.column_config.TextColumn(required=True),
                     "조수": st.column_config.NumberColumn(min_value=0, step=1),
                     "시작(개월차)": st.column_config.NumberColumn(min_value=1, step=1, required=True),
                     "기간(개월)": st.column_config.NumberColumn(min_value=1, step=1, required=True),
                     "작업일수": st.column_config.NumberColumn(),
                 },
-                key="schedule_editor",
+                # 자동 제안이 바뀌면(분야 추가·공기 변경) 예전 편집 내용이 엉뚱한 행에 붙지 않게 새로 시작
+                key="schedule_editor_" + str(zlib.crc32(repr([
+                    (p["분야"], p["공종"], p["시작(개월차)"], p["기간(개월)"]) for p in _prefill]).encode())),
             )
 
             _proj_name = st.text_input("공사명", value="상하수도 공사", key="sched_project_name")
@@ -3781,135 +3835,46 @@ with tab5:
             # ── 3) 화면 미리보기 (plotly 간트) ──
             try:
                 import plotly.express as _px
-                _gantt = []
+                def _cell_txt(v):
+                    return "" if v is None or (isinstance(v, float) and _math.isnan(v)) else str(v)
+
+                _gantt, _seen_y = [], {}
                 for _, _row in _edited.iterrows():
                     _sy, _sm2 = _add_months(_start_d, int(_row["시작(개월차)"]) - 1)
                     _ey, _em2 = _add_months(_start_d, int(_row["시작(개월차)"]) - 1 + int(_row["기간(개월)"]))
-                    _gantt.append({"공종": _row["공종"], "시작": _date(_sy, _sm2, 1), "종료": _date(_ey, _em2, 1)})
+                    # 건축은 동마다 같은 공종명이 반복되므로 '동 · 공종'으로 줄 이름을 구분한다
+                    _g, _n = _cell_txt(_row.get("구분")), _cell_txt(_row["공종"])
+                    _yl = _n if (not _g or _n.startswith(_g)) else f"{_g} · {_n}"
+                    _k = _seen_y.get(_yl, 0)
+                    _seen_y[_yl] = _k + 1
+                    if _k:
+                        _yl = f"{_yl} ({_k + 1})"
+                    _gantt.append({"공종": _yl, "분야": _cell_txt(_row.get("분야")) or "토목공사",
+                                   "시작": _date(_sy, _sm2, 1), "종료": _date(_ey, _em2, 1)})
                 _gdf = _pd.DataFrame(_gantt)
-                _fig = _px.timeline(_gdf, x_start="시작", x_end="종료", y="공종", color="공종")
+                _fig = _px.timeline(_gdf, x_start="시작", x_end="종료", y="공종", color="분야")
                 _fig.update_yaxes(autorange="reversed")
-                _fig.update_layout(showlegend=False, height=90 + 40 * len(_gdf), margin=dict(l=10, r=10, t=10, b=10))
+                _fig.update_layout(showlegend=True, legend_title_text="", height=110 + 32 * len(_gdf),
+                                   margin=dict(l=10, r=10, t=10, b=10))
                 st.plotly_chart(_fig, width="stretch")
             except Exception as _e:
                 st.caption(f"미리보기 생략: {_e}")
 
-            # ── 4) 엑셀 예정공정표 생성 (업로드 양식과 동일 구조: 월당 2열, 연/월 2단 헤더) ──
+            # ── 4) 엑셀 예정공정표 생성 — 발주처 제출용 공사예정표 샘플 양식(schedule_excel.py) ──
             if st.button("📥 예정공정표 엑셀 생성", type="primary", width="stretch"):
                 try:
-                    from openpyxl import Workbook
-                    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-                    from openpyxl.utils import get_column_letter
-                    from io import BytesIO
-
-                    wb_s = Workbook()
-                    ws_s = wb_s.active
-                    ws_s.title = "예정공정표"
-
-                    _thin = Side(style="thin", color="999999")
-                    _border = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
-                    _bar_fill = PatternFill("solid", fgColor="4F81BD")
-                    _hdr_fill = PatternFill("solid", fgColor="DCE6F1")
-
-                    COL0 = 3          # 공종명 열 (C) — B열은 구분(대공종) 표기용
-                    MONTH_W = 2       # 월당 열 수 (양식과 동일)
-                    FIRST_MC = 4      # 첫 월 시작 열 (D)
-
-                    # 제목
-                    ws_s.cell(row=1, column=1, value=f"{_proj_name} 예정공정표").font = Font(size=14, bold=True)
-
-                    # 연/월 2단 헤더
-                    _ycells = {}
-                    for m in range(_max_month):
-                        _y, _mm = _add_months(_start_d, m)
-                        c = FIRST_MC + m * MONTH_W
-                        ws_s.merge_cells(start_row=3, start_column=c, end_row=3, end_column=c + MONTH_W - 1)
-                        mc = ws_s.cell(row=3, column=c, value=_mm)
-                        mc.alignment = Alignment(horizontal="center")
-                        mc.fill = _hdr_fill
-                        mc.border = _border
-                        _ycells.setdefault(_y, []).append(c)
-                    for _y, _cols in _ycells.items():
-                        c1, c2 = min(_cols), max(_cols) + MONTH_W - 1
-                        ws_s.merge_cells(start_row=2, start_column=c1, end_row=2, end_column=c2)
-                        yc = ws_s.cell(row=2, column=c1, value=f"{_y}년")
-                        yc.alignment = Alignment(horizontal="center")
-                        yc.font = Font(bold=True)
-                        yc.fill = _hdr_fill
-                        yc.border = _border
-
-                    ws_s.merge_cells(start_row=2, start_column=COL0, end_row=3, end_column=COL0)
-                    hc = ws_s.cell(row=2, column=COL0, value="공종")
-                    hc.alignment = Alignment(horizontal="center", vertical="center")
-                    hc.font = Font(bold=True)
-                    hc.fill = _hdr_fill
-                    hc.border = _border
-
-                    # 공정 막대 (공종당 2행: 막대행 + 여백행 — 실제 예정공정표 양식과 유사)
-                    # 막대 안에는 샘플처럼 "공종명_N조"와 작업일수를 함께 표기한다.
-                    _prep_fill = PatternFill("solid", fgColor="9BBB59")  # 공사준비 행 구분색
-                    _r = 4
-                    _last_group = None
-                    for _, _row in _edited.iterrows():
-                        _nm = str(_row["공종"])
-                        _grp = str(_row.get("구분", "") or "")
-                        _crew_v = int(_row.get("조수", 0) or 0)
-                        _wd_v = int(_row.get("작업일수", 0) or 0)
-                        _sm = int(_row["시작(개월차)"])
-                        _dm = int(_row["기간(개월)"])
-
-                        # 구분(대공종)이 바뀌면 좌측에 구분명을 한 번 표기
-                        _left = _nm if _grp in ("", _nm) else f"  {_nm}"
-                        if _grp and _grp != _last_group:
-                            ws_s.cell(row=_r, column=COL0 - 1, value=_grp).font = Font(bold=True, size=9)
-                            _last_group = _grp
-
-                        nc = ws_s.cell(row=_r, column=COL0, value=_left)
-                        nc.alignment = Alignment(vertical="center")
-                        nc.border = _border
-
-                        _bar_txt = _nm if _crew_v <= 0 else f"{_nm}_{_crew_v}조"
-                        if _wd_v > 0:
-                            _bar_txt += f"  {_wd_v}일"
-
-                        c1 = FIRST_MC + (_sm - 1) * MONTH_W
-                        c2 = FIRST_MC + (_sm - 1 + _dm) * MONTH_W - 1
-                        ws_s.merge_cells(start_row=_r, start_column=c1, end_row=_r, end_column=c2)
-                        bar = ws_s.cell(row=_r, column=c1, value=_bar_txt)
-                        bar.fill = _prep_fill if _grp in _NON_WORK_GROUPS else _bar_fill
-                        bar.font = Font(color="FFFFFF", size=9)
-                        bar.alignment = Alignment(horizontal="center", vertical="center")
-                        for cc in range(c1, c2 + 1):
-                            ws_s.cell(row=_r, column=cc).border = _border
-                        _r += 2
-
-                    # 격자(빈 월칸 테두리) + 열폭
-                    for rr in range(4, _r):
-                        for m in range(_max_month):
-                            for k in range(MONTH_W):
-                                cell = ws_s.cell(row=rr, column=FIRST_MC + m * MONTH_W + k)
-                                if cell.border is None or cell.border.left is None or cell.border.left.style is None:
-                                    cell.border = _border
+                    import schedule_excel as _sx
                     # 조수는 앱이 판단한 값이 아니라 가정값임을 산출물에 남긴다
-                    _note_r = _r + 1
-                    ws_s.cell(row=_note_r, column=COL0 - 1,
-                              value="※ 막대의 'N조'는 현장 경험에 따른 투입조수 가정값이며, 작업일수는 "
-                                    "이 가정으로 계산했습니다.").font = Font(size=9, italic=True)
+                    _notes = ["※ 막대의 'N조'는 현장 경험에 따른 투입조수 가정값이며, 작업일수는 "
+                              "이 가정으로 계산했습니다."]
                     _dsum = st.session_state.get("disc_crew_summary")
                     if _dsum:
-                        ws_s.cell(row=_note_r + 1, column=COL0 - 1,
-                                  value=f"※ 타분야 투입조수 가정: {_dsum}").font = Font(size=9, italic=True)
-                    ws_s.column_dimensions[get_column_letter(COL0 - 1)].width = 14
-                    ws_s.column_dimensions[get_column_letter(COL0)].width = 26
-                    for m in range(_max_month * MONTH_W):
-                        ws_s.column_dimensions[get_column_letter(FIRST_MC + m)].width = 3.2
-
-                    _buf = BytesIO()
-                    wb_s.save(_buf)
-                    _buf.seek(0)
+                        _notes.append(f"※ 타분야 투입조수 가정: {_dsum}")
+                    _xbytes = _sx.build_schedule_xlsx(_edited.to_dict("records"), _start_d,
+                                                      f"{_proj_name} 예정공정표", notes=_notes)
                     st.download_button(
                         label="📥 예정공정표 다운로드",
-                        data=_buf,
+                        data=BytesIO(_xbytes),
                         file_name=f"예정공정표_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         width="stretch",
@@ -3965,7 +3930,7 @@ with tab6:
         with col_c:
             if st.button("🗑️ 모든 저장 초기화", width="stretch"):
                 st.session_state["manual_rates"] = {}
-                st.rerun()
+                rerun_after_render()
         
         st.markdown("---")
 
@@ -4367,10 +4332,10 @@ with tab7:
                 _b1, _b2 = st.columns(2)
                 if _b1.button(f"목표를 {_lo}개월(빠른 쪽)로", width="stretch", key="tm_lo"):
                     st.session_state["proj_target_months_apply"] = float(_lo)
-                    st.rerun()
+                    rerun_after_render()
                 if _b2.button(f"목표를 {_hi}개월(여유 쪽)로", width="stretch", key="tm_hi"):
                     st.session_state["proj_target_months_apply"] = float(_hi)
-                    st.rerun()
+                    rerun_after_render()
 
         # 목표 공기에 맞춰 계산한 분야별 목표 일수(아래 '공정 연결'의 버튼이 넣어 준다)
         _pend_tgt = st.session_state.pop("disc_target_pending", None) or {}
@@ -4480,7 +4445,7 @@ with tab7:
                     _res = dp.discipline_days(_items, _mode_now, crew_by_unit=_cbu, caps=_caps)
                     _applied = sum(_cbu.values())
                     _disc_res[_dc] = {"total": _res["total"], "res": _res, "n": len(_items),
-                                      "use": bool(_use), "crews": _applied}
+                                      "use": bool(_use), "crews": _applied, "mode": _mode_now}
                     _work = [i for i in _items if i["days1"] > 0]
                     st.metric(f"{_dc} 작업일수" + ("" if _use else " (공기 미반영)"),
                               f"{_res['total']}일",
@@ -4539,6 +4504,22 @@ with tab7:
         # 토목 이후 구간은 병행 갈래 중 가장 긴 쪽이 지배한다.
         _after_civil = max(_arch_stage, _land, _mech, _elec_pred + _elec)
         _total = _civil_days + _after_civil
+
+        # 예정공정표 탭이 분야 막대를 그릴 수 있게 반영 분야의 동·공종별 일수와 착수 시점을 남긴다.
+        # 착수 시점은 토목 완료 후 경과 순작업일수(전기는 선행 분야 완료 후). 예정공정표 탭이 이 탭보다
+        # 먼저 실행되므로 다음 실행부터 반영된다(위젯을 건드리면 곧바로 다시 실행된다).
+        _sched_start = {"건축": 0, "건축기계설비": 0, "기계": 0, "조경": 0, "전기": int(_elec_pred)}
+        st.session_state["project_sched"] = {
+            "civil_days": _civil_days,
+            "disciplines": [
+                {"name": _d, "mode": _r.get("mode", "unit_parallel"),
+                 "start": _sched_start.get(_d, 0), "total": int(_r["total"]),
+                 "packages": [{"unit": _p["unit_name"], "group": _p["group"], "days": int(_p["days"]),
+                               "crews": int(_p["crews"])}
+                              for _p in _r["res"]["packages"] if _p["days"] > 0]}
+                for _d, _r in _disc_res.items() if _r.get("use", True) and _r.get("total", 0) > 0
+            ],
+        }
 
         # 토목 이후 병행 구간(건축·건축기계·기계·조경)은 조가 동시에 들어간다 — 인력 총량 점검
         _par_crews = sum(int((_disc_res.get(_d) or {}).get("crews", 0))
@@ -4663,3 +4644,10 @@ with tab7:
                 # 대기값으로 넘기고 다시 실행하면 비작업일수 탭이 위젯 생성 전에 반영한다.
                 st.session_state["project_work_days_apply"] = int(_total)
                 st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════
+# 미뤄 둔 재실행 — 모든 탭의 위젯을 한 번 그린 뒤에 다시 실행한다(rerun_after_render 참고)
+# ══════════════════════════════════════════════════════════════
+if st.session_state.pop("_rerun_after_render", False):
+    st.rerun()

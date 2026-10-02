@@ -8,6 +8,7 @@
 """
 import os
 import unittest
+import zipfile
 
 import openpyxl
 
@@ -60,7 +61,14 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.at = app_test(civil=GWANGJU["토목"], discs={"건축": GWANGJU["건축"]})
+        widget(cls.at, "number_input", "disc_tc_건축").set_value(8).run()
         button(cls.at, "📊 비작업일수 계산").click().run()
+
+    def test_project_settings_survive_weather_calc(self):
+        # '비작업일수 계산'이 탭 중간에서 바로 재실행하면 사업 전체 탭 위젯이 그려지지 않아
+        # Streamlit이 그 상태(조수·업로드)를 지웠다 → 재실행을 실행 끝으로 미뤄 고쳤다
+        self.assertEqual(self.at.session_state["disc_tc_건축"], 8)
+        self.assertEqual(metric(self.at, "건축 작업일수"), "402일")
 
     def test_unreachable_target_is_flagged(self):
         at = self.at
@@ -84,6 +92,13 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
         notes = [c.value for row in ws.iter_rows() for c in row
                  if isinstance(c.value, str) and c.value.startswith("※")]
         self.assertTrue(any("가정값" in n for n in notes), notes)
+        # 사업 전체 공기 탭의 건축이 동 단위로 공정표에 들어간다
+        col_a = [ws.cell(r, 1).value for r in range(5, ws.max_row + 1)]
+        col_b = [ws.cell(r, 2).value for r in range(5, ws.max_row + 1)]
+        self.assertIn("건축공사", col_a)
+        self.assertIn("활성탄흡착지", col_b)
+        with zipfile.ZipFile(files[0]) as z:
+            self.assertIn("xl/drawings/drawing1.xml", z.namelist())
 
 
 if __name__ == "__main__":

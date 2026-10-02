@@ -164,6 +164,7 @@ PIPE_TYPE_MAP = {
     "원심력철근콘크리트": RCPIPE_SOCKET,
     "RC관": RCPIPE_SOCKET,
     "흄관": RCPIPE_SOCKET,
+    "콘크리트관": RCPIPE_SOCKET,
     "고강성PVC": PVC_DOUBLEWWALL,
     "이중벽관": PVC_DOUBLEWWALL,
     "PE다중벽": PVC_DOUBLEWWALL,
@@ -254,6 +255,78 @@ def get_excavation_labor_detail(spec_str: str) -> dict:
         "단위": "인/m3"
     }
 
+
+
+# ══════════════════════════════════════════════════════════════
+# 5. 작업조(1조) 기준 일당 시공량 — 앱의 '투입조수 1'에 해당하는 값
+# ══════════════════════════════════════════════════════════════
+# 원칙: 품셈이 작업조와 일당 시공량을 주면 그 1개 작업조가 1조다(품셈 1-2-8, 3-1-2).
+#       직종별 인수(본당)만 주는 표는 1조 = 직종별 1인이고, 가장 많이 드는 직종(병목)이
+#       하루 시공량을 정한다. 인수를 더해 나누면 '1인이 모든 직종 일을 하는' 셈이 된다.
+
+# 3-2-1 굴착(인력/토사)('25년 보완) — 작업조: 특별인부 1인, 일당 시공량(㎥)
+# 깊이 1m 이하 인력 터파기·흙깎기 기준. 용수가 있으면 시공량을 33% 범위에서 감한다(미적용).
+MANUAL_EXCAVATION_DAILY = {
+    "보통토사": 3.6,
+    "경질토사": 2.7,
+    "고사점토 및 자갈섞인 토사": 2.2,
+    "호박돌 섞인 토사": 1.2,
+}
+
+# 일당 시공량 표에서 '작업조 인원 / 일당 시공량'으로 바꿔 둔 관종(보통인부는 모두 1인).
+# 나머지(내충격PVC·GRP·파형강관)는 품셈이 본당 인수로 준다.
+_PIPE_CREW_TABLES = (DUCTILE_IRON_TYTON, RCPIPE_SOCKET, PVC_DOUBLEWWALL)
+
+
+def manual_excavation_daily(spec_str: str):
+    """인력 터파기 1조(특별인부 1인)의 일당 시공량(㎥)과 토질 구분."""
+    s = spec_str or ""
+    if "호박돌" in s:
+        soil = "호박돌 섞인 토사"
+    elif "자갈" in s or "고사점토" in s:
+        soil = "고사점토 및 자갈섞인 토사"
+    elif "경질" in s:
+        soil = "경질토사"
+    else:
+        soil = "보통토사"
+    return MANUAL_EXCAVATION_DAILY[soil], soil
+
+
+def machine_excavation_daily(spec_str: str):
+    """기계 터파기 1조(굴착기 1대)의 일당 시공량(㎥)과 토질·작업유형 — 3-2-4('25년 신설)."""
+    d = get_excavation_labor_detail(spec_str or "")
+    prod = EXCAVATION_DAILY_PROD.get(d["토질"], {}).get(d["작업유형"])
+    if not prod:
+        return None, d["토질"]
+    corr = 1.0
+    for c in d["보정조건"]:
+        corr *= EXCAVATION_CORRECTION.get(c, 1.0)
+    return round(prod * corr, 2), f"{d['토질']} {d['작업유형']}"
+
+
+def pipe_crew_daily(pipe_name: str, diameter_mm: int, condition: str = "A"):
+    """관 부설 1조의 일당 시공량(본)과 작업조 구성. 관종을 모르면 None.
+
+    반환: (본/조·일, {직종: 인원}, 적용 관경)
+    """
+    pipe_dict = None
+    for key, d in PIPE_TYPE_MAP.items():
+        if key in (pipe_name or ""):
+            pipe_dict = d
+            break
+    if pipe_dict is None:
+        return None
+    closest = min(pipe_dict, key=lambda x: abs(x - diameter_mm))
+    rates = pipe_dict[closest]
+    factor = PIPE_INSTALL_CONDITION.get(condition, PIPE_INSTALL_CONDITION["A"])["품요율"]
+    if pipe_dict in _PIPE_CREW_TABLES:
+        # 품셈 작업조(배관공 n + 보통인부 1)의 일당 시공량을 되살린다
+        daily = 1.0 / rates["보통인부"]
+        crew = {t: max(1, round(v * daily)) for t, v in rates.items()}
+    else:
+        daily = 1.0 / max(rates.values())
+        crew = {t: 1 for t in rates}
+    return round(daily / factor, 2), crew, closest
 
 if __name__ == "__main__":
     print("=== 터파기 품셈 테스트 ===")

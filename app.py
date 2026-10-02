@@ -26,6 +26,12 @@ except Exception:
     HAS_DISCIPLINE = False
 
 try:
+    import labor_rates_2025 as lr     # 표준품셈 터파기·관부설(작업조 기준 일당 시공량)
+    HAS_LABOR_RATES = True
+except Exception:
+    HAS_LABOR_RATES = False
+
+try:
     from daily_work_rates import DAILY_WORK, WORK_KEY_MAP
     HAS_DAILY_WORK = True
 except Exception:
@@ -182,36 +188,6 @@ GUIDELINE_APPENDIX = {
     "보조기층": {"daily": 500, "unit": "㎡/일"},
     "모래기초": {"daily": 400, "unit": "㎥/일"},
 }
-
-# ══════════════════════════════════════════════════════════════
-# 표준품셈 노무량
-# ══════════════════════════════════════════════════════════════
-def get_excavation_labor(spec_str):
-    labor_table = {
-        0.4: {"인/m3": 0.130},
-        0.7: {"인/m3": 0.085},
-        1.0: {"인/m3": 0.070},
-    }
-    if "0.4" in spec_str or "B.H0.4" in spec_str or "B/H 0.4" in spec_str:
-        return labor_table[0.4]
-    elif "0.7" in spec_str or "B.H0.7" in spec_str or "B/H 0.7" in spec_str:
-        return labor_table[0.7]
-    elif "1.0" in spec_str or "B.H1.0" in spec_str or "B/H 1.0" in spec_str:
-        return labor_table[1.0]
-    return {"인/m3": 0.085}
-
-def get_pipe_labor(diameter):
-    pipe_labor = {
-        200: {"합계": 0.396},
-        300: {"합계": 0.494},
-        450: {"합계": 0.653},
-        600: {"합계": 0.792},
-        800: {"합계": 0.990},
-        1000: {"합계": 1.188},
-        1200: {"합계": 1.386},
-    }
-    closest = min(pipe_labor.keys(), key=lambda x: abs(x - diameter))
-    return pipe_labor.get(closest, {"합계": 0.5})
 
 def is_machine_based(name):
     return any(kw in name for kw in MACHINE_BASED)
@@ -957,31 +933,42 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
     except Exception:
         pass
 
-    # 2순위: 표준품셈
+    # 2순위: 표준품셈 터파기·관부설 — 품셈 작업조(1조) 기준
+    # 품셈이 작업조와 일당 시공량을 주면 그 1개 작업조가 앱의 1조다(1.44순위와 같은 원칙).
+    # 직종별 인수만 있는 본당 표(유리섬유복합관·파형강관 등)는 1조 = 직종별 1인, 병목 직종 기준.
+    # 이전에는 출처를 알 수 없는 직종 합계표를 '÷ (8 × 조수)'로 써서 인력 터파기를 하루 94㎥로
+    # 잡았다(품셈 3-2-1 특별인부 1인 3.6㎥의 26배). 또 '굴착'·'흄관' 글자만 보고 H파일 근입,
+    # 흄관접속관·보강거푸집에도 붙었다 → 관련 없는 작업은 빼고 단위가 맞을 때만 쓴다.
     try:
-        manday = 0
-        if any(kw in name for kw in ["터파기","굴착","줄파기"]) and "운반" not in name:
-            info = get_excavation_labor(spec)
-            rate = info.get("인/m3")
-            if rate:
-                manday = rate * qty
+        if HAS_LABOR_RATES:
+            _nm2, _sp2 = name or "", spec or ""
+            _skip2 = any(k in _nm2 for k in (
+                "운반", "철거", "하차", "상차", "제거", "절단", "파일", "천공", "근입", "항타",
+                "말뚝", "추진", "접속", "보강", "거푸집", "이음", "곡관"))
+            if not _skip2 and any(kw in _nm2 for kw in ("터파기", "굴착", "줄파기")):
+                if "인력" in f"{_nm2} {_sp2}" or "줄파기" in _nm2:
+                    _dv, _soil = lr.manual_excavation_daily(_sp2)
+                    _crew_lbl = "특별인부 1인/조"
+                else:
+                    _dv, _soil = lr.machine_excavation_daily(_sp2)
+                    _crew_lbl = "굴착기 1대/조"
+                if _dv and _unit_ok("㎥", item_unit):
+                    days = math.ceil(qty / (_dv * crews))
+                    return days, f"{_dv:g}㎥", f"표준품셈 조기준({_crew_lbl})"
 
-        pipe_kws = ["관 부설","관부설","이중벽관","주철관","흄관","콘크리트관",
-                    "GRP관","유리섬유복합관","파형강관","PE다중벽","고강성PVC","강관부설"]
-        if any(kw in name for kw in pipe_kws) and not manday:
-            dia = extract_diameter(spec)
-            if dia:
-                info = get_pipe_labor(dia)
-                rate = info.get("합계")
-                if rate:
-                    manday = rate * qty
-
-        if manday > 0:
-            days = math.ceil(manday / (8 * crews))
-            return days, f"{round(manday/qty,3)}인/단위", "표준품셈"  # 조수 제거
+            pipe_kws = ["관 부설", "관부설", "이중벽관", "주철관", "흄관", "콘크리트관",
+                        "GRP관", "유리섬유복합관", "파형강관", "PE다중벽", "고강성PVC"]
+            if not _skip2 and any(kw in _nm2 for kw in pipe_kws):
+                dia = extract_diameter(_sp2)
+                if dia and _unit_ok("본", item_unit):
+                    _r = lr.pipe_crew_daily(_nm2, dia)
+                    if _r:
+                        _dv, _crew, _ = _r
+                        days = math.ceil(qty / (_dv * crews))
+                        return days, f"{_dv:g}본", f"표준품셈 조기준({sum(_crew.values())}인/조)"
     except Exception:
         pass
-    
+
     # 3순위: 단가산출근거
     try:
         if "dangagun_cache" in st.session_state:

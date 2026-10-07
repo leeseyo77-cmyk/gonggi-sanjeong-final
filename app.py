@@ -384,6 +384,10 @@ def report_data(title: str, prep_label: str):
             if v:
                 conds.append((CONDITION_LABELS.get(c, c), [round(float(x), 2) for x in v]))
     years = sorted({int(r["월"][:4]) for r in rows})
+    # 보고서 비작업일수 표의 혹서기·동절기·강우·바람 열 — 계산 때 쓴 월별 조건 값
+    _cond_m = {m["월"]: {k: v for k, v in m.items() if k not in ("월", "일수", "합계")}
+               for m in ((st.session_state.get("weather_detail") or {}).get("monthly") or [])}
+    rows = [dict(r, cond=_cond_m.get(r["월"], {})) for r in rows]
     data = {
         "title": title,
         "start_date": (wr.get("start_date").strftime("%Y-%m-%d") if wr.get("start_date") else ""),
@@ -395,6 +399,8 @@ def report_data(title: str, prep_label: str):
         "holiday_years": {y: [get_legal_holidays(y, m) for m in range(1, 13)] for y in years},
         "periods": {"prep": int(wr.get("prep_days", 0) or 0), "wrapup": int(wr.get("wrapup_days", 0) or 0),
                     "commission": int(wr.get("commission_days", 0) or 0), "prep_label": prep_label},
+        "summary": {"work": int(wr.get("work_days", 0) or 0), "non_work": int(round(float(wr.get("non_work_days", 0) or 0))),
+                    "total": int(wr.get("total_days", 0) or 0)},
     }
     return data, warns, unmatched
 
@@ -4808,8 +4814,9 @@ with tab8:
             with _c2:
                 _prep_opts = [n for n, _ in _rx.PREP_GUIDE]
                 _pd8 = int(_wr8.get("prep_days", 0) or 0)
-                _def = next((i for i, (n, v) in enumerate(_rx.PREP_GUIDE) if n == "상수도공사" and v == _pd8),
-                            next((i for i, (n, v) in enumerate(_rx.PREP_GUIDE) if v == _pd8), 0))
+                # 상하수도 사업이라 '상수도공사'(60일)를 기본으로 둔다 — 준비기간 설정은 개월 단위라
+                # 61일처럼 표 값과 딱 맞지 않아 값으로 고르면 엉뚱한 공종이 골라졌다
+                _def = next(i for i, (n, _v) in enumerate(_rx.PREP_GUIDE) if n == "상수도공사")
                 _prep_lbl8 = st.selectbox("준비기간 적용 공종(가이드라인 표)", _prep_opts, index=_def,
                                           key="report_prep_label")
             _data8, _warns8, _unm8 = report_data(_title8, _prep_lbl8)
@@ -4831,6 +4838,18 @@ with tab8:
                     width="stretch", key="dl_appendix",
                 )
                 st.success("✅ 부록 엑셀을 만들었습니다. 엑셀에서 열면 수식이 계산됩니다.")
+            st.markdown("---")
+            st.caption("보고서는 한글(hwpx)로 만듭니다. 산정 근거·주석은 고시 문구를 쓰고, 공사기간·비작업일수·"
+                       "분야별 작업일수 표는 위 부록과 같은 값으로 채웁니다. 유사사업 비교표는 직접 작성하세요.")
+            if st.button("📄 보고서(hwpx) 생성", type="primary", width="stretch", key="make_report_hwpx"):
+                import report_hwpx as _rh
+                _hb = _rh.build_report_hwpx(_data8)
+                st.download_button(
+                    "📄 공사기간 산정 검토 보고서 다운로드", data=BytesIO(_hb),
+                    file_name=f"공사기간 산정 검토 보고서_{(_title8 or '사업').strip()}_{datetime.now().strftime('%Y%m%d')}.hwpx",
+                    mime="application/hwp+zip", width="stretch", key="dl_report_hwpx",
+                )
+                st.success("✅ 보고서를 만들었습니다. 한글에서 열어 유사사업 비교표 등을 마저 작성하세요.")
         except Exception as _e8:
             st.error(f"부록 생성 준비 중 오류: {_e8}")
             import traceback as _tb8

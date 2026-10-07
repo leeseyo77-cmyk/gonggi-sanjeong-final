@@ -86,6 +86,19 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
                                              "부록2. 작업일수 산정근거(건축)"])
         self.assertIn("별표1. 비작업일수 산정", wb.sheetnames)
 
+    def test_report_hwpx_generated(self):
+        at = self.at
+        for f in OUT.glob("공사기간 산정 검토 보고서_*.hwpx"):
+            f.unlink()
+        button(at, "📄 보고서(hwpx) 생성").click().run()
+        self.assertEqual(exceptions(at), [])
+        files = list(OUT.glob("공사기간 산정 검토 보고서_*.hwpx"))
+        self.assertEqual(len(files), 1)
+        with zipfile.ZipFile(files[0]) as z:
+            sec = z.read("Contents/section0.xml").decode("utf-8")
+        self.assertNotIn("{{", sec)
+        self.assertIn("토목공사 작업일수(대공종 중 최장)", sec)
+
     def test_unreachable_target_is_flagged(self):
         at = self.at
         widget(at, "number_input", "target_months_input").set_value(24.0).run()

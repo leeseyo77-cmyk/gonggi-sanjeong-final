@@ -234,3 +234,50 @@ def get_holiday_breakdown_monthly(start_date, end_date):
             cur = datetime(cur.year, cur.month + 1, 1)
     
     return result
+
+# ══════════════════════════════════════════════════════════════
+# 월별 비작업일수 — 공공 건설공사의 공사기간 산정기준 제8조 방식
+# ══════════════════════════════════════════════════════════════
+# 중복일수와 주 40시간 근무제 보정은 '해당 월' 기준이다(고시 제8조, 보고서 주석 7~9).
+#   C(중복) = A(기상) × B(법정공휴일) ÷ 일수 (소수점 첫째자리에서 반올림)
+#   비작업  = A + B − C (반올림)
+#   적용    = 비작업이 주 40시간 근무제(주 2일 휴무)에 따른 월 8일보다 작으면 8일
+# 예전에는 기간 전체 합계로 한 번에 계산하고 최소 휴무를 '주당 1일'(월 약 4일)로 봐서
+# 고시와 달랐다. 부록 엑셀은 월별 표를 수식으로 합산하므로 앱 합계도 같은 방식이어야 한다.
+
+MIN_MONTHLY_REST = 8   # 주 40시간 근무제에 따른 월 최소 비작업일수(고시 제8조 ②)
+
+
+def round_half_up(x):
+    """고시의 '반올림'(사사오입) = 엑셀 ROUND. 파이썬 round는 짝수 반올림이라 2.5→2가 된다."""
+    import math
+    return int(math.floor(x + 0.5)) if x >= 0 else -int(math.floor(-x + 0.5))
+
+
+def monthly_non_work(weather_monthly, include_holidays=True, min_weekly_rest=True):
+    """월별 비작업일수 표와 합계.
+
+    Args:
+        weather_monthly: [{"월": "YYYY-MM", "일수": 대상일수, "합계": 기상 비작업일수 A}, ...]
+            첫·마지막 달처럼 일부만 걸친 달은 '일수'가 그 달 달력일수보다 작다(A는 이미 안분된 값).
+    Returns:
+        dict: total(적용 합계), weather(ΣA), holidays(ΣB), overlap(ΣC), rows(월별), formula
+    """
+    rows = []
+    for w in weather_monthly or []:
+        y, mo = map(int, str(w["월"]).split("-"))
+        cal = monthrange(y, mo)[1]
+        days = int(w.get("일수", cal) or cal)
+        a = round(float(w.get("합계", 0) or 0), 2)
+        b = round_half_up(get_legal_holidays(y, mo) * days / cal) if include_holidays else 0
+        c = round_half_up(a * b / days) if days else 0
+        nw = round_half_up(a + b - c)
+        mn = round_half_up(MIN_MONTHLY_REST * days / cal) if min_weekly_rest else 0
+        rows.append({"월": f"{y}-{mo:02d}", "대상일수": days, "달력일수": cal,
+                     "A": a, "B": b, "C": c, "비작업": nw, "최소": mn, "적용": max(nw, mn)})
+    total = sum(r["적용"] for r in rows)
+    sa = round(sum(r["A"] for r in rows), 1)
+    sb = sum(r["B"] for r in rows)
+    sc = sum(r["C"] for r in rows)
+    return {"total": total, "weather": sa, "holidays": sb, "overlap": sc, "rows": rows,
+            "formula": f"월별 Σ(A+B−C, 월 최소 {MIN_MONTHLY_REST}일) — A {sa} + B {sb} − C {sc} → {total}"}

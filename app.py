@@ -57,7 +57,7 @@ try:
     from holiday_data import (
         LEGAL_HOLIDAYS, get_legal_holidays, get_total_holidays,
         calc_overlap_days, get_total_non_work_days_with_holidays,
-        get_holiday_breakdown_monthly
+        get_holiday_breakdown_monthly, monthly_non_work, MIN_MONTHLY_REST
     )
     REGIONS = list(REGION_MAPPING.keys())
 except ImportError as e:
@@ -85,6 +85,9 @@ except ImportError as e:
         return {"total": 0, "weather": 0, "holidays": 0, "overlap": 0, "formula": ""}
     def get_holiday_breakdown_monthly(start_date, end_date):
         return []
+    MIN_MONTHLY_REST = 8
+    def monthly_non_work(weather_monthly, include_holidays=True, min_weekly_rest=True):
+        return {"total": 0, "weather": 0, "holidays": 0, "overlap": 0, "rows": [], "formula": ""}
 
 st.set_page_config(page_title="상하수도 공기산정", layout="wide", initial_sidebar_state="expanded")
 
@@ -1023,29 +1026,33 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
 # ══════════════════════════════════════════════════════════════
 # 목표 공기 기준 투입조수 추천
 # ══════════════════════════════════════════════════════════════
+def weather_monthly_for(station, conditions, region, ws, we, rain=True, cold=True, hot=True):
+    """[ws, we] 구간의 월별 기상 비작업일수 A — [{"월", "일수", "합계", (조건별)}].
+
+    가이드라인 지점이 있으면 부록3 월평균(부분 월은 일수 안분), 없으면 구버전 지역 자료.
+    조건이 비었으면 기본 조건으로 대체되지 않도록 없는 키를 넘긴다(비작업일수 탭과 동일).
+    """
+    if HAS_GUIDELINE_WEATHER and station and conditions is not None:
+        return get_weather_non_work_days(station, ws, we, conditions=conditions or ["__none__"])
+    from calendar import monthrange as _mr
+    rows = []
+    for m in get_monthly_breakdown(region, ws, we, check_rain=rain, check_cold=cold, check_hot=hot) or []:
+        _y, _mo = map(int, m["month"].split("-"))
+        tot = float(m.get("rain", 0) or 0) + float(m.get("cold", 0) or 0) + float(m.get("hot", 0) or 0)
+        rows.append({"월": m["month"], "일수": _mr(_y, _mo)[1], "합계": round(tot, 2),
+                     "강우": m.get("rain", 0), "한랭": m.get("cold", 0), "폭염": m.get("hot", 0)})
+    return {"total": round(sum(r["합계"] for r in rows), 1), "by_condition": {}, "monthly": rows}
+
+
 def _non_work_for_window(wr, ws, we):
-    """비작업일수 탭에서 계산한 조건(wr)과 같은 방식으로 [ws, we] 구간의 비작업일수(A+B−C)."""
+    """비작업일수 탭에서 계산한 조건(wr)과 같은 방식(고시 제8조 월별)으로 [ws, we] 구간의 비작업일수."""
     if we < ws:
         return 0.0
-    station = wr.get("station")
-    conds = wr.get("conditions")
-    if HAS_GUIDELINE_WEATHER and station and conds is not None:
-        # 조건이 비었으면 기본 조건으로 대체되지 않도록 없는 키를 넘긴다(비작업일수 탭과 동일)
-        weather = get_weather_non_work_days(station, ws, we, conditions=conds or ["__none__"])["total"]
-    else:
-        weather = get_total_non_work_days(
-            wr.get("region", "서울"), ws, we,
-            check_rain=wr.get("include_rain", True),
-            check_cold=wr.get("include_cold", True),
-            check_hot=wr.get("include_hot", True),
-        )
-    if isinstance(weather, dict):
-        weather = weather.get("total", 0)
-    res = get_total_non_work_days_with_holidays(
-        weather, ws, we,
-        include_holidays=wr.get("include_holidays", True),
-        min_weekly_rest=wr.get("min_weekly_rest", True),
-    )
+    _w = weather_monthly_for(wr.get("station"), wr.get("conditions"), wr.get("region", "서울"), ws, we,
+                             wr.get("include_rain", True), wr.get("include_cold", True),
+                             wr.get("include_hot", True))
+    res = monthly_non_work(_w["monthly"], include_holidays=wr.get("include_holidays", True),
+                           min_weekly_rest=wr.get("min_weekly_rest", True))
     return float(res["total"])
 
 
@@ -3094,7 +3101,7 @@ with tab4:
         min_weekly_rest = st.checkbox(
             "⚖️ 주 40시간 근무제 보장",
             value=True,
-            help="월별 비작업일수가 주 40시간 근무제 일수보다 작으면 보정"
+            help="월별 비작업일수가 주 40시간 근무제(주 2일 휴무)에 따른 월 8일보다 작으면 8일 적용(고시 제8조 ②)"
         )
 
     # ──────────────────────────────────
@@ -3220,39 +3227,20 @@ with tab4:
         
         # 반복 계산: 정확한 종료일 찾기
         for _ in range(5):
-            # 1. 기상조건 비작업일수 (A)
-            if HAS_GUIDELINE_WEATHER and selected_station:
-                # 조건을 하나도 고르지 않았으면 기상 비작업일수는 0이어야 한다.
-                # get_weather_non_work_days는 빈 목록을 받으면 기본 조건으로 대체하므로,
-                # 없는 키를 넘겨 '조건 없음'(월별 행은 유지, 값은 0)으로 계산시킨다.
-                _wres = get_weather_non_work_days(
-                    selected_station, work_start, rough_end_date,
-                    conditions=st.session_state.get("weather_conditions") or ["__none__"],
-                )
-                weather_days = _wres["total"]
-                st.session_state["weather_detail"] = _wres
-            else:
-                weather_days = get_total_non_work_days(
-                    selected_region,
-                    work_start,
-                    rough_end_date,
-                    check_rain=include_rain,
-                    check_cold=include_cold,
-                    check_hot=include_hot
-                )
-            
-            if isinstance(weather_days, dict):
-                weather_days = weather_days.get("total", 0)
-            
-            # 2. 가이드라인 공식 적용 (A + B - C)
-            result = get_total_non_work_days_with_holidays(
-                weather_days,
-                work_start,
-                rough_end_date,
-                include_holidays=include_holidays,
-                min_weekly_rest=min_weekly_rest
+            # 1. 월별 기상조건 비작업일수 (A) — 가이드라인 지점이 없으면 구버전 지역 자료
+            _use_guideline = bool(HAS_GUIDELINE_WEATHER and selected_station)
+            _wres = weather_monthly_for(
+                selected_station if _use_guideline else None,
+                list(st.session_state.get("weather_conditions") or []) if _use_guideline else None,
+                selected_region, work_start, rough_end_date, include_rain, include_cold, include_hot,
             )
-            
+            if _use_guideline:
+                st.session_state["weather_detail"] = _wres
+
+            # 2. 고시 제8조: 월별 A + B − C, 월 비작업일수가 8일 미만이면 8일(주 40시간 근무제)
+            result = monthly_non_work(_wres["monthly"], include_holidays=include_holidays,
+                                      min_weekly_rest=min_weekly_rest)
+
             non_work_days = result["total"]
             
             # 본공사 종료일 = 본공사 시작일 + 순작업일수 + 비작업일수
@@ -3288,6 +3276,8 @@ with tab4:
             "holiday_days": result["holidays"],
             "overlap_days": result["overlap"],
             "formula": result["formula"],
+            # 월별 표(부록·화면 표에 그대로 쓴다 — 합계가 non_work_days와 같다)
+            "monthly_rows": result["rows"],
             "include_rain": include_rain,
             "include_cold": include_cold,
             "include_hot": include_hot,
@@ -3406,37 +3396,30 @@ with tab4:
                         "🌧️ 강우": f"{rain:.1f}", "❄️ 한랭": f"{cold:.1f}", "🔥 폭염": f"{hot:.1f}",
                     }))
 
-            if _months:
+            _mrows = result.get("monthly_rows")
+            if _mrows:
                 st.markdown("### 📅 월별 비작업일수 상세")
                 st.caption(
-                    "📖 본공사 구간의 월별 기상조건(A) + 공휴일(B) − 중복일수(C). "
-                    "첫·마지막 달은 해당 일수만큼 안분했고, 월별 반올림 때문에 합계가 "
-                    "전체 공식 결과와 1~2일 다를 수 있습니다."
+                    "📖 고시 제8조 방식 — 월마다 기상(A) + 공휴일(B) − 중복(C)을 구하고, "
+                    f"주 40시간 근무제에 따라 월 {MIN_MONTHLY_REST}일보다 작으면 {MIN_MONTHLY_REST}일을 적용합니다. "
+                    "첫·마지막 달은 해당 일수만큼 안분했습니다. 적용 합계가 위 비작업일수와 같습니다."
                 )
-
+                _cond_by_month = {m["월"]: m for m in _monthly_w} if _guideline_mode else {}
                 monthly_data = []
-                for month_str, _days, cal_days, weather_total, _extra_cols in _months:
-                    _h_full = holiday_dict.get(month_str, 0) if result.get("include_holidays", False) else 0
-                    holidays = round(_h_full * _days / cal_days) if cal_days else 0  # B (부분 월 안분)
-                    # 중복일수 (C = A × B ÷ 대상일수)
-                    overlap = round(weather_total * holidays / _days) if _days > 0 else 0
-                    month_non_work = round(weather_total + holidays - overlap)
-                    # 주 40시간 근무제 보장
-                    min_rest = round(_days / 7)
-                    if result.get("min_weekly_rest", False) and month_non_work < min_rest:
-                        month_non_work = min_rest
+                for _r in _mrows:
+                    _extra = {k: v for k, v in _cond_by_month.get(_r["월"], {}).items()
+                              if k not in ("월", "일수", "합계")}
                     monthly_data.append({
-                        "월": month_str,
-                        **_extra_cols,
-                        "🌤️ 기상(A)": f"{weather_total:.1f}",
-                        "📅 공휴일(B)": f"{holidays}",
-                        "⚠️ 중복(C)": f"{overlap}",
-                        "📊 비작업": f"{month_non_work}",
-                        "📆 대상일수": f"{_days}",
+                        "월": _r["월"], "대상일수": _r["대상일수"], **_extra,
+                        "🌤️ 기상(A)": _r["A"], "📅 공휴일(B)": _r["B"], "⚠️ 중복(C)": _r["C"],
+                        "비작업(A+B−C)": _r["비작업"], f"최소(월{MIN_MONTHLY_REST}일)": _r["최소"],
+                        "📊 적용": _r["적용"],
                     })
-
                 df_monthly = pd.DataFrame(monthly_data)
                 st.dataframe(df_monthly, hide_index=True, width="stretch")
+                st.caption(f"적용 합계 {sum(r['적용'] for r in _mrows)}일")
+            elif _months:
+                st.info("이전 방식으로 계산된 결과입니다. '비작업일수 계산'을 다시 누르면 월별 표가 고시 방식으로 갱신됩니다.")
                 
                 # ──────────────────────────────────
                 # ──────────────────────────────────

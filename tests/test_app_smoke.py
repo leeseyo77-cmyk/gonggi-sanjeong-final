@@ -71,6 +71,21 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
         self.assertEqual(self.at.session_state["disc_tc_건축"], 8)
         self.assertEqual(metric(self.at, "건축 작업일수"), "402일")
 
+    def test_appendix_workbook_generated(self):
+        at = self.at
+        for f in OUT.glob("공사기간 산정 부록_*.xlsx"):
+            f.unlink()
+        button(at, "📥 부록 엑셀 생성").click().run()
+        self.assertEqual(exceptions(at), [])
+        # 부록이 다시 묶은 토목 작업일수가 앱 산정값과 같아야 한다(다르면 경고가 뜬다)
+        self.assertFalse(any("부록의 토목 작업일수" in w.value for w in at.warning))
+        files = list(OUT.glob("공사기간 산정 부록_*.xlsx"))
+        self.assertEqual(len(files), 1)
+        wb = openpyxl.load_workbook(files[0])
+        self.assertEqual(wb.sheetnames[:3], ["총괄", "부록1. 작업일수 산정근거(토목)",
+                                             "부록2. 작업일수 산정근거(건축)"])
+        self.assertIn("별표1. 비작업일수 산정", wb.sheetnames)
+
     def test_unreachable_target_is_flagged(self):
         at = self.at
         widget(at, "number_input", "target_months_input").set_value(24.0).run()

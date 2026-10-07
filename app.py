@@ -275,6 +275,130 @@ def labor_trace_text(tr) -> str:
             f"{tr.get('노임단가', 0):,}원 → {tr['식']} (1인 기준 — 직종 정보 없음)")
 
 
+def _rate_unit_from_label(label: str) -> str:
+    """'1,915㎡' · '5본/일' · '16.67본' → '㎡/일' · '본/일'."""
+    u = re.sub(r"^[\s\d,\.]+", "", str(label or "")).strip()
+    if not u:
+        return ""
+    return u if "/" in u else f"{u}/일"
+
+
+def civil_report_data():
+    """토목 부록 데이터: 주공정 대공종 → 라인 → 항목(정확한 1일 작업량·조수·출처·근거).
+
+    앱의 토목 공기와 같은 규칙으로 묶는다: 라인(구간·구조물) 안 항목은 합, 라인끼리는 최댓값,
+    대공종끼리는 최장이면 최댓값·합산이면 합. 병행·제외·준비기간 항목(0일)은 부록에서 뺀다.
+    반환: (데이터, 앱 토목 공기와 비교용 재계산 값)
+    """
+    work = st.session_state.get("work_result") or {}
+    rows = work.get("rows") or []
+    sel = set(st.session_state.get("selected_major") or [])
+    major = [r for r in rows if r.get("공종명_pure") in sel] or rows
+    combine_sum = st.session_state.get("combine_mode", "최장(병행)").startswith("합산")
+    trace_all = st.session_state.get("naeyeok_labor_trace") or {}
+    cats, unmatched, cat_days = [], [], []
+    for row in major:
+        nm = row.get("공종명_pure") or row.get("공종", "")
+        lines = {}
+        for it in row.get("세부항목", []):
+            d, label, method, daily, crew = calc_days_with_rate(
+                it["name"], it.get("spec", ""), it.get("qty", 0), row.get("crew", DEFAULT_CREW),
+                it.get("unit", ""))
+            if not d or not daily:
+                if method == "매칭 안 됨":
+                    unmatched.append(f"{nm} · {it['name']} {it.get('spec', '')}".strip())
+                continue
+            basis = ""
+            if str(method).startswith("노무비역산"):
+                basis = labor_trace_text(trace_all.get(labor_key_for(it["name"], it.get("spec", "")))
+                                         ).replace("🔎 ", "")
+            ln = it.get("_ukey") or it.get("district") or "(공통)"
+            lines.setdefault(ln, []).append({
+                "name": it["name"], "spec": it.get("spec", ""), "qty": float(it.get("qty", 0)),
+                "unit": it.get("unit", ""), "daily": float(daily), "rate_unit": _rate_unit_from_label(label),
+                "crew": int(crew), "days": int(d), "source": method, "basis": basis,
+            })
+        if not lines:
+            continue
+        cats.append({"name": nm, "lines": [{"name": k, "items": v} for k, v in lines.items()]})
+        cat_days.append(max(sum(i["days"] for i in v) for v in lines.values()))
+    total = (sum(cat_days) if combine_sum else max(cat_days, default=0))
+    return {"combine": "sum" if combine_sum else "max", "cats": cats,
+            "notes": ([f"※ 1일 작업량을 찾지 못한 항목 {len(unmatched)}개는 부록에서 뺐습니다"
+                       "(수동입력 관리 탭에서 입력하면 반영됩니다)."] if unmatched else [])}, total, unmatched
+
+
+def disc_report_data(disc_res: dict):
+    """분야 부록 데이터: 동(설비) → 공종(패키지, 병목 직종) → 항목(병목 직종 인수·작업량)."""
+    out = []
+    for dc, r in disc_res.items():
+        items = r.get("items") or []
+        units, order = {}, []
+        for pk in r["res"]["packages"]:
+            lead = pk["lead_trade"]
+            rows_i, omitted = [], 0
+            for it in items:
+                if it["unit_name"] != pk["unit_name"] or it["group"] != pk["group"] or it["days1"] <= 0:
+                    continue
+                qty = float(it.get("qty") or 0)
+                if it.get("trades"):
+                    rate = float(it["trades"].get(lead, 0) or 0)
+                elif lead == "노무비역산":
+                    rate = it["days1"] / qty if qty > 0 else float(it["days1"])
+                else:
+                    rate = 0.0
+                if rate <= 0:
+                    omitted += 1
+                    continue
+                rows_i.append({"name": it["name"], "spec": it.get("spec", ""), "unit": it.get("unit", ""),
+                               "qty": qty if qty > 0 else 1.0, "rate": rate,
+                               "note": "" if it.get("trades") else "노무비 역산(1인 기준)"})
+            if pk["unit_name"] not in units:
+                units[pk["unit_name"]] = []
+                order.append(pk["unit_name"])
+            units[pk["unit_name"]].append({"group": pk["group"], "lead": lead, "crew": int(pk["crews"]),
+                                           "days": int(pk["days"]), "items": rows_i, "omitted": omitted})
+        out.append({"name": dc, "use": bool(r.get("use", True)), "mode": r.get("mode", "unit_parallel"),
+                    "units": [{"name": u, "packages": units[u]} for u in order]})
+    return out
+
+
+def report_data(title: str, prep_label: str):
+    """부록 엑셀·보고서에 넘길 앱 산정 결과 전체. 반환: (데이터, 경고 목록)."""
+    warns = []
+    civil, civil_total, unmatched = civil_report_data()
+    if civil_total != int(st.session_state.get("total_work_days", 0) or 0):
+        warns.append(f"부록의 토목 작업일수({civil_total}일)가 앱 산정값"
+                     f"({st.session_state.get('total_work_days')}일)과 다릅니다.")
+    disc_res = st.session_state.get("project_disc_res") or {}
+    discs = disc_report_data(disc_res)
+    wr = st.session_state.get("weather_result") or {}
+    rows = wr.get("monthly_rows") or []
+    if not rows:
+        warns.append("비작업일수를 고시 방식으로 다시 계산해야 합니다('비작업일수 계산'을 누르세요).")
+    station = wr.get("station") or ""
+    conds = []
+    if HAS_GUIDELINE_WEATHER and station:
+        for c in (wr.get("conditions") or []):
+            v = WEATHER_NON_WORK.get(c, {}).get(station)
+            if v:
+                conds.append((CONDITION_LABELS.get(c, c), [round(float(x), 2) for x in v]))
+    years = sorted({int(r["월"][:4]) for r in rows})
+    data = {
+        "title": title,
+        "start_date": (wr.get("start_date").strftime("%Y-%m-%d") if wr.get("start_date") else ""),
+        "civil": civil,
+        "discs": discs,
+        "elec_after_arch": bool(st.session_state.get("elec_after_arch", True)),
+        "nonwork": {"rows": rows, "station": station, "conditions": conds,
+                    "min_rest": MIN_MONTHLY_REST if wr.get("min_weekly_rest", True) else 0},
+        "holiday_years": {y: [get_legal_holidays(y, m) for m in range(1, 13)] for y in years},
+        "periods": {"prep": int(wr.get("prep_days", 0) or 0), "wrapup": int(wr.get("wrapup_days", 0) or 0),
+                    "commission": int(wr.get("commission_days", 0) or 0), "prep_label": prep_label},
+    }
+    return data, warns, unmatched
+
+
 def applied_condition_lines(result) -> list:
     """비작업일수 계산에 실제로 적용한 기상조건을 '✅ 조건명' 목록으로 반환(표시용).
 
@@ -576,6 +700,21 @@ def naeyeok_to_hierarchy(hier_items):
     return list(cats.values())
 
 
+# 부록 엑셀 수식(작업일수 = ROUNDUP(수량 ÷ (1일 작업량 × 조)))이 앱과 같은 값을 내려면 화면용
+# 문자열('13.5㎥')이 아니라 실제로 쓴 정확한 1일 작업량이 필요하다. 계산할 때마다 스레드별로
+# 남겨 두고 calc_days_with_rate가 읽는다(세션마다 스크립트 스레드가 달라 섞이지 않는다).
+import threading as _threading
+_RATE_CAPTURE = _threading.local()
+
+
+def calc_days_with_rate(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_item_crew=True):
+    """calc_days_priority + (그때 쓴 1일 작업량, 조수). 일수가 0이거나 값이 없으면 (None, None)."""
+    _RATE_CAPTURE.v = None
+    d, label, method = calc_days_priority(name, spec, qty, crews, item_unit, use_item_crew)
+    daily, crew = getattr(_RATE_CAPTURE, "v", None) or (None, None)
+    return d, label, method, daily, crew
+
+
 def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_item_crew=True):
     """
     우선순위:
@@ -674,6 +813,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                 unit = manual_data.get("unit", "")
                 if daily_val > 0:
                     days = math.ceil(qty / (daily_val * crews))
+                    _RATE_CAPTURE.v = (daily_val, crews)
                     return days, f"{daily_val:.1f}{unit}", "수동입력"
     except Exception:
         pass
@@ -688,6 +828,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
         # '연막시험' 등 검사 성격 항목은 제외.
         if "배수설비" in _nm_s and not any(k in _nm_s for k in ("시험", "검사", "조사")):
             days = math.ceil(qty / (1.0 * crews))
+            _RATE_CAPTURE.v = (1.0, crews)
             return days, "1.0개소", "실무기준(1조=1개소/일)"
     except Exception:
         pass
@@ -701,6 +842,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
             daily_val, unit = hopyo_daily[hopyo_no]
             if daily_val and daily_val > 0:
                 days = math.ceil(qty / (daily_val * crews))
+                _RATE_CAPTURE.v = (daily_val, crews)
                 return days, f"{daily_val:.1f}{unit}", "단가산출근거(호표)"
     except Exception:
         pass
@@ -714,6 +856,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
             daily_val, unit = naeyeok_daily[naeyeok_code]
             if daily_val and daily_val > 0:
                 days = math.ceil(qty / (daily_val * crews))
+                _RATE_CAPTURE.v = (daily_val, crews)
                 return days, f"{daily_val:.1f}{unit}", "일위대가_산근(코드)"
     except Exception:
         pass
@@ -729,6 +872,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
             daily_val, unit = _fb[_key]
             if daily_val and daily_val > 0 and _unit_ok(unit, item_unit):
                 days = math.ceil(qty / (daily_val * crews))
+                _RATE_CAPTURE.v = (daily_val, crews)
                 return days, f"{daily_val:.1f}{unit}", "동일계열 Q승계"
     except Exception:
         pass
@@ -753,6 +897,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                     if _r and _unit_ok("본", item_unit):
                         _dv, _pers = _r
                         days = math.ceil(qty / (_dv * crews))
+                        _RATE_CAPTURE.v = (_dv, crews)
                         return days, f"{_dv:g}본", f"표준품셈 조기준({_pers}인/조)"
 
             # 시스템 동바리 설치 및 해체 — 높이·설치간격별
@@ -775,6 +920,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                     if _r and _unit_ok("공㎥", item_unit):
                         _dv, _pers = _r
                         days = math.ceil(qty / (_dv * crews))
+                        _RATE_CAPTURE.v = (_dv, crews)
                         return days, f"{_dv:g}공㎥", f"표준품셈 조기준({_pers}인/조)"
     except Exception:
         pass
@@ -812,6 +958,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                 #  실측 Q산식 4,800㎡의 1/40이 되어버림)
                 if _dv and _dv > 0 and _unit_ok(_du, item_unit):
                     days = math.ceil(qty / (_dv * crews))
+                    _RATE_CAPTURE.v = (_dv, crews)
                     return days, f"{_dv:g}{_du}", "표준품셈"
                 break
     except Exception:
@@ -829,6 +976,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
             daily_val, unit, job = labor_daily[naeyeok_code]
             if daily_val and daily_val > 0 and _unit_ok(unit, item_unit):
                 days = math.ceil(qty / (daily_val * crews))
+                _RATE_CAPTURE.v = (daily_val, crews)
                 return days, f"{daily_val:.1f}{unit}", f"노무비역산({job})"
     except Exception:
         pass
@@ -918,9 +1066,11 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                 if base_daily > 0:
                     if is_machine_based(name):
                         days = math.ceil(qty / (base_daily * crews))
+                        _RATE_CAPTURE.v = (base_daily, crews)
                         label = f"{base_daily}{unit}"  # 조수 제거
                     else:
                         days = math.ceil(qty / (base_daily * crews))
+                        _RATE_CAPTURE.v = (base_daily, crews)
                         label = f"{base_daily}{unit}"  # 조수 제거
                     return days, label, "가이드라인"
         
@@ -932,6 +1082,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                 closest = min(pipe_rates.keys(), key=lambda x: abs(x - dia))
                 daily = pipe_rates[closest]
                 days = math.ceil(qty / (daily * crews))
+                _RATE_CAPTURE.v = (daily, crews)
                 return days, f"{daily}본/일", "가이드라인"  # 조수 제거
     except Exception:
         pass
@@ -957,6 +1108,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                     _crew_lbl = "굴착기 1대/조"
                 if _dv and _unit_ok("㎥", item_unit):
                     days = math.ceil(qty / (_dv * crews))
+                    _RATE_CAPTURE.v = (_dv, crews)
                     return days, f"{_dv:g}㎥", f"표준품셈 조기준({_crew_lbl})"
 
             pipe_kws = ["관 부설", "관부설", "이중벽관", "주철관", "흄관", "콘크리트관",
@@ -968,6 +1120,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                     if _r:
                         _dv, _crew, _ = _r
                         days = math.ceil(qty / (_dv * crews))
+                        _RATE_CAPTURE.v = (_dv, crews)
                         return days, f"{_dv:g}본", f"표준품셈 조기준({sum(_crew.values())}인/조)"
     except Exception:
         pass
@@ -990,6 +1143,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                         if hourly_val > 0:
                             daily_val = hourly_val * 8
                             days = math.ceil(qty / (daily_val * crews))
+                            _RATE_CAPTURE.v = (daily_val, crews)
                             return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}", "단가산출근거"  # 조수 제거
                     
                     # daily 값 (1일 작업량)
@@ -998,6 +1152,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                         unit = info.get("unit", "")
                         if daily_val > 0:
                             days = math.ceil(qty / (daily_val * crews))
+                            _RATE_CAPTURE.v = (daily_val, crews)
                             return days, f"{daily_val:.1f}{unit}", "단가산출근거"  # 조수 제거
                 
                 # 항목명만으로도 매칭 시도
@@ -1008,6 +1163,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                         if hourly_val > 0:
                             daily_val = hourly_val * 8
                             days = math.ceil(qty / (daily_val * crews))
+                            _RATE_CAPTURE.v = (daily_val, crews)
                             return days, f"{daily_val:.1f}{unit.replace('/Hr','/일')}", "단가산출근거"  # 조수 제거
                     
                     elif "daily" in info:
@@ -1015,6 +1171,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                         unit = info.get("unit", "")
                         if daily_val > 0:
                             days = math.ceil(qty / (daily_val * crews))
+                            _RATE_CAPTURE.v = (daily_val, crews)
                             return days, f"{daily_val:.1f}{unit}", "단가산출근거"  # 조수 제거
     except Exception:
         pass
@@ -1708,14 +1865,15 @@ st.sidebar.info("📅 **공사 시작일**은 TAB '비작업일수 계산기'에
 st.title("상하수도 공사기간 산정 시스템")
 st.markdown("---")
 
-tab2, tab6, tab4, tab1, tab3, tab5, tab7 = st.tabs([
+tab2, tab6, tab4, tab1, tab3, tab5, tab7, tab8 = st.tabs([
     "📂 엑셀 내역서 인식",
     "📝 수동입력 관리",
     "🌧 비작업일수 계산기",
     "📋 공기산정",
     "🔍 주요공종 CP 분석",
     "📅 예정공정표",
-    "🏢 사업 전체 공기"
+    "🏢 사업 전체 공기",
+    "📑 보고서·부록"
 ])
 
 # ══════════════════════════════════════════════════════════════
@@ -4420,7 +4578,8 @@ with tab7:
                     _res = dp.discipline_days(_items, _mode_now, crew_by_unit=_cbu, caps=_caps)
                     _applied = sum(_cbu.values())
                     _disc_res[_dc] = {"total": _res["total"], "res": _res, "n": len(_items),
-                                      "use": bool(_use), "crews": _applied, "mode": _mode_now}
+                                      "use": bool(_use), "crews": _applied, "mode": _mode_now,
+                                      "items": _items}
                     _work = [i for i in _items if i["days1"] > 0]
                     st.metric(f"{_dc} 작업일수" + ("" if _use else " (공기 미반영)"),
                               f"{_res['total']}일",
@@ -4448,6 +4607,7 @@ with tab7:
                     } for p in sorted(_res["packages"], key=lambda x: -x["days"])]
                     st.dataframe(pd.DataFrame(_pk_rows), hide_index=True, width="stretch")
 
+        st.session_state["project_disc_res"] = _disc_res
         st.markdown("---")
         st.markdown("### 🔗 공정 연결")
         def _disc_days(_name):
@@ -4619,6 +4779,62 @@ with tab7:
                 # 대기값으로 넘기고 다시 실행하면 비작업일수 탭이 위젯 생성 전에 반영한다.
                 st.session_state["project_work_days_apply"] = int(_total)
                 st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════
+# TAB 8: 보고서·부록 — 공사기간 산정 부록 엑셀(수식 포함)
+# ══════════════════════════════════════════════════════════════
+with tab8:
+    st.subheader("📑 공사기간 산정 보고서·부록")
+    st.caption("앱의 산정 결과로 발주처 제출용 부록 엑셀을 만듭니다. 작업일수·소계·비작업일수는 수식이라 "
+               "받는 쪽에서 조수나 1일 작업량을 고치면 다시 계산됩니다.")
+    _wr8 = st.session_state.get("weather_result")
+    if not st.session_state.get("work_result"):
+        st.warning("먼저 '엑셀 내역서 인식' 탭에서 토목 내역서를 올려 주세요.")
+    elif not _wr8:
+        st.warning("먼저 '비작업일수 계산기'에서 '비작업일수 계산'을 눌러 주세요.")
+    else:
+        try:
+            import report_excel as _rx
+            _ps8 = st.session_state.get("project_sched") or {}
+            if _ps8.get("disciplines") and st.session_state.get("_proj_applied_days") != int(_wr8.get("work_days", 0)):
+                st.warning("사업 전체 공기 탭의 분야가 있는데, 비작업일수 계산기에 사업 전체 순작업일수를 적용하지 "
+                           "않았습니다. 부록의 작업일수(토목+분야)와 비작업일수 구간이 맞지 않으니 그 탭의 "
+                           "'전체 순작업일수 적용' 후 '비작업일수 계산'을 다시 누르세요.")
+            _c1, _c2 = st.columns([2, 1])
+            with _c1:
+                _title8 = st.text_input("사업명", value=st.session_state.get("sched_project_name", ""),
+                                        key="report_title", placeholder="예) 영해 공공하수처리시설 증설사업")
+            with _c2:
+                _prep_opts = [n for n, _ in _rx.PREP_GUIDE]
+                _pd8 = int(_wr8.get("prep_days", 0) or 0)
+                _def = next((i for i, (n, v) in enumerate(_rx.PREP_GUIDE) if n == "상수도공사" and v == _pd8),
+                            next((i for i, (n, v) in enumerate(_rx.PREP_GUIDE) if v == _pd8), 0))
+                _prep_lbl8 = st.selectbox("준비기간 적용 공종(가이드라인 표)", _prep_opts, index=_def,
+                                          key="report_prep_label")
+            _data8, _warns8, _unm8 = report_data(_title8, _prep_lbl8)
+            for _w in _warns8:
+                st.warning(_w)
+            if _unm8:
+                with st.expander(f"⚠️ 1일 작업량을 찾지 못해 부록에서 빠지는 토목 항목 {len(_unm8)}개"):
+                    st.caption("수동입력 관리 탭에서 1일 작업량을 넣으면 공기와 부록에 반영됩니다.")
+                    st.write("\n".join(f"- {x}" for x in _unm8[:60]))
+            _n_items = sum(len(l["items"]) for c in _data8["civil"]["cats"] for l in c["lines"])
+            st.caption(f"토목 {len(_data8['civil']['cats'])}개 대공종·{_n_items}개 항목 · "
+                       f"분야 {len(_data8['discs'])}개 · 비작업일수 {len(_data8['nonwork']['rows'])}개월")
+            if st.button("📥 부록 엑셀 생성", type="primary", width="stretch", key="make_appendix"):
+                _xb = _rx.build_appendix_xlsx(_data8)
+                st.download_button(
+                    "📥 공사기간 산정 부록 다운로드", data=BytesIO(_xb),
+                    file_name=f"공사기간 산정 부록_{(_title8 or '사업').strip()}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width="stretch", key="dl_appendix",
+                )
+                st.success("✅ 부록 엑셀을 만들었습니다. 엑셀에서 열면 수식이 계산됩니다.")
+        except Exception as _e8:
+            st.error(f"부록 생성 준비 중 오류: {_e8}")
+            import traceback as _tb8
+            st.code(_tb8.format_exc())
 
 
 # ══════════════════════════════════════════════════════════════

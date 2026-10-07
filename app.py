@@ -453,6 +453,9 @@ def _rate_to_float(rate_text):
         return None
 
 
+PREP_DAYS_FIXED = 60   # 상하수도 준비기간(가이드라인 '상수도공사') — 사용자 기준 고정값
+
+
 def rerun_after_render():
     """앱 전체를 다시 실행하되, 이번 실행을 끝까지 마친 뒤에 한다(파일 맨 끝에서 처리).
 
@@ -3283,9 +3286,11 @@ with tab4:
     )
     _pc1, _pc2, _pc3 = st.columns(3)
     with _pc1:
-        prep_months = st.number_input(
-            "준비기간(개월)", min_value=0.0, max_value=12.0, value=2.0, step=0.5,
-            help="인허가·용지보상·현장사무실 설치 등. 상하수도 공사는 통상 2개월.",
+        # 상하수도 사업의 준비기간은 가이드라인 '상수도공사' 60일로 고정한다(사용자 기준).
+        # 예전에는 개월로 받아 ×30.4를 해서 2개월이 61일이 됐다.
+        st.number_input(
+            "준비기간(일) — 고정", value=PREP_DAYS_FIXED, disabled=True, key="prep_days_fixed",
+            help="상하수도 공사는 적정 공사기간 확보를 위한 가이드라인의 '상수도공사' 준비기간 60일을 적용합니다.",
         )
     with _pc2:
         wrapup_months = st.number_input(
@@ -3375,7 +3380,7 @@ with tab4:
         start_dt = dt.combine(start_date, dt.min.time())
         
         # 준비·정리·시운전은 달력 기준 기간이다(작업일수 산정 대상이 아니라 공사기간 구성요소).
-        _prep_days = int(round(prep_months * 30.4))
+        _prep_days = PREP_DAYS_FIXED
         _wrap_days = int(round(wrapup_months * 30.4))
         _comm_days = int(round(commission_months * 30.4))
 

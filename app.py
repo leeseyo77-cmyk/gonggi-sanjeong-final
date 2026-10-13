@@ -264,6 +264,11 @@ def labor_trace_text(tr) -> str:
         head += f" ({tr['규격']})"
     if tr.get("행"):
         head += f" · 일위대가표 {tr['행']}행"
+    if tr.get("방식") == "산근 A·Q(일위대가 경유)":
+        parts = ", ".join(f"{p['작업']} 산근{p['산근']}호표 A={p['A']:g}{p['단위']}/일"
+                          for p in (tr.get("산근 작업") or [])[:4])
+        rest = f" · 나머지 {tr['나머지']}" if tr.get("나머지") else ""
+        return f"🔎 {head} · {parts}{rest} → 일수 합산: {tr['식']}"
     if tr.get("방식") == "직종별 인수(병목 직종)":
         trades = ", ".join(f"{t} {v:g}인" for t, v in (tr.get("직종별 인수") or [])[:6]) or "-"
         one = tr.get("1인 기준 일작업량")
@@ -309,7 +314,7 @@ def civil_report_data():
                     unmatched.append(f"{nm} · {it['name']} {it.get('spec', '')}".strip())
                 continue
             basis = ""
-            if str(method).startswith("노무비역산"):
+            if str(method).startswith(("노무비역산", "일위대가→산근")):
                 basis = labor_trace_text(trace_all.get(labor_key_for(it["name"], it.get("spec", "")))
                                          ).replace("🔎 ", "")
             ln = it.get("_ukey") or it.get("district") or "(공통)"
@@ -868,6 +873,21 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
                 days = math.ceil(qty / (daily_val * crews))
                 _RATE_CAPTURE.v = (daily_val, crews)
                 return days, f"{daily_val:.1f}{unit}", "일위대가_산근(코드)"
+    except Exception:
+        pass
+
+    # 1순위: 일위대가 → 산근 A·Q (설계내역서가 일위대가를 가리키고, 그 구성 작업이 산근의 A·Q를 가리킴)
+    # 구성 작업이 여럿이면(설치 + 해체 등) 순서대로 하는 작업으로 보고 일수를 더한다.
+    # A·Q가 없는 나머지 구성은 직종별 인수로 계산해 더한다.
+    try:
+        _aq_k = labor_key_for(name, spec)
+        _aq = st.session_state.get("naeyeok_aq_daily", {}).get(_aq_k) if _aq_k is not None else None
+        if _aq:
+            daily_val, unit = _aq[0], _aq[1]
+            if daily_val and daily_val > 0 and _unit_ok(unit, item_unit):
+                days = math.ceil(qty / (daily_val * crews))
+                _RATE_CAPTURE.v = (daily_val, crews)
+                return days, f"{daily_val:.1f}{unit}", "일위대가→산근(A·Q)"
     except Exception:
         pass
 
@@ -1807,13 +1827,18 @@ def parse_workbook_cached(file_bytes: bytes):
     if tmpl is not None:
         items = parse_items_generic(wb, tmpl)
         code_daily = parse_unit_price_generic(wb, tmpl)
-        labor_daily, labor_trace = parse_labor_derived_by_template(wb, tmpl, with_trace=True)
+        labor_daily, labor_trace = parse_labor_derived_by_template(wb, tmpl, with_trace=True,
+                                                                   code_daily=code_daily)
+        # 일위대가 → 산근 A·Q를 따라간 값은 설계자 값이라 역산과 따로 둔다(승계 보정 대상도 아님)
+        aq_daily = {k: v for k, v in labor_daily.items() if v[2] == "산근 A·Q"}
+        labor_daily = {k: v for k, v in labor_daily.items() if k not in aq_daily}
         parsed["template"] = {
             "name": tmpl["name"],
             "has_alt": bool(tmpl.get("link_regex_alt")),
             "items": items,
             "code_daily": code_daily,
             "labor_daily": labor_daily,
+            "aq_daily": aq_daily,
             "labor_trace": labor_trace,
             # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
             "series_fallback": apply_series_fallback(items, code_daily, labor_daily),
@@ -1943,6 +1968,7 @@ with tab2:
                     hierarchy = naeyeok_to_hierarchy(_uni_items)
                     st.session_state["naeyeok_code_daily"] = _tmpl_data["code_daily"]
                     st.session_state["naeyeok_labor_daily"] = _tmpl_data["labor_daily"]
+                    st.session_state["naeyeok_aq_daily"] = _tmpl_data.get("aq_daily", {})
                     # 노무비 역산 근거(호표·기준수량·직종별 인수·계산식) — 추정값 검토 화면에서 사용
                     st.session_state["naeyeok_labor_trace"] = _tmpl_data.get("labor_trace", {})
                     # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
@@ -2202,6 +2228,7 @@ with tab2:
 | **수동입력** | 사용자가 직접 입력한 값. 다른 모든 값보다 우선합니다. | 사용자 판단 |
 | **실무기준(1조=1개소/일)** | 배수설비처럼 일위대가 1개소에 여러 공종이 묶여 있어 역산이 맞지 않는 항목에 적용한 현장 기준값. | 높음 |
 | **단가산출근거(호표)**<br>**일위대가_산근(코드)** | 설계자가 단가산출근거·일위대가 산근에 직접 적어둔 시간당 작업량(`Q = … 단위/HR`)을 읽어 ×8시간으로 환산한 값. | **가장 높음** |
+| **일위대가→산근(A·Q)** | 설계내역서가 일위대가를 가리키고, 그 일위대가의 구성 작업이 산근의 일당 시공량(A)·시간당 시공량(Q)을 가리키는 경우 따라가서 읽은 값. 구성 작업이 여럿이면(설치 + 해체 등) 순서대로 하는 작업으로 보고 일수를 더하고, A·Q가 없는 나머지는 직종별 인수로 더합니다. | **가장 높음** |
 | **동일계열 Q승계** | 같은 계열(동일 항목명·규격)에 Q산식이 있어 그 값을 물려받은 항목. 아스팔트 기층↔표층처럼 시공 조건이 같을 때 적용됩니다. | 중간 (검토 권장) |
 | **노무비역산(직종)** | 일위대가에 인수(단위 '인')나 Q산식이 없어, 노무비를 해당 직종 노임단가로 나눠 되짚은 추정값. 할증·요율은 제외했습니다. | 낮음 (검토 권장) |
 | **가이드라인** | 국토교통부 「적정 공사기간 확보를 위한 가이드라인」 부록의 공종별 1일 작업량. | 높음 |
@@ -4215,6 +4242,7 @@ with tab6:
                             "가장 많이 드는 직종의 인수로 나눈 값입니다(1조 = 직종별 1인, 건축·기계·전기와 같은 기준). "
                             "인수를 모두 더해 나눈 1인 기준 값도 함께 적었습니다. "
                             "'노무비 ÷ 노임단가'는 인수 행이 없을 때 쓰는 방식으로, 직종을 알 수 없어 1인 기준입니다. "
+                            "'산근 A·Q(일위대가 경유)'는 구성 작업이 가리키는 산근의 A·Q값으로 작업별 일수를 구해 더한 값입니다. "
                             "일위대가표의 해당 행을 열어 직접 확인할 수 있습니다."
                         )
                         _rows_tr = [{

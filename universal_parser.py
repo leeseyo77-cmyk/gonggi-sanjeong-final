@@ -176,6 +176,7 @@ def _extract_q_from_block(rows, start: int, end: int, formula_col: int, q_forwar
     found_fwd = None
     found_inv = None
     found_day = None
+    found_a = None
     numbered = {}
     for j in range(start, end):
         row = rows[j]
@@ -217,14 +218,32 @@ def _extract_q_from_block(rows, start: int, end: int, formula_col: int, q_forwar
                         va = _to_float(ma.group(1))
                     except ValueError:
                         continue
+                    # 'A=400 ㎡/일 *1.26 (할증계수) = 504.00'처럼 보정한 최종값이 뒤에 있으면 그 값
+                    # (광주 제32호표 — 아래 Q=A/8 = 63.00도 504 기준이다)
+                    m_fin = re.search(r"=\s*([\d,.]+)\s*$", cell.strip()[ma.end():])
+                    if _rx is _A_PER_DAY_RE and m_fin:
+                        try:
+                            va = _to_float(m_fin.group(1))
+                        except ValueError:
+                            pass
                     if va > 0:
                         found_day = (va, ma.group(2))
+                        if _rx is _A_PER_DAY_RE:
+                            found_a = found_day
                         break
         if found_fwd is None and found_inv is None:
             mi = q_inverse_re.search(cell)
             if mi:
                 found_inv = (_to_float(mi.group(1)), mi.group(2))
         # 번호 Q까지 모아야 하므로 조기 종료하지 않는다
+    # '일당 시공량: A=63 ㎥/일' 바로 아래 'Q=A/8 hr = 7.88'은 A를 반올림한 시간당 값이라 ×8 하면
+    # 63.04처럼 어긋난다 → 시간당 Q가 A/8과 같으면 원값 A를 쓴다(단위 표기도 A 쪽이 맞았다:
+    # 본대 제84호표 아스팔트포장 절단 A=500 m/일, Q=62.50 ㎡/hr).
+    # Q가 A/8과 다르면 A는 일부 작업분이다(본대 제140호표 '굴착기 50%+인력 50%' — 굴착기 Q=6.22㎥/hr,
+    # 인력분 A=3.6㎥/일) → 기존대로 시간당 Q를 쓴다.
+    if (found_a is not None and found_fwd is not None and not numbered and found_a[0] > 0
+            and abs(found_fwd[0] * _HR_TO_DAY / found_a[0] - 1) < 0.02):
+        return round(found_a[0], 4), found_a[1]
     if found_fwd is not None:
         val, unit = found_fwd
         # 'Q'와 'Q1…'이 함께 있으면 순차 공정 → 소요시간 합산(작업량은 역수 합)
@@ -1041,7 +1060,8 @@ def parse_labor_derived_rates(wb, sheet_name: str = "일위대가_호표",
 
 
 
-def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool = False):
+def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool = False,
+                                   code_daily: Optional[Dict[Any, Tuple[float, str]]] = None):
     """
     템플릿 설정(tmpl["labor"])에 따라 노무비 역산으로 일작업량을 구한다.
     두 가지 블록 구조를 모두 지원:
@@ -1051,6 +1071,10 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
     with_trace=True면 ({키: 값}, {키: 근거}) — 근거에는 호표·제목·기준수량·직종별 인수
     (또는 노무비·적용직종·노임단가)·계산식·일위대가표 행번호가 들어간다. 화면에서
     "이 값이 어디서 나왔는지" 확인하는 용도.
+
+    code_daily({산근번호: (일작업량, 단위)})를 주면 일위대가 구성 행이 가리키는 산근의
+    A·Q값을 따라간다(설계내역서 → 대가 N호표 → 산근 M호표). 그런 블록은 직종 '산근 A·Q'로,
+    근거의 방식은 '산근 A·Q(일위대가 경유)'로 표시된다 — 호출부에서 역산값과 구분해 쓴다.
     """
     cfg = tmpl.get("labor")
     traces: Dict[Any, Dict[str, Any]] = {}
@@ -1109,6 +1133,16 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
                 if isinstance(q_, (int, float)) and q_ > 1:
                     base = float(q_)
                     has_apply = True
+                # '1개소당 | 1÷100개소 | 1 | %' — 100개소분을 산출한 뒤 1/100로 환산한 표기.
+                # 실측(영덕): 플랫타이 구멍메우기 보통인부 0.62인이 100개소 기준인데 1개소로 읽어
+                # 1.6개소/일(직접 산정 161개소/일)이 되었고, 이 한 항목이 토목 공기를 6천 일대로 키웠다.
+                m_div = re.search(r"1\s*[÷/]\s*([\d,\.]+)", str(c1 or ""))
+                if base is None and m_div:
+                    try:
+                        base = float(m_div.group(1).replace(",", ""))
+                        has_apply = base > 1
+                    except ValueError:
+                        base = None
 
         return base if (has_apply and base and base > 0) else None
 
@@ -1176,6 +1210,99 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
                 if sub and sub[0] != s:
                     tot += float(q) * _manhours(sub[0], sub[1], depth + 1, acc, mult * float(q))
         return tot
+
+    # 일위대가 구성 행이 가리키는 산근(단가산출근거) 번호. 표준형은 '산근 N호표'가 비고 열에 있다.
+    _sg_re = re.compile(tmpl["link_regex"]) if (code_daily and tmpl.get("link_regex")) else None
+
+    def _unit_norm(u):
+        u = str(u or "").strip().upper()
+        return u.replace("㎡", "M2").replace("㎥", "M3").replace("M³", "M3").replace("M²", "M2")
+
+    def _aq_parts(s, e, lac, depth=0, mult=1.0, parts=None, acc=None, rest=None):
+        """블록 [s+1, e)를 산근 A·Q가 있는 작업과 나머지로 나눈다.
+
+        - 산근 A·Q가 있는 구성 행: (작업명, 수량, A, 산근번호) — 그 작업의 일수 = 수량 ÷ A
+        - 단위 '인' 행: 직종별 인수(acc)
+        - 다른 일위대가를 참조하는 행: 그 블록을 재귀로 나눈다(수량배)
+        - 그 밖에 노무비가 있는 행(A·Q 없는 산근 등): 노무비 합(rest[0]) — 인수 행이 없을 때만 쓴다
+        """
+        parts = [] if parts is None else parts
+        acc = {} if acc is None else acc
+        rest = [0.0] if rest is None else rest
+        for j in range(s + 1, e):
+            r = rows[j]
+            nm = str(r[0] or "").strip()
+            u = str(r[3]).strip() if len(r) > 3 and r[3] else ""
+            q = r[2] if len(r) > 2 else None
+            if not isinstance(q, (int, float)) or q <= 0 or u in ("", "%"):
+                continue
+            if any(k in nm for k in _SURCHARGE_KW):
+                continue
+            sg = None
+            if _sg_re is not None:
+                for v in r[4:]:
+                    if isinstance(v, str):
+                        m = _sg_re.search(v)
+                        if m:
+                            sg = int(m.group(1)) if tmpl.get("link_key_type") == "int" else m.group(1)
+                            break
+            aq = code_daily.get(sg) if (sg is not None and code_daily) else None
+            if aq and aq[0] and aq[0] > 0 and _unit_norm(aq[1]) == _unit_norm(u):
+                parts.append((nm, float(q) * mult, float(aq[0]), sg, u))
+                continue
+            if u == "인":
+                _t = nm or "인부"
+                acc[_t] = acc.get(_t, 0.0) + float(q) * mult
+                continue
+            sp = str(r[1] or "").strip() if len(r) > 1 and r[1] else ""
+            sub = _block_by_title.get((nm, sp))
+            if depth < 2 and sub and sub[0] != s:
+                _aq_parts(sub[0], sub[1], lac, depth + 1, mult * float(q), parts, acc, rest)
+                continue
+            v = r[lac] if len(r) > lac else None
+            if isinstance(v, (int, float)) and v > 0:
+                rest[0] += float(v) * mult
+        return parts, acc, rest[0]
+
+    def _emit_aq(key, title, unit, base_qty, parts, trades, rest_cost, row_idx=None, spec=""):
+        """산근 A·Q가 있는 블록: 작업일수를 더한다(설치 → 해체처럼 순서대로 하는 작업).
+
+        1기준수량의 일수 = Σ(구성 수량 ÷ A) + 나머지(직종별 인수의 병목, 인수가 없으면 노무비 ÷ 노임)
+        1일 작업량 = 기준수량 ÷ 그 일수. 예) 띠장 설치 A=80 + 해체 A=110 → 1/80 + 1/110 → 46.3m/일.
+        """
+        unit_s = str(unit).strip() if unit else ""
+        if not unit_s or unit_s in _NON_WORK_UNITS or key in result:
+            return False
+        aq_days = sum(q / a for _n, q, a, _sg, _u in parts)
+        _tv = {t: v for t, v in (trades or {}).items() if v > 0}
+        rest_days, rest_note = 0.0, ""
+        if _tv:
+            lead_t, lead_mh = max(_tv.items(), key=lambda x: x[1])
+            rest_days, rest_note = lead_mh, f"{lead_mh:.4g}인({lead_t}, 병목 직종)"
+        elif rest_cost and rest_cost > 0:
+            job_r = pick_labor_type(str(title or ""), "")
+            w = wages.get(job_r.replace(" ", "")) or wages.get(_DEFAULT_LABOR.replace(" ", ""))
+            if w:
+                rest_days = rest_cost / w
+                rest_note = f"노무비 {rest_cost:,.0f}원 ÷ {job_r} {w:,.0f}원 = {rest_days:.4g}일(1인 기준)"
+        tot = aq_days + rest_days
+        if tot <= 0:
+            return False
+        daily = base_qty / tot
+        result[key] = (round(daily, 4), unit_s, "산근 A·Q")
+        terms = " + ".join(f"{q:g}{u}÷{a:g}" for _n, q, a, _sg, u in parts)
+        if rest_note:
+            terms += f" + {rest_note}"
+        traces[key] = {
+            "호표": key, "제목": str(title or "").strip(), "규격": str(spec or "").strip(),
+            "단위": unit_s, "행": (row_idx + 1) if row_idx is not None else None,
+            "방식": "산근 A·Q(일위대가 경유)", "기준수량": base_qty,
+            "산근 작업": [{"작업": n_, "산근": sg_, "수량": round(q_, 6), "A": a_, "단위": u_}
+                       for n_, q_, a_, sg_, u_ in parts],
+            "나머지": rest_note, "일작업량": round(daily, 4),
+            "식": f"{base_qty:g} ÷ ({terms}) = {daily:.4g}{unit_s}/조·일",
+        }
+        return True
 
     def _emit(key, title, unit, base_qty, labor_cost, manhours=0.0, explicit_base=None,
               trades=None, row_idx=None, spec=""):
@@ -1289,9 +1416,16 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
                     if isinstance(v, (int, float)) and v > 0:
                         labor_cost = v
             key = int(no) if cfg.get("key_type") == "int" else no
+            _xb = _explicit_base(ti, e)
+            if _sg_re is not None:
+                _parts, _tr_aq, _rest = _aq_parts(ti, e, lac)
+                if _parts and _emit_aq(key, title, unit, _xb or cfg.get("base_qty", 1.0), _parts, _tr_aq,
+                                       _rest, row_idx=ti,
+                                       spec=rows[ti][1] if len(rows[ti]) > 1 else ""):
+                    continue
             _acc = {}
             _mh = _manhours(ti, e, acc=_acc)
-            _emit(key, title, unit, cfg.get("base_qty", 1.0), labor_cost, _mh, _explicit_base(ti, e),
+            _emit(key, title, unit, cfg.get("base_qty", 1.0), labor_cost, _mh, _xb,
                   trades=_acc, row_idx=ti,
                   spec=rows[ti][1] if len(rows[ti]) > 1 else "")
 

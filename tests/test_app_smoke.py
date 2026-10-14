@@ -28,6 +28,14 @@ class CivilTest(unittest.TestCase):
         # 일위대가 → 산근 A·Q를 따라가기 전에는 2,198일(철근 가공·조립이 역산 0.19t/일로 떨어짐)
         self.assertEqual(at.session_state["total_work_days"], 1084)
 
+        # 상세표는 공기를 정하는 구간(🔴)의 항목이 맨 위 — 구조물공사는 오존접촉조 1,084일
+        tables = [d.value for d in at.dataframe if "주공정" in d.value.columns]
+        struct = next(df for df in tables if "오존접촉조" in set(df["구간"]))
+        crit = struct["주공정"] == "🔴"
+        self.assertTrue(crit.iloc[:int(crit.sum())].all())               # 🔴 행이 모두 위쪽에
+        self.assertEqual(set(struct.loc[crit, "구간"]), {"오존접촉조"})
+        self.assertEqual(int(struct.loc[crit, "작업일수"].sum()), 1084)
+
 
 @unittest.skipIf(SKIP, WHY)
 class ProjectTabTest(unittest.TestCase):

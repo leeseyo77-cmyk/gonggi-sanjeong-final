@@ -474,6 +474,30 @@ def rerun_after_render():
 
 
 @st.fragment
+def critical_first(source_items, detail_items, line_days):
+    """상세표를 크리티컬 순으로 정렬한다: 공기를 정하는 구간(최장)의 항목을 맨 위에.
+
+    구간(라인·구조물)끼리는 병행이고 구간 안은 순차라, 대공종의 작업일수는 최장 구간이 정한다.
+    구간이 둘 이상이면 '주공정'(🔴 = 최장 구간)·'구간' 열을 앞에 붙이고 구간 일수가 긴 순서로,
+    구간 안에서는 작업일수가 큰 항목부터 놓는다. 구간이 하나면 작업일수 순으로만 정렬한다.
+    반환: (정렬한 source_items, 정렬한 detail_items) — 두 목록의 짝은 그대로 유지된다.
+    """
+    multi = len(line_days or {}) > 1
+    crit = max(line_days, key=line_days.get) if multi else None
+
+    def _ln(i):
+        return source_items[i].get("_ukey") or "(공통)"
+
+    order = sorted(range(len(source_items)), key=lambda i: (
+        -(line_days.get(_ln(i), 0)) if multi else 0, _ln(i) if multi else "",
+        -int(detail_items[i].get("작업일수", 0) or 0)))
+    out = []
+    for i in order:
+        front = {"주공정": "🔴" if _ln(i) == crit else "", "구간": _ln(i)} if multi else {}
+        out.append({**front, **detail_items[i]})
+    return [source_items[i] for i in order], out
+
+
 def render_detail_table(detail_items, source_items, base_crew, key):
     """상세공종 표를 '1일작업량 수정'과 '투입조수' 열만 편집 가능하게 렌더링.
 
@@ -511,6 +535,8 @@ def render_detail_table(detail_items, source_items, base_crew, key):
         _view.append(row)
 
     _editable = {"투입조수", "1일작업량 수정", "제외"}
+    _sig = "|".join(f"{it.get('name', '')}^{it.get('spec', '')}^{it.get('_ukey', '')}" for it in source_items)
+    key = f"{key}_{zlib.crc32(_sig.encode('utf-8'))}"
     edited = st.data_editor(
         pd.DataFrame(_view),
         hide_index=True,
@@ -2419,7 +2445,7 @@ with tab2:
                             f" ({len(rows_in_group)}개 공종{_grp_suffix})",
                             expanded=False
                         ):
-                            for idx, row in enumerate(rows_in_group):
+                            for idx, row in enumerate(sorted(rows_in_group, key=lambda r: -r["작업일수(일)"])):
                                 _peak = max((r["작업일수(일)"] for r in _major_rows), default=0)
                                 is_max = (row["작업일수(일)"] == _peak and _peak > 0)
                                 _sel_major_disp = set(st.session_state.get("selected_major", []))
@@ -2469,7 +2495,8 @@ with tab2:
                                             # 항목 합치기 (name+spec 기준으로 중복 제거하면서)
                                             for item in sub.get('items', []):
                                                 existing = next((i for i in merged_by_name[sub_name]['items']
-                                                               if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                                                               if i['name'] == item['name'] and i.get('spec') == item.get('spec')
+                                                               and i.get('_ukey') == item.get('_ukey')), None)
                                                 if existing:
                                                     existing['qty'] = existing.get('qty', 0) + item.get('qty', 0)
                                                 else:
@@ -2489,7 +2516,8 @@ with tab2:
                                                     # 기존 sub_sub에 항목 합치기
                                                     for item in sub_sub.get('items', []):
                                                         existing_item = next((i for i in existing_sub_sub['items']
-                                                                           if i['name'] == item['name'] and i.get('spec') == item.get('spec')), None)
+                                                                           if i['name'] == item['name'] and i.get('spec') == item.get('spec')
+                                                               and i.get('_ukey') == item.get('_ukey')), None)
                                                         if existing_item:
                                                             existing_item['qty'] = existing_item.get('qty', 0) + item.get('qty', 0)
                                                         else:
@@ -2528,7 +2556,14 @@ with tab2:
                                                         total_length += item.get('qty', 0)
                                             
                                             # 헤더 표시
-                                            if total_length > 0:
+                                            _lb_h = row.get("_라인별누적") or {}
+                                            if len(_lb_h) > 1:
+                                                _crit_h = max(_lb_h, key=_lb_h.get)
+                                                st.markdown(f"#### {sub_level} {sub_name} — 🔴 주공정 구간 "
+                                                            f"**{_crit_h} {_lb_h[_crit_h]}일**")
+                                                st.caption(f"구간별 일수를 모두 더하면 {sub_days}일이지만 구간끼리는 병행이라 "
+                                                           "최장 구간이 공기를 정합니다. 🔴 표시 항목이 그 구간이며 맨 위에 놓았습니다.")
+                                            elif total_length > 0:
                                                 st.markdown(f"#### {sub_level} {sub_name} (총 연장: {total_length:,.1f} M, 작업일수: {sub_days}일)")
                                             else:
                                                 st.markdown(f"#### {sub_level} {sub_name} ({sub_days}일)")
@@ -2555,6 +2590,8 @@ with tab2:
                                                         "출처": source_badge(method), "_출처원본": method
                                                     })
                                                 
+                                                sub_items, detail_items = critical_first(
+                                                    sub_items, detail_items, row.get("_라인별누적") or {})
                                                 if detail_items:
                                                     render_detail_table(
                                                         detail_items, sub_items, row['crew'],
@@ -2791,6 +2828,8 @@ with tab2:
                                                             "출처": source_badge(method), "_출처원본": method
                                                         })
                                                     
+                                                    sub_sub_items, detail_items = critical_first(
+                                                        sub_sub_items, detail_items, row.get("_라인별누적") or {})
                                                     if detail_items:
                                                         render_detail_table(
                                                             detail_items, sub_sub_items, row['crew'],
@@ -2851,6 +2890,8 @@ with tab2:
                                                 "출처": source_badge(method), "_출처원본": method
                                             })
                                         
+                                        direct_items, detail_items = critical_first(
+                                            direct_items, detail_items, row.get("_라인별누적") or {})
                                         if detail_items:
                                             render_detail_table(
                                                 detail_items, direct_items, row['crew'],

@@ -398,7 +398,6 @@ def report_data(title: str, prep_label: str):
         "start_date": (wr.get("start_date").strftime("%Y-%m-%d") if wr.get("start_date") else ""),
         "civil": civil,
         "discs": discs,
-        "elec_after_arch": bool(st.session_state.get("elec_after_arch", True)),
         "nonwork": {"rows": rows, "station": station, "conditions": conds,
                     "min_rest": MIN_MONTHLY_REST if wr.get("min_weekly_rest", True) else 0},
         "holiday_years": {y: [get_legal_holidays(y, m) for m in range(1, 13)] for y in years},
@@ -3980,8 +3979,7 @@ with tab5:
         # 분야(건축 등) 행 — 사업 전체 공기 탭의 결과. 토목 완료 시점부터 동·설비 단위별로
         # 공종을 차례로 잇는다(동끼리는 병행, '동 순차'면 동도 차례로). 실수 개월로 이어 붙인 뒤
         # 시작·끝을 정수 개월로 바꿔, 짧은 공종이 모두 1개월로 올림돼 전체가 늘어나는 것을 막는다.
-        _DISC_SECTION = {"건축": "건축공사", "건축기계설비": "건축기계설비", "기계": "기계공사",
-                         "전기": "전기 및 계측제어공사", "조경": "조경공사"}
+        _DISC_SECTION = {"건축": "건축공사", "조경": "조경공사"}
         for _dd in _ps_discs:
             _t0 = _civ_end_f + int(_dd.get("start", 0)) * _scale / 30.4
             _cur = {}
@@ -4466,26 +4464,16 @@ with tab6:
                         render_manual_input_page(mk, group_data[mk])
 
 # ══════════════════════════════════════════════════════════════
-# TAB 7: 사업 전체 공기 (토목 + 기계 + 건축 + 전기)
+# TAB 7: 사업 전체 공기 (토목 + 건축 + 조경)
 # ══════════════════════════════════════════════════════════════
-# 공사 순서(사용자 기준): 토목 → 건축 → 기계 → 전기.
-# 단 건축과 기계는 동시 시공이 가능하고(토목구조물에 들어가는 기계는 토목 직후 먼저),
-# 전기는 기계가 끝난 뒤 시작한다. 수배전반이 건물 안이면 건축 마감도 선행 조건이다.
+# 공사 순서: 토목 → 건축(조경은 건축과 병행).
+# 기계·전기는 앱에서 뺀다(사용자 기준 2026-10-16): 공기 검토에서 기계·전기는 설치만 보는데,
+# 사전 제작 후 토목·건축 진행 중에 설치돼 총 공사기간을 지배하지 않는다.
 # 관로사업은 건축이 없으므로 건축 파일을 올리지 않으면 그 단계가 자동으로 빠진다.
-# '공기에 반영' 기본값: 실무상 총 공사기간을 지배하는 것은 토목·건축이고, 기계·전기는
-# 사전 제작 후 토목·건축 진행 중에 설치돼 공기에 거의 영향이 없다(사용자 기준) → 기본 미반영.
 _DISC_SPECS = [
-    ("기계", "⚙️ 기계(공정) — 토목 직후 착수", "unit_parallel", False,
-     "수조·구조물에 들어가는 공정기계입니다. 사전 제작 후 설치라 보통 공기를 지배하지 않아 "
-     "기본은 공기 미반영입니다. 설비 단위 안은 순차, 단위끼리는 병행으로 계산합니다."),
     ("건축", "🏛️ 건축 — 토목 후 착수", "seq", True,
      "토목과 함께 공기를 지배하는 분야라 기본으로 반영합니다."),
-    ("건축기계설비", "🌀 건축기계설비 — 건축과 병행", "unit_parallel", False,
-     "냉난방·환기·위생·소화 등 건물에 들어가는 설비입니다. 건축 공정 중에 흡수되므로 기본 미반영."),
-    ("전기", "⚡ 전기·계측제어 — 기계 완료 후", "unit_parallel", False,
-     "보통 공기를 지배하지 않아 기본 미반영입니다. 수배전반이 건물 안이라 건축 마감 후에만 "
-     "설치할 수 있는 등 공기를 좌우하는 경우에만 켜세요."),
-    ("조경", "🌳 조경 — 건축·기계와 병행", "unit_parallel", False,
+    ("조경", "🌳 조경 — 건축과 병행", "unit_parallel", False,
      "뒤따라가는 분야라 기본 미반영입니다."),
 ]
 
@@ -4494,7 +4482,8 @@ with tab7:
     st.caption(
         "분야별 내역서를 올리면 분야별 작업일수를 산정하고, 공사 순서로 이어 사업 전체 순작업일수를 계산합니다. "
         "토목은 '엑셀 내역서 인식' 탭의 결과를 그대로 씁니다. "
-        "기본 반영 분야는 **토목·건축**이며, 기계·전기·조경은 계산해서 보여 주되 공기에서는 뺍니다."
+        "기본 반영 분야는 **토목·건축**이고, 조경은 계산해서 보여 주되 공기에서는 뺍니다. "
+        "기계·전기는 설치만 검토하며 토목·건축 진행 중에 설치돼 공기를 지배하지 않으므로 다루지 않습니다."
     )
     if not HAS_DISCIPLINE:
         st.error("discipline_parser.py를 불러오지 못했습니다.")
@@ -4594,10 +4583,7 @@ with tab7:
                 with _cc2:
                     _use = st.checkbox(
                         "공기에 반영", value=bool(_use_def), key=f"disc_use_{_dc}",
-                        help="끄면 작업일수는 계산해서 보여 주되 전체 공기에는 넣지 않습니다. "
-                             "기계·전기는 사전 제작 후 토목·건축 진행 중에 설치돼 보통 공기를 "
-                             "지배하지 않으므로 기본이 꺼짐입니다. 수배전반처럼 건축 마감을 "
-                             "기다려야 하는 경우에만 켜세요.",
+                        help="끄면 작업일수는 계산해서 보여 주되 전체 공기에는 넣지 않습니다.",
                     )
                 _items = []
                 for _uf in _ups or []:
@@ -4696,35 +4682,21 @@ with tab7:
             _r = _disc_res.get(_name) or {}
             return _r.get("total", 0) if _r.get("use", True) else 0
 
-        _mech = _disc_days("기계")
         _arch = _disc_days("건축")
-        _amec = _disc_days("건축기계설비")
-        _elec = _disc_days("전기")
         _land = _disc_days("조경")
         _off = [(_d, _r.get("total", 0)) for _d, _r in _disc_res.items()
                 if not _r.get("use", True)]
         if _off:
             st.caption("🚫 공기 미반영: " + ", ".join(f"{_d} {_t}일" for _d, _t in _off)
-                       + " — 사전 제작 후 토목·건축 진행 중에 설치돼 공기를 지배하지 않는다고 본 "
-                         "분야입니다(기본값). 공기를 좌우하는 경우 각 분야에서 '공기에 반영'을 켜세요.")
-        _arch_stage = max(_arch, _amec)          # 건축과 건축기계설비는 병행
-        _elec_after_arch = False
-        if _elec and _arch_stage:
-            _elec_after_arch = st.checkbox(
-                "수배전반이 건축물 안에 있음 — 전기는 건축 마감 후 착수", value=True,
-                key="elec_after_arch",
-                help="끄면 전기는 기계 완료 후 바로 착수하고, 건축과 겹쳐 진행하는 것으로 봅니다.",
-            )
-        # 전기의 선행: 기계 완료 후(수배전반이 건물 안이면 건축 마감까지 기다림).
-        _elec_pred = max(_arch_stage, _mech) if _elec_after_arch else _mech
-        # 토목 이후 구간은 병행 갈래 중 가장 긴 쪽이 지배한다.
-        _after_civil = max(_arch_stage, _land, _mech, _elec_pred + _elec)
+                       + " — 공기를 좌우하는 경우 각 분야에서 '공기에 반영'을 켜세요.")
+        # 토목 이후 구간은 건축·조경 병행 — 긴 쪽이 지배한다.
+        _after_civil = max(_arch, _land)
         _total = _civil_days + _after_civil
 
         # 예정공정표 탭이 분야 막대를 그릴 수 있게 반영 분야의 동·공종별 일수와 착수 시점을 남긴다.
         # 착수 시점은 토목 완료 후 경과 순작업일수(전기는 선행 분야 완료 후). 예정공정표 탭이 이 탭보다
         # 먼저 실행되므로 다음 실행부터 반영된다(위젯을 건드리면 곧바로 다시 실행된다).
-        _sched_start = {"건축": 0, "건축기계설비": 0, "기계": 0, "조경": 0, "전기": int(_elec_pred)}
+        _sched_start = {"건축": 0, "조경": 0}
         st.session_state["project_sched"] = {
             "civil_days": _civil_days,
             "disciplines": [
@@ -4737,9 +4709,9 @@ with tab7:
             ],
         }
 
-        # 토목 이후 병행 구간(건축·건축기계·기계·조경)은 조가 동시에 들어간다 — 인력 총량 점검
+        # 토목 이후 병행 구간(건축·조경)은 조가 동시에 들어간다 — 인력 총량 점검
         _par_crews = sum(int((_disc_res.get(_d) or {}).get("crews", 0))
-                         for _d in ("건축", "건축기계설비", "기계", "조경")
+                         for _d in ("건축", "조경")
                          if (_disc_res.get(_d) or {}).get("use", True))
         if _par_crews:
             _lim = int(st.number_input(
@@ -4754,7 +4726,7 @@ with tab7:
             else:
                 st.caption(_msg)
 
-        if not any((_mech, _arch_stage, _elec, _land)):
+        if not any((_arch, _land)):
             if _disc_res:
                 st.info("올린 분야가 모두 '공기 미반영'입니다 — 토목만 전체 공기에 들어갑니다.")
             else:
@@ -4765,28 +4737,14 @@ with tab7:
             if _civil_days:
                 _stage_rows.append({"단계": "🏗️ 토목", "작업일수": _civil_days,
                                     "시작(일차)": 1, "종료(일차)": _c_end, "선행": "-"})
-            _mech_end = _c_end + _mech
-            if _mech:
-                _stage_rows.append({"단계": "⚙️ 기계(공정)", "작업일수": _mech,
-                                    "시작(일차)": _c_end + 1, "종료(일차)": _mech_end, "선행": "토목"})
             if _arch:
                 _stage_rows.append({"단계": "🏛️ 건축", "작업일수": _arch,
                                     "시작(일차)": _c_end + 1, "종료(일차)": _c_end + _arch, "선행": "토목"})
-            if _amec:
-                _stage_rows.append({"단계": "🌀 건축기계설비", "작업일수": _amec,
-                                    "시작(일차)": _c_end + 1, "종료(일차)": _c_end + _amec,
-                                    "선행": "건축과 병행"})
             if _land:
                 _stage_rows.append({"단계": "🌳 조경", "작업일수": _land,
                                     "시작(일차)": _c_end + 1, "종료(일차)": _c_end + _land,
                                     "선행": "토목 후 · 건축과 병행"})
-            if _elec:
-                _e_start = _c_end + _elec_pred + 1
-                _stage_rows.append({"단계": "⚡ 전기·계측", "작업일수": _elec,
-                                    "시작(일차)": _e_start, "종료(일차)": _e_start + _elec - 1,
-                                    "선행": "기계 완료 후" + (" · 건축 마감 후" if _elec_after_arch else "")})
-            _stage_disc = {"⚙️ 기계(공정)": "기계", "🏛️ 건축": "건축", "🌀 건축기계설비": "건축기계설비",
-                           "🌳 조경": "조경", "⚡ 전기·계측": "전기"}
+            _stage_disc = {"🏛️ 건축": "건축", "🌳 조경": "조경"}
             for _sr in _stage_rows:
                 _d = _stage_disc.get(_sr["단계"])
                 _sr["투입조수(가정)"] = (f"{(_disc_res.get(_d) or {}).get('crews', 0)}조" if _d
@@ -4801,8 +4759,7 @@ with tab7:
             _m1.metric("사업 전체 순작업일수", f"{_total}일",
                        delta=f"토목 {_civil_days} + 이후 {_after_civil}", delta_color="off")
             _m2.metric("토목만", f"{_civil_days}일")
-            st.caption("건축·기계·조경은 동시 시공으로 보고 가장 긴 쪽을 씁니다. "
-                       "전기는 기계 완료 후(수배전반이 건물 안이면 건축 마감 후) 착수합니다. "
+            st.caption("건축·조경은 토목 후 동시 시공으로 보고 가장 긴 쪽을 씁니다. "
                        "분야별 '공기에 반영'을 끄면 그 분야는 이 연결에서 빠집니다. "
                        "비작업일수·준비·시운전 기간은 '비작업일수 계산기'에서 더해집니다.")
             # ── 목표 공기 대조 및 분야별 조수 역산 ─────────────────────────────
@@ -4830,22 +4787,9 @@ with tab7:
                              f"'공기산정' 탭의 투입조수 역산으로 토목을 {_civil_days - _tgt_days + 1}일 "
                              "이상 줄여야 합니다.")
                 else:
-                    # 토목 이후 구간 배분: 전기가 건축 후행이면 둘이 나눠 쓴다
-                    _tg = {}
-                    _b_now, _e_now = _arch_stage, _elec
-                    if _elec_after_arch and _b_now and _e_now:
-                        _b_share = max(1, int(_avail * _b_now / (_b_now + _e_now)))
-                        _tg["전기"] = max(1, _avail - _b_share)
-                    else:
-                        _b_share = _avail
-                        if _e_now:
-                            _tg["전기"] = _avail
-                    for _d in ("건축", "건축기계설비"):
-                        if (_disc_res.get(_d) or {}).get("use", True) and _disc_res.get(_d):
-                            _tg[_d] = _b_share
-                    for _d in ("기계", "조경"):
-                        if (_disc_res.get(_d) or {}).get("use", True) and _disc_res.get(_d):
-                            _tg[_d] = _avail
+                    # 토목 이후 구간은 건축·조경 병행 — 각자 남은 일수를 다 쓸 수 있다
+                    _tg = {_d: _avail for _d in ("건축", "조경")
+                           if (_disc_res.get(_d) or {}).get("use", True) and _disc_res.get(_d)}
                     _tg = {_k: int(_v) for _k, _v in _tg.items() if _disc_res.get(_k)}
                     st.caption("분야별 허용 일수(토목 이후 " + f"{_avail}일 배분): "
                                + " · ".join(f"{_k} {_v}일" for _k, _v in _tg.items()))

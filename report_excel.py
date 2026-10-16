@@ -40,8 +40,7 @@ PREP_GUIDE = [
     ("항만공사", 40), ("강교가설공사", 90), ("PC교량 공사", 70), ("교량보수공사", 60),
 ]
 
-DISC_LABEL = {"건축": "건축", "건축기계설비": "건축기계설비", "기계": "기계",
-              "전기": "전기 및 계측제어", "조경": "조경"}
+DISC_LABEL = {"건축": "건축", "조경": "조경"}
 
 
 def _qty_fmt(v) -> str:
@@ -192,7 +191,7 @@ def _civil_sheet(wb, name: str, civil: Dict[str, Any]) -> str:
     return f"{_q(name)}!I{total_r}"
 
 
-# ── 부록: 건축·기계·전기·조경 ─────────────────────────────────────────────
+# ── 부록: 건축·조경 ─────────────────────────────────────────────
 def _disc_sheet(wb, name: str, disc: Dict[str, Any]) -> str:
     """분야 작업일수 산정근거. 반환: 분야 합계 셀 주소."""
     ws = wb.create_sheet(name)
@@ -418,16 +417,9 @@ def _prep_sheet(wb, name: str, prep_days: int, applied_label: str) -> None:
 
 
 # ── 총괄 ────────────────────────────────────────────────────────────────
-def _work_formula(civil_ref: str, disc_refs: Dict[str, str], elec_after_arch: bool) -> str:
-    """사업 전체 작업일수 = 토목 + 토목 이후 구간(사업 전체 공기 탭의 공정 연결과 같은 식)."""
-    arch = [disc_refs[k] for k in ("건축", "건축기계설비") if k in disc_refs]
-    mech, land, elec = disc_refs.get("기계"), disc_refs.get("조경"), disc_refs.get("전기")
-    branches = list(arch)
-    branches += [x for x in (mech, land) if x]
-    if elec:
-        pred = arch + ([mech] if mech else []) if elec_after_arch else ([mech] if mech else [])
-        pred_s = ("MAX(" + ",".join(pred) + ")") if len(pred) > 1 else (pred[0] if pred else "0")
-        branches.append(f"{pred_s}+{elec}")
+def _work_formula(civil_ref: str, disc_refs: Dict[str, str]) -> str:
+    """사업 전체 작업일수 = 토목 + 토목 이후 구간(건축·조경 병행 — 사업 전체 공기 탭과 같은 식)."""
+    branches = [disc_refs[k] for k in ("건축", "조경") if k in disc_refs]
     if not branches:
         return f"={civil_ref}"
     after = branches[0] if len(branches) == 1 else "MAX(" + ",".join(branches) + ")"
@@ -480,7 +472,7 @@ def build_appendix_xlsx(data: Dict[str, Any]) -> bytes:
         r += 1
     tot = r
     S.put(tot, 1, "사업 전체", bold=True, h="left", fill=_CAT)
-    S.put(tot, 2, _work_formula(civil_ref, disc_refs, data.get("elec_after_arch", True)),
+    S.put(tot, 2, _work_formula(civil_ref, disc_refs),
           bold=True, fmt="#,##0", fill=_CAT)
     S.put(tot, 3, f"={nw_ref}", bold=True, fmt="#,##0", fill=_CAT)
     S.put(tot, 4, per["prep"], bold=True, fill=_CAT)
@@ -490,7 +482,7 @@ def build_appendix_xlsx(data: Dict[str, Any]) -> bytes:
     S.put(tot, 8, f"=ROUND(G{tot}/365*12,1)", bold=True, fmt="0.0", fill=_CAT)
     r = tot + 2
     notes = [
-        "※ 사업 전체 작업일수 = 토목 + 토목 이후 구간(건축·기계·조경은 병행, 전기는 선행 분야 완료 후). "
+        "※ 사업 전체 작업일수 = 토목 + 토목 이후 구간(건축·조경은 병행 — 긴 쪽). "
         "공기 미반영 분야는 계산에서 뺍니다.",
         "※ 비작업일수는 작업일수가 진행되는 본공사 구간의 월별 값을 합산했습니다(별표1).",
         "※ 투입조수(조)는 현장 경험에 따른 가정값이며, 작업일수는 이 가정으로 계산했습니다.",

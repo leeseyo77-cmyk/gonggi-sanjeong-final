@@ -39,22 +39,23 @@ class CivilTest(unittest.TestCase):
 
 @unittest.skipIf(SKIP, WHY)
 class ProjectTabTest(unittest.TestCase):
-    def test_defaults_then_include_electrical(self):
-        at = app_test(civil=GWANGJU["토목"],
-                      discs={"건축": GWANGJU["건축"], "전기": GWANGJU["전기"]})
+    def test_civil_plus_architecture(self):
+        at = app_test(civil=GWANGJU["토목"], discs={"건축": GWANGJU["건축"]})
         self.assertEqual(exceptions(at), [])
-        # 기본: 토목 + 건축(동 병행) — 전기는 공기 미반영
+        # 기계·전기는 앱에서 다루지 않는다(설치만 검토 — 공기를 지배하지 않음)
+        self.assertFalse(any(w.key == "disc_use_전기" for w in at.checkbox))
+        # 토목 1,084 + 건축(동 병행) 1,561
         self.assertEqual(metric(at, "사업 전체 순작업일수"), "2645일")
-
-        # 전기를 켜면 건축 마감 후 착수(기본) → 1,084 + 1,561 + 984
-        widget(at, "checkbox", "disc_use_전기").set_value(True).run()
-        self.assertEqual(exceptions(at), [])
-        self.assertEqual(metric(at, "사업 전체 순작업일수"), "3629일")
 
         # 비작업일수 계산기로 넘기기
         button(at, "📥 전체 순작업일수").click().run()
         self.assertEqual(exceptions(at), [])
-        self.assertEqual(at.session_state["weather_work_days"], 3629)
+        self.assertEqual(at.session_state["weather_work_days"], 2645)
+
+        # 건축을 공기에서 빼면 토목만 남는다
+        widget(at, "checkbox", "disc_use_건축").set_value(False).run()
+        self.assertEqual(exceptions(at), [])
+        self.assertIsNone(metric(at, "사업 전체 순작업일수"))
 
     def test_crew_allocation_goes_to_larger_building(self):
         at = app_test(civil=GWANGJU["토목"], discs={"건축": GWANGJU["건축"]})

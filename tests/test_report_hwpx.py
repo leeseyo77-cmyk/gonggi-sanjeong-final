@@ -45,7 +45,7 @@ class BuildTest(unittest.TestCase):
         self.assertIn("2,291일 ≒ 75개월", self.sec)                      # 2291/365×12 = 75.3
         self.assertIn("상수도공사의 준비기간을 적용", self.sec)
         self.assertIn("강원도 강릉", self.sec)
-        self.assertIn("기계공사를 완료하는 것으로 계획", self.sec)        # 공기 미반영 분야 문장
+        self.assertIn("조경공사를 완료하는 것으로 계획", self.sec)        # 공기 미반영 분야 문장
 
     def test_generated_tables_split_across_pages(self):
         # 글자처럼 취급하면 한 쪽을 넘는 표가 잘린다 → 새로 만든 표는 본문 흐름 + 셀 단위 쪽 나눔

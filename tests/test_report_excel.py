@@ -31,10 +31,8 @@ DATA = {
             {"name": "관리동", "packages": [{"group": "철근콘크리트공사", "lead": "형틀목공", "crew": 2, "days": 13,
                                           "omitted": 1, "items": [
                 {"name": "유로폼", "spec": "", "unit": "㎡", "qty": 200.0, "rate": 0.13, "note": ""}]}]}]},
-        {"name": "전기", "use": True, "mode": "unit_parallel", "units": []},
-        {"name": "기계", "use": False, "mode": "unit_parallel", "units": []},
+        {"name": "조경", "use": False, "mode": "unit_parallel", "units": []},
     ],
-    "elec_after_arch": True,
     "nonwork": {"station": "강원도 강릉", "min_rest": 8,
                 "conditions": [("혹서기(33℃ 이상)", [0] * 6 + [7.4, 6.0] + [0] * 4)],
                 "rows": [{"월": "2026-12", "대상일수": 25, "달력일수": 31, "A": 3.63, "B": 4},
@@ -52,7 +50,7 @@ class AppendixTest(unittest.TestCase):
     def test_sheets_in_order(self):
         self.assertEqual(self.wb.sheetnames, [
             "총괄", "부록1. 작업일수 산정근거(토목)", "부록2. 작업일수 산정근거(건축)",
-            "부록3. 작업일수 산정근거(전기 및 계측제어)", "부록4. 작업일수 산정근거(기계)",
+            "부록3. 작업일수 산정근거(조경)",
             "별표1. 비작업일수 산정", "별표2. 기상조건별 비작업일수", "별표3. 법정공휴일수", "별표4. 준비기간"])
 
     def test_civil_formulas_follow_app_rules(self):
@@ -74,10 +72,9 @@ class AppendixTest(unittest.TestCase):
         f = next(c.value for row in ws.iter_rows() for c in row
                  if isinstance(c.value, str) and c.value.startswith("='부록1"))
         work = next(ws.cell(r, 2).value for r in range(1, ws.max_row + 1) if ws.cell(r, 1).value == "사업 전체")
-        # 토목 + MAX(건축, 건축 완료 후 전기); 미반영 기계는 빠진다
+        # 토목 + 건축; 미반영 조경은 빠진다
         self.assertIn("부록2", work)
-        self.assertIn("부록3", work)
-        self.assertNotIn("부록4", work)
+        self.assertNotIn("부록3", work)
         self.assertTrue(f.startswith("='부록1"))
 
     def test_nonwork_monthly_formulas(self):
@@ -88,11 +85,9 @@ class AppendixTest(unittest.TestCase):
         self.assertTrue(any(v.startswith("=MAX(") for v in vals))
 
     def test_work_formula_helper(self):
-        f = rx._work_formula("T", {"건축": "A", "기계": "M", "전기": "E"}, elec_after_arch=False)
-        self.assertEqual(f, "=T+MAX(A,M,M+E)")
-        f = rx._work_formula("T", {"건축": "A", "전기": "E"}, elec_after_arch=True)
-        self.assertEqual(f, "=T+MAX(A,A+E)")
-        self.assertEqual(rx._work_formula("T", {}, True), "=T")
+        self.assertEqual(rx._work_formula("T", {"건축": "A", "조경": "L"}), "=T+MAX(A,L)")
+        self.assertEqual(rx._work_formula("T", {"건축": "A"}), "=T+A")
+        self.assertEqual(rx._work_formula("T", {}), "=T")
 
 
 if __name__ == "__main__":

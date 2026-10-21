@@ -5,6 +5,7 @@ import zipfile
 import zlib
 from openpyxl.utils.exceptions import InvalidFileException
 from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback
+import schedule_plan as sp
 import math
 import re
 from datetime import datetime, timedelta
@@ -333,6 +334,33 @@ def civil_report_data():
                        "(수동입력 관리 탭에서 입력하면 반영됩니다)."] if unmatched else [])}, total, unmatched
 
 
+def civil_schedule_plan():
+    """토목 공정 배치(schedule_plan.plan_civil) — 사업 전체 공기 탭과 예정공정표 탭이 함께 쓴다.
+
+    주공정으로 고른 대공종(자재·운반류 제외)의 항목 작업일수를 넘긴다. 'crews'에 구분별 조수를 붙인다.
+    """
+    work = st.session_state.get("work_result") or {}
+    sel = set(st.session_state.get("selected_major") or [])
+    rows = [r for r in (work.get("rows") or [])
+            if ((not sel) or r.get("공종명_pure") in sel)
+            and not is_non_work_category(r.get("공종명_pure") or "")]
+    combine_sum = st.session_state.get("combine_mode", "최장(병행)").startswith("합산")
+    majors, crews = [], {}
+    for r in rows:
+        crew = int(r.get("crew", DEFAULT_CREW) or DEFAULT_CREW)
+        nm = r.get("공종명_pure") or r.get("공종", "")
+        its = [{"name": it["name"], "line": it.get("_ukey") or it.get("district") or "(공통)",
+                "days": calc_days_priority(it["name"], it.get("spec", ""), it.get("qty", 0), crew,
+                                           it.get("unit", ""))[0]}
+               for it in r.get("세부항목", [])]
+        majors.append({"name": nm, "days": int(r.get("작업일수(일)", 0) or 0), "items": its})
+        _c = sp.civil_cat(nm)
+        crews[_c] = max(crews.get(_c, 1), crew)
+    plan = sp.plan_civil(majors, combine_sum)
+    plan["crews"] = crews
+    return plan
+
+
 def disc_report_data(disc_res: dict):
     """분야 부록 데이터: 동(설비) → 공종(패키지, 병목 직종) → 항목(병목 직종 인수·작업량)."""
     out = []
@@ -398,6 +426,7 @@ def report_data(title: str, prep_label: str):
         "start_date": (wr.get("start_date").strftime("%Y-%m-%d") if wr.get("start_date") else ""),
         "civil": civil,
         "discs": discs,
+        "struct_end": int((st.session_state.get("project_sched") or {}).get("struct_end") or 0),
         "nonwork": {"rows": rows, "station": station, "conditions": conds,
                     "min_rest": MIN_MONTHLY_REST if wr.get("min_weekly_rest", True) else 0},
         "holiday_years": {y: [get_legal_holidays(y, m) for m in range(1, 13)] for y in years},
@@ -3827,12 +3856,7 @@ with tab5:
         st.warning("먼저 '비작업일수 계산기' 탭에서 착공일과 비작업일수를 계산해주세요. (착공일·달력환산에 필요)")
     else:
         import math as _math
-        from datetime import timedelta as _td, date as _date
-
-        def _add_months(d, n):
-            """d로부터 n개월 후의 (연, 월). 일 성분은 무시(월 단위 공정표라 불필요)."""
-            t = (d.year * 12 + (d.month - 1)) + n
-            return t // 12, t % 12 + 1
+        from datetime import timedelta as _td
 
         # ── 1) 주공정별 작업일수 수집 (선택된 주공정만) ──
         _sel = set(st.session_state.get('selected_major') or [])
@@ -3881,139 +3905,78 @@ with tab5:
                        "다만 비작업일수 계산기에 사업 전체 순작업일수를 아직 적용하지 않아 공정표가 산정 "
                        "공기보다 길어집니다 — 그 탭의 '전체 순작업일수 적용' 버튼을 누르세요.")
 
-        # ── 2) 표준 시퀀스 순서 + 순차(계단식) 시작월 자동 제안 ──
-        # 샘플 예정공정표처럼 토공→관로→구조물→포장이 계단식으로 이어지도록,
-        # 각 공정은 '선행 공정이 일정 비율(25%) 진행된 시점'에 시작하는 것으로 제안.
-        # 특수 의존성: 배수설비공은 관로류(관로/관접합/부설) '완료 후' 시작 (현장 연결 순서).
-        _SEQ = ["가시설", "토공", "추진", "관로", "관접합", "부설", "구조물", "포장", "부대", "배수", "기타"]
-        def _seq_key(name):
-            for i, kw in enumerate(_SEQ):
-                if kw in (name or ""):
-                    return i
-            return len(_SEQ)
+        # ── 2) 공정 배치 ──
+        # 토목은 샘플처럼 고정 구분(토공·가시설·구조물공·관로공·우수공·포장공·부대공) 안에 작업 단위
+        # 막대(schedule_plan.plan_civil). 건축은 토목 구조물공이 끝나면 착수(사업 전체 공기 탭과 같은 기준).
+        # 달력 환산: 비작업일수를 작업일수에 비례해 넣는다 — 본공사 달력일수 ÷ 순작업일수 = 배율.
+        # 막대는 0.1개월 단위로 달 중간에서도 시작·끝난다.
+        _prep_mf = _prep_d / 30.4
 
-        _sched_rows = sorted(_sched_rows, key=lambda r: _seq_key(r.get('공종명_pure', '')))
+        def _mo(t):
+            """본공사 시작부터 센 순작업일수 → 착공부터 센 개월(실수)."""
+            return _prep_mf + t * _scale / 30.4
 
-        # ── 표시 단위 선택: 대공종 요약 vs 라인/구간별 세부 ──
-        _detail_mode = st.radio(
-            "공정표 표시 단위",
-            options=["대공종 요약", "라인·구간별 세부"],
-            index=1,
-            horizontal=True,
-            key="sched_detail_mode",
-            help=(
-                "대공종 요약: 토공·관로공처럼 공종당 막대 1개.\n\n"
-                "라인·구간별 세부: A-LINE/B-LINE-주간/야간, 지구Ⅰ·Ⅱ처럼 구간마다 막대를 나눠 "
-                "실제 예정공정표처럼 표기합니다(구간명·투입조수·작업일수 표시)."
-            ),
-        )
-        _is_detail = _detail_mode.startswith("라인")
+        def _row(sec, grp, name, t0, t1, days=0, crew=0):
+            return {"분야": sec, "구분": grp, "공종": name, "조수": int(crew),
+                    "시작(개월차)": round(1 + _mo(t0), 1),
+                    "기간(개월)": max(0.1, round(_mo(t1) - _mo(t0), 1)), "작업일수": int(days)}
 
-        # 배치 시차: 합산(순차) 모드면 겹침 없이 앞 공정 종료 후 착수, 아니면 25% 계단식
-        _OVERLAP = 1.0 if _is_sum_mode else 0.25
         _prefill = []
-        _prev_start = 1
-        _prev_months = 0
-        _pipe_end = None  # 관로류 종료 개월차 (배수설비 의존성용)
-        _NON_WORK_GROUPS = ("공사준비", "시운전", "준공정리")
-
-        # 공사준비 행 — 비작업일수 탭의 준비기간(착공 직후 인허가·용지보상·현장사무실 등).
-        # 본공사는 준비기간이 끝난 다음 달부터 시작한다.
-        _prep_m = int(round(_prep_d / 30.4))
-        _work_start_m = 1 + _prep_m
-        # 토목 완료 시점(0부터 센 개월). 사업 전체 공기 탭이 넘긴 토목 일수, 없으면 산정 기준 일수
-        # (그때는 본공사 기간 끝과 같다).
-        _civ_end_f = _prep_m + int(_ps.get("civil_days") or _base_wd) * _scale / 30.4
-        _civ_end_m = max(_work_start_m, int(_math.ceil(_civ_end_f - 1e-9)))
         if _prep_d > 0:
-            _prefill.append({"분야": "가설공사", "구분": "공사준비", "공종": "공사준비(인허가·용지보상·가설시설 등)", "조수": 0,
-                             "시작(개월차)": 1, "기간(개월)": max(1, _prep_m), "작업일수": _prep_d})
+            _prefill.append({"분야": "가설공사", "구분": "", "공종": "준비(공사착공)·가설사무소", "조수": 0,
+                             "시작(개월차)": 1.0, "기간(개월)": round(_prep_mf, 1), "작업일수": _prep_d})
+        _cplan = civil_schedule_plan()
+        for _b in _cplan["bars"]:
+            _prefill.append(_row("토목공사", _b["구분"], _b["공종"], _b["s"], _b["e"], _b["days"],
+                                 _cplan["crews"].get(_b["구분"], DEFAULT_CREW)))
+        _struct_t = float(_ps["struct_end"]) if _ps.get("struct_end") is not None else float(_cplan["struct_end"])
 
-        for r in _sched_rows:
-            _nm = r.get('공종명_pure') or r.get('공종', '')
-            _wd_total = int(r.get('작업일수(일)', 0) or 0)
-            if _wd_total <= 0:
-                continue
-            _crew = int(r.get('crew', DEFAULT_CREW) or DEFAULT_CREW)
-
-            _lines = r.get("_라인별누적") or {}
-            if _is_detail and len(_lines) > 1:
-                _units = [(f"{_nm} ({ln})", int(d)) for ln, d in
-                          sorted(_lines.items(), key=lambda x: -x[1]) if int(d) > 0]
-            else:
-                _units = [(_nm, _wd_total)]
-
-            _grp_start = None
-            for _label, _wd in _units:
-                _months = max(1, int(_math.ceil((_wd * _scale) / 30.4)))
-
-                if any(kw in _label for kw in ("배수",)) and _pipe_end is not None:
-                    _start = _pipe_end + 1
-                elif not any(p["구분"] not in _NON_WORK_GROUPS for p in _prefill):
-                    _start = _work_start_m
-                elif _grp_start is not None:
-                    # 같은 공종의 라인들은 서로 병행 → 동일 시작월
-                    _start = _grp_start
-                else:
-                    _start = _prev_start + max(1, int(_math.ceil(_prev_months * _OVERLAP)))
-
-                if not _is_sum_mode:
-                    # 최장(병행) 모드의 토목 공기는 가장 긴 라인 그 자체다. 계단식으로 늦게 시작한 공종이
-                    # 토목 완료 시점을 넘기면 공정표가 산정 공기보다 길어지고 후속 분야(건축)와 겹친다.
-                    _start = max(_work_start_m, min(_start, _civ_end_m - _months + 1))
-
-                if _grp_start is None:
-                    _grp_start = _start
-
-                _prefill.append({"분야": "토목공사", "구분": _nm, "공종": _label, "조수": _crew,
-                                 "시작(개월차)": _start, "기간(개월)": _months, "작업일수": _wd})
-
-                if any(kw in _label for kw in ("관로", "관접합", "부설")):
-                    _e = _start + _months - 1
-                    _pipe_end = _e if _pipe_end is None else max(_pipe_end, _e)
-
-            if _units:
-                _longest = max(max(1, int(_math.ceil((w * _scale) / 30.4))) for _, w in _units)
-                _prev_start, _prev_months = _grp_start, _longest
-
-        # 분야(건축 등) 행 — 사업 전체 공기 탭의 결과. 토목 완료 시점부터 동·설비 단위별로
-        # 공종을 차례로 잇는다(동끼리는 병행, '동 순차'면 동도 차례로). 실수 개월로 이어 붙인 뒤
-        # 시작·끝을 정수 개월로 바꿔, 짧은 공종이 모두 1개월로 올림돼 전체가 늘어나는 것을 막는다.
+        # 분야(건축·조경) — 착수 시점(start)은 본공사 시작부터 센 순작업일수. 동·설비 단위별로 공종을
+        # 차례로 잇는다(동끼리는 병행, '동 순차'면 동도 차례로).
         _DISC_SECTION = {"건축": "건축공사", "조경": "조경공사"}
+        _work_end_t = float(_den)
         for _dd in _ps_discs:
-            _t0 = _civ_end_f + int(_dd.get("start", 0)) * _scale / 30.4
+            _t0 = float(_dd.get("start", 0))
             _cur = {}
             for _p in _dd.get("packages", []):
                 _ukey = "_all" if _dd.get("mode") == "seq" else _p["unit"]
-                _s_f = _cur.get(_ukey, _t0)
-                _e_f = _s_f + _p["days"] * _scale / 30.4
-                _cur[_ukey] = _e_f
-                _sm_i = int(_math.floor(_s_f + 1e-9)) + 1
-                _em_i = max(_sm_i, int(_math.ceil(_e_f - 1e-9)))
-                _prefill.append({"분야": _DISC_SECTION.get(_dd["name"], _dd["name"]), "구분": _p["unit"],
-                                 "공종": _p["group"], "조수": int(_p["crews"]), "시작(개월차)": _sm_i,
-                                 "기간(개월)": _em_i - _sm_i + 1, "작업일수": int(_p["days"])})
+                _s_t = _cur.get(_ukey, _t0)
+                _e_t = _s_t + _p["days"]
+                _cur[_ukey] = _e_t
+                _work_end_t = max(_work_end_t, _e_t)
+                _prefill.append(_row(_DISC_SECTION.get(_dd["name"], _dd["name"]), _p["unit"], _p["group"],
+                                     _s_t, _e_t, _p["days"], _p["crews"]))
 
-        # 시운전·준공정리 행 — 비작업일수 탭에 입력한 기간 그대로 본공사 뒤에 붙인다.
-        # (예전에는 공종명에 '구조물·처리·설비' 등이 있으면 시운전 2개월을 고정으로 붙여,
-        #  입력한 시운전 기간과 무관하게 공정표가 늘어났다)
-        _work_rows = [p for p in _prefill if p["구분"] not in _NON_WORK_GROUPS]
-        _end_all = max((p["시작(개월차)"] + p["기간(개월)"] - 1 for p in _work_rows),
-                       default=_work_start_m - 1)
-        for _sec_nm, _grp_nm, _label_nm, _dd in (("종합시운전", "시운전", "시운전/시설인계", _comm_d),
-                                                 ("가설공사", "준공정리", "준공정리(현장정리·준공서류)", _wrap_d)):
+        # 기계·전기 — 공기 산정 대상이 아니라 설치 시기 표시(샘플처럼 '기자재 설치').
+        # 건축 착수(구조물공 완료)부터 본공사 완료까지, 전기 접지·슬리브는 구조물공 중에.
+        _sspan = _cplan.get("struct_span")
+        if _sspan or _ps_discs:
+            _m0 = _struct_t if _work_end_t - _struct_t >= 0.1 * _work_end_t else 0.8 * _work_end_t
+            _prefill.append(_row("기계공사", "기계설비", "기자재 설치 및 배관", _m0, _work_end_t))
+            if _sspan:
+                _s0, _s1 = _sspan
+                _prefill.append(_row("전기 및 계측제어공사", "전기·계측", "접지·배관배선 및 슬리브공사",
+                                     _s0 + 0.1 * (_s1 - _s0), _s0 + 0.45 * (_s1 - _s0)))
+            _prefill.append(_row("전기 및 계측제어공사", "전기·계측", "기자재 설치·케이블·조명·계측제어",
+                                 _m0, _work_end_t))
+
+        # 시운전·정리기간 — 비작업일수 탭에 입력한 기간 그대로 본공사 뒤에 붙인다.
+        _end_m = round(1 + _mo(_work_end_t), 1)
+        for _sec_nm, _grp_nm, _label_nm, _dd in (("종합시운전", "", "종합시운전", _comm_d),
+                                                 ("가설공사", "", "정리기간", _wrap_d)):
             if _dd > 0:
-                _mm = max(1, int(round(_dd / 30.4)))
                 _prefill.append({"분야": _sec_nm, "구분": _grp_nm, "공종": _label_nm, "조수": 0,
-                                 "시작(개월차)": _end_all + 1, "기간(개월)": _mm, "작업일수": _dd})
-                _end_all += _mm
+                                 "시작(개월차)": _end_m, "기간(개월)": round(_dd / 30.4, 1), "작업일수": _dd})
+                _end_m = round(_end_m + _dd / 30.4, 1)
 
         if not _prefill:
             st.warning("주공정으로 선택된 공종 중 작업일수가 있는 항목이 없습니다.")
         else:
             import pandas as _pd
             st.markdown("#### ✏️ 공정 배치 (자동 제안값, 직접 수정 가능)")
-            st.caption("시작(개월차)=착공 후 몇 번째 달부터, 기간(개월)=지속 개월수. 보상·인허가 등 프로젝트 사정에 맞게 조정하세요.")
+            st.caption("시작(개월차)=착공 후 몇 번째 달부터(1.5 = 첫째 달 중간), 기간(개월)=지속 개월수(0.1 단위). "
+                       "비작업일수는 작업일수에 비례해 들어가 있습니다. 보상·인허가 등 사업 사정에 맞게 조정하세요. "
+                       "기계·전기 막대는 공기 산정 대상이 아닌 설치 시기 표시입니다.")
             _edited = st.data_editor(
                 _pd.DataFrame(_prefill),
                 hide_index=True,
@@ -4024,8 +3987,10 @@ with tab5:
                     "구분": st.column_config.TextColumn(help="왼쪽 둘째 열(대공종·동 이름)"),
                     "공종": st.column_config.TextColumn(required=True),
                     "조수": st.column_config.NumberColumn(min_value=0, step=1),
-                    "시작(개월차)": st.column_config.NumberColumn(min_value=1, step=1, required=True),
-                    "기간(개월)": st.column_config.NumberColumn(min_value=1, step=1, required=True),
+                    "시작(개월차)": st.column_config.NumberColumn(min_value=1.0, step=0.1, format="%.1f",
+                                                              required=True),
+                    "기간(개월)": st.column_config.NumberColumn(min_value=0.1, step=0.1, format="%.1f",
+                                                            required=True),
                     "작업일수": st.column_config.NumberColumn(),
                 },
                 # 자동 제안이 바뀌면(분야 추가·공기 변경) 예전 편집 내용이 엉뚱한 행에 붙지 않게 새로 시작
@@ -4035,10 +4000,16 @@ with tab5:
 
             _proj_name = st.text_input("공사명", value="상하수도 공사", key="sched_project_name")
 
-            _max_month = int((_edited["시작(개월차)"] + _edited["기간(개월)"] - 1).max())
+            _max_month = int(_math.ceil(float((_edited["시작(개월차)"] + _edited["기간(개월)"] - 1).max()) - 1e-6))
             _base_months = int(_math.ceil(_total_days / 30.4))
             if _max_month > _base_months:
-                st.caption(f"ℹ️ 순차 배치·의존성(배수설비는 관로 완료 후) 반영으로 전체 {_max_month}개월 — 병행 기준 공기({_base_months}개월)보다 깁니다. 표에서 시작월을 앞당겨 조정할 수 있습니다.")
+                st.caption(f"ℹ️ 공정표가 {_max_month}개월로 산정 공기({_base_months}개월)보다 깁니다. "
+                           "사업 전체 순작업일수를 비작업일수 계산기에 적용했는지, 표의 시작월이 맞는지 확인하세요.")
+            _flood = st.multiselect(
+                "수방기간 (공정표에 음영 표시할 달)", options=list(range(1, 13)), default=[9, 10],
+                format_func=lambda m: f"{m}월", key="sched_flood_months",
+                help="풍각 샘플처럼 해당 월 열을 연한 파랑으로 칠하고 월계 위에 '수방기간' 행을 둡니다. "
+                     "비우면 표시하지 않습니다.")
 
             # ── 3) 화면 미리보기 (plotly 간트) ──
             try:
@@ -4048,8 +4019,8 @@ with tab5:
 
                 _gantt, _seen_y = [], {}
                 for _, _row in _edited.iterrows():
-                    _sy, _sm2 = _add_months(_start_d, int(_row["시작(개월차)"]) - 1)
-                    _ey, _em2 = _add_months(_start_d, int(_row["시작(개월차)"]) - 1 + int(_row["기간(개월)"]))
+                    _s_f = float(_row["시작(개월차)"]) - 1
+                    _e_f = _s_f + float(_row["기간(개월)"])
                     # 건축은 동마다 같은 공종명이 반복되므로 '동 · 공종'으로 줄 이름을 구분한다
                     _g, _n = _cell_txt(_row.get("구분")), _cell_txt(_row["공종"])
                     _yl = _n if (not _g or _n.startswith(_g)) else f"{_g} · {_n}"
@@ -4058,7 +4029,8 @@ with tab5:
                     if _k:
                         _yl = f"{_yl} ({_k + 1})"
                     _gantt.append({"공종": _yl, "분야": _cell_txt(_row.get("분야")) or "토목공사",
-                                   "시작": _date(_sy, _sm2, 1), "종료": _date(_ey, _em2, 1)})
+                                   "시작": _start_d + _td(days=round(_s_f * 30.4)),
+                                   "종료": _start_d + _td(days=round(_e_f * 30.4))})
                 _gdf = _pd.DataFrame(_gantt)
                 _fig = _px.timeline(_gdf, x_start="시작", x_end="종료", y="공종", color="분야")
                 _fig.update_yaxes(autorange="reversed")
@@ -4073,13 +4045,16 @@ with tab5:
                 try:
                     import schedule_excel as _sx
                     # 조수는 앱이 판단한 값이 아니라 가정값임을 산출물에 남긴다
-                    _notes = ["※ 막대의 'N조'는 현장 경험에 따른 투입조수 가정값이며, 작업일수는 "
-                              "이 가정으로 계산했습니다."]
+                    _notes = ["※ 작업일수는 현장 경험에 따른 투입조수 가정값으로 계산했고, 비작업일수는 "
+                              "작업일수에 비례해 배분해 달력 기간으로 환산했습니다."]
                     _dsum = st.session_state.get("disc_crew_summary")
                     if _dsum:
                         _notes.append(f"※ 타분야 투입조수 가정: {_dsum}")
+                    _notes.append("※ 건축은 토목 구조물공 완료 후 착수하며, 기계·전기는 공기 산정 대상이 아닌 "
+                                  "설치 시기를 표시한 것입니다.")
                     _xbytes = _sx.build_schedule_xlsx(_edited.to_dict("records"), _start_d,
-                                                      f"{_proj_name} 예정공정표", notes=_notes)
+                                                      f"{_proj_name} 예정공정표", notes=_notes,
+                                                      flood_months=_flood)
                     st.download_button(
                         label="📥 예정공정표 다운로드",
                         data=BytesIO(_xbytes),
@@ -4689,16 +4664,25 @@ with tab7:
         if _off:
             st.caption("🚫 공기 미반영: " + ", ".join(f"{_d} {_t}일" for _d, _t in _off)
                        + " — 공기를 좌우하는 경우 각 분야에서 '공기에 반영'을 켜세요.")
-        # 토목 이후 구간은 건축·조경 병행 — 긴 쪽이 지배한다.
-        _after_civil = max(_arch, _land)
-        _total = _civil_days + _after_civil
+        # 건축은 토목 구조물공이 끝나면 착수한다(되메우기·포장 등 나머지 토목과 병행 — 사용자 기준).
+        # 조경은 토목 완료 후. 구조물공 완료 시점은 예정공정표와 같은 배치(schedule_plan)에서 얻는다.
+        _struct_end = _civil_days
+        if _civil_days:
+            _cplan = civil_schedule_plan()
+            if _cplan["bars"] and abs(_cplan["civil_days"] - _civil_days) <= 1:
+                _struct_end = min(_civil_days, int(round(_cplan["struct_end"])))
+        _total = sp.project_days(_civil_days, _struct_end, _arch, _land)
+        _after_civil = _total - _civil_days
 
         # 예정공정표 탭이 분야 막대를 그릴 수 있게 반영 분야의 동·공종별 일수와 착수 시점을 남긴다.
         # 착수 시점은 토목 완료 후 경과 순작업일수(전기는 선행 분야 완료 후). 예정공정표 탭이 이 탭보다
         # 먼저 실행되므로 다음 실행부터 반영된다(위젯을 건드리면 곧바로 다시 실행된다).
-        _sched_start = {"건축": 0, "조경": 0}
+        # 착수 시점 = 본공사 시작부터 센 순작업일수(건축은 구조물공 완료, 조경은 토목 완료)
+        _sched_start = {"건축": _struct_end, "조경": _civil_days}
         st.session_state["project_sched"] = {
             "civil_days": _civil_days,
+            "struct_end": _struct_end,
+            "total": _total,
             "disciplines": [
                 {"name": _d, "mode": _r.get("mode", "unit_parallel"),
                  "start": _sched_start.get(_d, 0), "total": int(_r["total"]),
@@ -4739,7 +4723,8 @@ with tab7:
                                     "시작(일차)": 1, "종료(일차)": _c_end, "선행": "-"})
             if _arch:
                 _stage_rows.append({"단계": "🏛️ 건축", "작업일수": _arch,
-                                    "시작(일차)": _c_end + 1, "종료(일차)": _c_end + _arch, "선행": "토목"})
+                                    "시작(일차)": _struct_end + 1, "종료(일차)": _struct_end + _arch,
+                                    "선행": "토목 구조물공 완료 후"})
             if _land:
                 _stage_rows.append({"단계": "🌳 조경", "작업일수": _land,
                                     "시작(일차)": _c_end + 1, "종료(일차)": _c_end + _land,
@@ -4759,7 +4744,8 @@ with tab7:
             _m1.metric("사업 전체 순작업일수", f"{_total}일",
                        delta=f"토목 {_civil_days} + 이후 {_after_civil}", delta_color="off")
             _m2.metric("토목만", f"{_civil_days}일")
-            st.caption("건축·조경은 토목 후 동시 시공으로 보고 가장 긴 쪽을 씁니다. "
+            st.caption("건축은 토목 구조물공이 끝나면 착수하고(되메우기·포장 등 나머지 토목과 병행), "
+                       f"조경은 토목 완료 후 착수합니다 — 건축 착수 {_struct_end + 1}일차. "
                        "분야별 '공기에 반영'을 끄면 그 분야는 이 연결에서 빠집니다. "
                        "비작업일수·준비·시운전 기간은 '비작업일수 계산기'에서 더해집니다.")
             # ── 목표 공기 대조 및 분야별 조수 역산 ─────────────────────────────
@@ -4787,11 +4773,12 @@ with tab7:
                              f"'공기산정' 탭의 투입조수 역산으로 토목을 {_civil_days - _tgt_days + 1}일 "
                              "이상 줄여야 합니다.")
                 else:
-                    # 토목 이후 구간은 건축·조경 병행 — 각자 남은 일수를 다 쓸 수 있다
-                    _tg = {_d: _avail for _d in ("건축", "조경")
+                    # 건축은 구조물공 완료부터, 조경은 토목 완료부터 목표까지 쓸 수 있다
+                    _from = {"건축": _struct_end, "조경": _civil_days}
+                    _tg = {_d: _tgt_days - _from[_d] for _d in ("건축", "조경")
                            if (_disc_res.get(_d) or {}).get("use", True) and _disc_res.get(_d)}
-                    _tg = {_k: int(_v) for _k, _v in _tg.items() if _disc_res.get(_k)}
-                    st.caption("분야별 허용 일수(토목 이후 " + f"{_avail}일 배분): "
+                    _tg = {_k: int(_v) for _k, _v in _tg.items() if _disc_res.get(_k) and _v > 0}
+                    st.caption("분야별 허용 일수(목표 " + f"{_tgt_days}일 기준): "
                                + " · ".join(f"{_k} {_v}일" for _k, _v in _tg.items()))
                     if _tg and st.button("👷 목표 공기에 맞춰 분야별 필요 조수 역산",
                                          width="stretch", key="apply_disc_targets"):

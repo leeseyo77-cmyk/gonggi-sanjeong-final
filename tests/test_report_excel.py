@@ -85,8 +85,9 @@ class AppendixTest(unittest.TestCase):
         self.assertTrue(any(v.startswith("=MAX(") for v in vals))
 
     def test_work_formula_helper(self):
-        self.assertEqual(rx._work_formula("T", {"건축": "A", "조경": "L"}), "=T+MAX(A,L)")
-        self.assertEqual(rx._work_formula("T", {"건축": "A"}), "=T+A")
+        # 건축은 구조물공 완료(800일) 후, 조경은 토목 완료 후
+        self.assertEqual(rx._work_formula("T", {"건축": "A", "조경": "L"}, 800), "=MAX(T,800+A,T+L)")
+        self.assertEqual(rx._work_formula("T", {"건축": "A"}), "=MAX(T,T+A)")
         self.assertEqual(rx._work_formula("T", {}), "=T")
 
 

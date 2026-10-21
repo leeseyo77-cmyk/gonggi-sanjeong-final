@@ -417,13 +417,20 @@ def _prep_sheet(wb, name: str, prep_days: int, applied_label: str) -> None:
 
 
 # ── 총괄 ────────────────────────────────────────────────────────────────
-def _work_formula(civil_ref: str, disc_refs: Dict[str, str]) -> str:
-    """사업 전체 작업일수 = 토목 + 토목 이후 구간(건축·조경 병행 — 사업 전체 공기 탭과 같은 식)."""
-    branches = [disc_refs[k] for k in ("건축", "조경") if k in disc_refs]
-    if not branches:
+def _work_formula(civil_ref: str, disc_refs: Dict[str, str], struct_end: int = 0) -> str:
+    """사업 전체 작업일수(사업 전체 공기 탭과 같은 식).
+
+    건축은 토목 구조물공 완료(struct_end일) 후, 조경은 토목 완료 후 착수 → 가장 늦게 끝나는 쪽.
+    struct_end가 없으면 건축도 토목 완료 후로 본다.
+    """
+    ends = []
+    if "건축" in disc_refs:
+        ends.append(f"{struct_end}+{disc_refs['건축']}" if struct_end else f"{civil_ref}+{disc_refs['건축']}")
+    if "조경" in disc_refs:
+        ends.append(f"{civil_ref}+{disc_refs['조경']}")
+    if not ends:
         return f"={civil_ref}"
-    after = branches[0] if len(branches) == 1 else "MAX(" + ",".join(branches) + ")"
-    return f"={civil_ref}+{after}"
+    return "=MAX(" + ",".join([civil_ref] + ends) + ")"
 
 
 def build_appendix_xlsx(data: Dict[str, Any]) -> bytes:
@@ -472,7 +479,7 @@ def build_appendix_xlsx(data: Dict[str, Any]) -> bytes:
         r += 1
     tot = r
     S.put(tot, 1, "사업 전체", bold=True, h="left", fill=_CAT)
-    S.put(tot, 2, _work_formula(civil_ref, disc_refs),
+    S.put(tot, 2, _work_formula(civil_ref, disc_refs, int(data.get("struct_end") or 0)),
           bold=True, fmt="#,##0", fill=_CAT)
     S.put(tot, 3, f"={nw_ref}", bold=True, fmt="#,##0", fill=_CAT)
     S.put(tot, 4, per["prep"], bold=True, fill=_CAT)
@@ -482,8 +489,9 @@ def build_appendix_xlsx(data: Dict[str, Any]) -> bytes:
     S.put(tot, 8, f"=ROUND(G{tot}/365*12,1)", bold=True, fmt="0.0", fill=_CAT)
     r = tot + 2
     notes = [
-        "※ 사업 전체 작업일수 = 토목 + 토목 이후 구간(건축·조경은 병행 — 긴 쪽). "
-        "공기 미반영 분야는 계산에서 뺍니다.",
+        "※ 사업 전체 작업일수 = 가장 늦게 끝나는 분야의 완료 시점 — 건축은 토목 구조물공 완료"
+        + (f"({int(data['struct_end'])}일차)" if data.get("struct_end") else "")
+        + " 후, 조경은 토목 완료 후 착수. 공기 미반영 분야는 계산에서 뺍니다.",
         "※ 비작업일수는 작업일수가 진행되는 본공사 구간의 월별 값을 합산했습니다(별표1).",
         "※ 투입조수(조)는 현장 경험에 따른 가정값이며, 작업일수는 이 가정으로 계산했습니다.",
         *data.get("notes", []),

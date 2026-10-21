@@ -33,7 +33,7 @@ class BuildTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.xlsx = sx.build_schedule_xlsx(ROWS, date(2026, 1, 1), "테스트 예정공정표",
-                                          notes=["※ 막대의 'N조'는 가정값"])
+                                          notes=["※ 막대의 'N조'는 가정값"], flood_months=[9, 10])
         cls.zip = zipfile.ZipFile(io.BytesIO(cls.xlsx))
         cls.ws = openpyxl.load_workbook(io.BytesIO(cls.xlsx)).active
 
@@ -66,9 +66,19 @@ class BuildTest(unittest.TestCase):
         vals = {self.ws.cell(r, 1).value: r for r in range(5, self.ws.max_row + 1)}
         cum_row = vals["누계(%)"]
         cum = [self.ws.cell(cum_row, c).value for c in range(3, 3 + 19 * 2, 2)]
-        self.assertEqual(cum[-1], 100.0)
+        self.assertEqual(cum[-1], 100)
         self.assertEqual(cum, sorted(cum))
-        self.assertEqual(cum[0], 0.0)                                   # 공사준비는 작업량 0
+        self.assertEqual(cum[0], 0)                                     # 공사준비는 작업량 0
+
+    def test_flood_season_row_and_shading(self):
+        # 풍각 샘플: 수방기간(9·10월) 열 음영 + 월계 위 '수방기간' 행
+        vals = {self.ws.cell(r, 1).value: r for r in range(5, self.ws.max_row + 1)}
+        fr = vals["수방기간"]
+        self.assertEqual(fr + 1, vals["월계(%)"])
+        sep = 3 + 8 * 2                                                 # 2026-09 = 9번째 달
+        self.assertEqual(self.ws.cell(fr, sep).value, "수방기간")
+        self.assertEqual(self.ws.cell(6, sep).fill.fgColor.rgb[-6:], "DDEBF7")
+        self.assertNotEqual((self.ws.cell(6, sep - 2).fill.fgColor.rgb or "")[-6:], "DDEBF7")
 
     def test_notes_written(self):
         texts = [self.ws.cell(r, 1).value for r in range(1, self.ws.max_row + 1)]
@@ -81,9 +91,29 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(sx.short_label("토공", "토공"), "토공")
         self.assertEqual(sx.short_label("A동", "철근콘크리트공사"), "철근콘크리트공사")
 
-    def test_bar_label_shows_crew_assumption(self):
+    def test_bar_label_is_name_only(self):
+        # 샘플처럼 막대 위에는 공종명만 — 조수 가정은 아래 주석으로
         row = sx.normalize_rows([ROWS[3]])[0]
-        self.assertEqual(sx.bar_label(row), "철근콘크리트공사_4조 120일")
+        self.assertEqual(sx.bar_label(row), "철근콘크리트공사")
+
+    def test_fractional_months(self):
+        r = sx.normalize_rows([{"공종": "터파기", "시작(개월차)": 3.5, "기간(개월)": 1.25}])[0]
+        self.assertEqual((r["s0"], r["e0"]), (2.5, 3.75))
+
+    def test_sequential_bars_share_a_lane(self):
+        rows = sx.normalize_rows([
+            {"구분": "토공", "공종": "표토제거", "시작(개월차)": 1, "기간(개월)": 1},
+            {"구분": "토공", "공종": "터파기", "시작(개월차)": 3, "기간(개월)": 2},
+            {"구분": "토공", "공종": "되메우기", "시작(개월차)": 3.5, "기간(개월)": 1}])   # 터파기와 겹침
+        lanes = sx.pack_lanes(rows)
+        self.assertEqual([[x["공종"] for x in ln] for ln in lanes], [["표토제거", "터파기"], ["되메우기"]])
+
+    def test_progress_is_integer_and_sums_to_100(self):
+        rows = sx.normalize_rows(ROWS)
+        monthly, cum = sx.monthly_progress(rows, 19)
+        self.assertTrue(all(isinstance(v, int) for v in monthly + cum))
+        self.assertEqual(sum(monthly), 100)
+        self.assertEqual(cum[-1], 100)
 
     def test_bad_rows_are_skipped(self):
         bad = [{"공종": "x", "시작(개월차)": float("nan"), "기간(개월)": 2},

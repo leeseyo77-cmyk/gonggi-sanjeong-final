@@ -5,9 +5,10 @@ schedule_excel.py — 예정공정표 엑셀 생성
 양식은 발주처 제출용 '공사예정표' 샘플(풍각 증설·영해 증설)을 따른다.
   - 왼쪽 두 열: 분야(가설·토목·건축·…·종합시운전) / 세부 구분(토공·구조물공·동 이름 …)
   - 머리행: 기간(개월)+연도 / 경과 개월 1~N / 달력 월. 한 달 = 2열
-  - 공종 막대: 초록 선 + 양 끝 동그라미(도형). 공종명은 선 위에 셀 글자로 쓴다
+  - 공종 막대: 초록 선 + 양 끝 동그라미(도형), 공종명은 막대 위 가운데(글상자).
+    막대는 달 중간에서 시작·끝날 수 있고(0.1개월 단위), 겹치지 않는 막대는 한 줄에 함께 놓는다
   - 분야 요약: 라벨 상자 + 화살표 + 빨간 요약선, 선행 분야가 끝나는 곳에서 빨간 세로 연결선
-  - 아래: 월계(%)·누계(%) 행과 누계 S-커브(파란 점선)
+  - 아래: 수방기간 행(해당 월 열 음영 — 풍각 샘플), 월계(%)·누계(%) 정수 행과 누계 S-커브(파란 점선)
 막대를 셀 색칠이 아니라 도형으로 그리는 것은 샘플과 같게 하고, 받는 사람이 엑셀에서 도형을
 끌어 일정을 고치기 쉽게 하기 위해서다. openpyxl은 선·타원 같은 임의 도형을 쓰지 못하므로
 워크북을 저장한 뒤 DrawingML 파트(xl/drawings/drawing1.xml)를 직접 넣는다.
@@ -49,6 +50,8 @@ _thin = Side(style="thin", color="808080")
 _dot = Side(style="dotted", color="A6A6A6")
 _med = Side(style="medium", color="404040")
 _HDR_FILL = PatternFill("solid", fgColor="F2F2F2")
+_FLOOD_FILL = PatternFill("solid", fgColor="DDEBF7")     # 수방기간 음영(풍각 샘플의 연한 파랑)
+CHAR_MONTHS = 0.2           # 8pt 글자 한 자가 차지하는 폭(개월) — 막대 글자 겹침 판정용
 
 
 # ── 입력 정리 ────────────────────────────────────────────────────────────
@@ -67,16 +70,28 @@ def _txt(v) -> str:
     return str(v).strip()
 
 
+def _numf(v) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if math.isnan(f) else round(f, 2)
+
+
 def normalize_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """편집표 행 → 그리기용 행. 시작·기간이 없거나 공종명이 빈 행은 버린다."""
+    """편집표 행 → 그리기용 행. 시작·기간이 없거나 공종명이 빈 행은 버린다.
+
+    시작(개월차)은 1부터, 기간(개월)은 실수(달 중간 시작·끝)를 받는다.
+    """
     out = []
     for r in rows:
-        s, d, name = _num(r.get("시작(개월차)")), _num(r.get("기간(개월)")), _txt(r.get("공종"))
-        if s < 1 or d < 1 or not name:
+        s, d, name = _numf(r.get("시작(개월차)")), _numf(r.get("기간(개월)")), _txt(r.get("공종"))
+        if s < 1 or d <= 0 or not name:
             continue
         out.append({"분야": _txt(r.get("분야")) or "토목공사", "구분": _txt(r.get("구분")),
                     "공종": name, "조수": max(0, _num(r.get("조수"))),
-                    "작업일수": max(0, _num(r.get("작업일수"))), "시작": s, "기간": d})
+                    "작업일수": max(0, _num(r.get("작업일수"))), "시작": s, "기간": d,
+                    "s0": s - 1, "e0": s - 1 + d})
     return out
 
 
@@ -89,35 +104,59 @@ def short_label(group: str, name: str) -> str:
 
 
 def bar_label(row: Dict[str, Any]) -> str:
-    """막대 위 글자: 공종명_N조 D일(조수·일수가 있을 때). 조수는 가정값이라 드러내 둔다."""
-    lab = short_label(row["구분"], row["공종"])
-    if row["조수"] > 0:
-        lab += f"_{row['조수']}조"
-    if row["작업일수"] > 0:
-        lab += f" {row['작업일수']}일"
-    return lab
+    """막대 위 글자: 공종명만(샘플과 같음). 투입조수 가정은 아래 주석에 적는다."""
+    return short_label(row["구분"], row["공종"])
+
+
+def _label_span(row: Dict[str, Any]):
+    """막대와 그 위 글자가 차지하는 구간(개월) — 한 줄에 함께 놓을 수 있는지 판정용."""
+    mid = (row["s0"] + row["e0"]) / 2
+    half = len(bar_label(row)) * CHAR_MONTHS / 2
+    return min(row["s0"], mid - half), max(row["e0"], mid + half)
+
+
+def pack_lanes(items: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """겹치지 않는 막대(글자 포함)를 같은 줄에 — 샘플처럼 '표토제거 → 터파기 → 되메우기'가 한 줄."""
+    lanes: List[List[Dict[str, Any]]] = []
+    ends: List[float] = []
+    for it in sorted(items, key=lambda x: (x["s0"], x["e0"])):
+        a, b = _label_span(it)
+        for i, e in enumerate(ends):
+            if a >= e + 0.05:
+                lanes[i].append(it)
+                ends[i] = b
+                break
+        else:
+            lanes.append([it])
+            ends.append(b)
+    return lanes
 
 
 def monthly_progress(rows: Sequence[Dict[str, Any]], n_months: int):
-    """월계·누계(%) — 작업량(작업일수×조수, 인·일 대용) 기준으로 막대 기간에 고르게 나눈다."""
+    """월계·누계(%, 정수) — 작업량(작업일수×조수)을 막대가 걸친 기간에 고르게 나눈다.
+
+    누계를 먼저 반올림하고 월계는 누계의 차이로 구해 월계 합이 정확히 100이 되게 한다.
+    """
     w = [0.0] * n_months
     for r in rows:
         if r["분야"] in _NO_LOAD:
             continue
         load = r["작업일수"] * max(1, r["조수"])
-        if load <= 0:
+        if load <= 0 or r["기간"] <= 0:
             continue
-        for m in range(r["시작"] - 1, min(n_months, r["시작"] - 1 + r["기간"])):
-            w[m] += load / r["기간"]
+        for m in range(max(0, int(math.floor(r["s0"]))), min(n_months, int(math.ceil(r["e0"])))):
+            ov = min(m + 1, r["e0"]) - max(m, r["s0"])
+            if ov > 0:
+                w[m] += load * ov / r["기간"]
     tot = sum(w)
     if tot <= 0:
-        return [0.0] * n_months, [0.0] * n_months
-    monthly = [round(x / tot * 100, 1) for x in w]
+        return [0] * n_months, [0] * n_months
     cum, acc = [], 0.0
     for x in w:
         acc += x
-        cum.append(round(acc / tot * 100, 1))
-    cum[-1] = 100.0
+        cum.append(int(round(acc / tot * 100)))
+    cum[-1] = 100
+    monthly = [c - (cum[i - 1] if i else 0) for i, c in enumerate(cum)]
     return monthly, cum
 
 
@@ -186,7 +225,8 @@ class _Drawing:
                  f"{dash_xml}</a:ln></xdr:spPr></xdr:cxnSp>")
         self._anchor(x1, top, x2, bot, inner)
 
-    def shape(self, prst: str, x1, y1, x2, y2, fill: str, line_color: str, line_w: int = 9525,
+    def shape(self, prst: str, x1, y1, x2, y2, fill: Optional[str], line_color: Optional[str],
+              line_w: int = 9525,
               text: Optional[str] = None, text_color: str = "000000", size: int = 800,
               bold: bool = False) -> None:
         i = self._id()
@@ -199,13 +239,14 @@ class _Drawing:
                   f'<a:solidFill><a:srgbClr val="{text_color}"/></a:solidFill>'
                   f'<a:latin typeface="{FONT}"/><a:ea typeface="{FONT}"/></a:rPr>'
                   f"<a:t>{escape(text)}</a:t></a:r></a:p></xdr:txBody>")
+        fill_xml = (f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>' if fill else "<a:noFill/>")
+        ln_xml = (f'<a:ln w="{line_w}"><a:solidFill><a:srgbClr val="{line_color}"/></a:solidFill></a:ln>'
+                  if line_color else "<a:ln><a:noFill/></a:ln>")
         inner = (f'<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="{i}" name="도형 {i}"/>'
                  "<xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr>"
                  f"{self._xfrm(x1, y1, x2 - x1, y2 - y1)}"
                  f'<a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>'
-                 f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>'
-                 f'<a:ln w="{line_w}"><a:solidFill><a:srgbClr val="{line_color}"/></a:solidFill></a:ln>'
-                 f"</xdr:spPr>{tx}</xdr:sp>")
+                 f"{fill_xml}{ln_xml}</xdr:spPr>{tx}</xdr:sp>")
         self._anchor(x1, y1, x2, y2, inner)
 
     def xml(self) -> str:
@@ -276,15 +317,18 @@ def _sections(rows: List[Dict[str, Any]]):
 
 
 def build_schedule_xlsx(rows: Sequence[Dict[str, Any]], start_date: date, title: str,
-                        notes: Sequence[str] = ()) -> bytes:
+                        notes: Sequence[str] = (), flood_months: Sequence[int] = ()) -> bytes:
     """편집표 행으로 샘플 양식의 예정공정표 엑셀(바이트)을 만든다.
 
     rows: 분야·구분·공종·조수·시작(개월차)·기간(개월)·작업일수 키를 가진 dict 목록
+    flood_months: 수방기간 달력 월(예: [9, 10]) — 해당 월 열을 음영 처리하고 '수방기간' 행을 둔다
     """
     data = normalize_rows(rows)
     if not data:
         raise ValueError("그릴 공정이 없습니다(시작·기간·공종명을 확인하세요).")
-    n_months = max(r["시작"] + r["기간"] - 1 for r in data)
+    n_months = max(1, int(math.ceil(max(r["e0"] for r in data) - 1e-6)))
+    flood = set(int(m) for m in flood_months or ())
+    flood_idx = [m for m in range(n_months) if _add_months(start_date, m)[1] in flood]
     last_mc = FIRST_MC + n_months * MONTH_W - 1      # 마지막 달의 마지막 열
     note_col = last_mc + 1
 
@@ -356,8 +400,8 @@ def build_schedule_xlsx(rows: Sequence[Dict[str, Any]], start_date: date, title:
     for sec, groups in _sections(data):
         sec_r1 = r
         rows_in = [x for _, g in groups for x in g]
-        s_start = min(x["시작"] for x in rows_in)
-        s_end = max(x["시작"] + x["기간"] - 1 for x in rows_in)
+        s_start = min(x["s0"] for x in rows_in)
+        s_end = max(x["e0"] for x in rows_in)
         if sec not in _NO_SUMMARY:
             ws.row_dimensions[r].height = H_SUMMARY
             lanes.append({"kind": "summary", "row": r, "sec": sec, "start": s_start, "end": s_end,
@@ -365,9 +409,10 @@ def build_schedule_xlsx(rows: Sequence[Dict[str, Any]], start_date: date, title:
             r += 1
         for grp, items in groups:
             g_r1 = r
-            for it in items:
+            for lane in pack_lanes(items):
                 ws.row_dimensions[r].height = H_LANE
-                lanes.append({"kind": "act", "row": r, "sec": sec, "item": it})
+                for it in lane:
+                    lanes.append({"kind": "act", "row": r, "sec": sec, "item": it})
                 r += 1
             ws.merge_cells(start_row=g_r1, start_column=2, end_row=r - 1, end_column=2)
             cell(g_r1, 2, grp, size=9, wrap=True)
@@ -391,17 +436,39 @@ def build_schedule_xlsx(rows: Sequence[Dict[str, Any]], start_date: date, title:
     for s1, s2 in sec_blocks:
         box(s1, 1, s2, note_col, side=_med)
 
-    # 공종 글자(선 위) · 요약선 글자
+    # 요약선 글자(공종 글자는 막대 위 글상자로 그린다)
     for ln in lanes:
-        if ln["kind"] == "act":
-            it = ln["item"]
-            c = FIRST_MC + (it["시작"] - 1) * MONTH_W
-            color = _RED if ln["sec"] == "종합시운전" else _GREEN
-            cell(ln["row"], c, bar_label(it), size=8, color=color, h="left", v_al="top")
-        else:
-            mid = (ln["start"] - 1 + ln["end"]) / 2 + 0.6     # 상자·화살표 뒤쪽 가운데
+        if ln["kind"] == "summary":
+            mid = (ln["start"] + ln["end"]) / 2 + 0.6     # 상자·화살표 뒤쪽 가운데
             c = FIRST_MC + min(n_months - 1, int(mid)) * MONTH_W
             cell(ln["row"], c, ln["sec"], size=11, bold=True, color=_RED, h="center", v_al="top")
+
+    # 수방기간 음영(본문) + 수방기간 행
+    for m in flood_idx:
+        c = FIRST_MC + m * MONTH_W
+        for rr in range(body_r1, body_r2 + 1):
+            for cc in (c, c + 1):
+                ws.cell(row=rr, column=cc).fill = _FLOOD_FILL
+    if flood_idx:
+        ws.row_dimensions[r].height = H_FOOT
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+        cell(r, 1, "수방기간", bold=True, fill=_HDR_FILL)
+        box(r, 1, r, 2)
+        runs, cur = [], [flood_idx[0]]
+        for m in flood_idx[1:]:
+            if m == cur[-1] + 1:
+                cur.append(m)
+            else:
+                runs.append(cur)
+                cur = [m]
+        runs.append(cur)
+        for run in runs:
+            c1, c2 = FIRST_MC + run[0] * MONTH_W, FIRST_MC + run[-1] * MONTH_W + MONTH_W - 1
+            ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
+            cell(r, c1, "수방기간", size=8, fill=_FLOOD_FILL)
+        box(r, FIRST_MC, r, last_mc)
+        box(r, note_col, r, note_col)
+        r += 1
 
     # ── 월계·누계 ──
     monthly, cum = monthly_progress(data, n_months)
@@ -414,7 +481,7 @@ def build_schedule_xlsx(rows: Sequence[Dict[str, Any]], start_date: date, title:
             c = FIRST_MC + m * MONTH_W
             ws.merge_cells(start_row=r, start_column=c, end_row=r, end_column=c + MONTH_W - 1)
             x = cell(r, c, v, size=8)
-            x.number_format = "0.0"
+            x.number_format = "0"
             box(r, c, r, c + MONTH_W - 1)
         box(r, note_col, r, note_col)
         r += 1
@@ -466,10 +533,16 @@ def build_schedule_xlsx(rows: Sequence[Dict[str, Any]], start_date: date, title:
     for ln in lanes:
         if ln["kind"] == "act":
             it = ln["item"]
-            x1, x2 = mx(it["시작"] - 1), mx(it["시작"] - 1 + it["기간"])
+            x1, x2 = mx(it["s0"]), mx(it["e0"])
             y = row_y(ln["row"], 0.74)
             color = _RED if ln["sec"] == "종합시운전" else _GREEN
             dr.line(x1, y, x2, y, color, 15875)
+            # 공종명: 막대 위 가운데 글상자(막대보다 길면 양옆으로 넘친다)
+            lab = bar_label(it)
+            half = max((x2 - x1) / 2, len(lab) * CHAR_MONTHS * month_emu / 2)
+            cxm = (x1 + x2) / 2
+            dr.shape("rect", max(mx(0), cxm - half), row_y(ln["row"], 0.05), cxm + half,
+                     row_y(ln["row"], 0.6), None, None, text=lab, text_color=color, size=750)
             for xx in (x1, x2):
                 # 첫 달 왼쪽 경계를 넘어 B열에 걸리면 엑셀이 B열 폭으로 늘여 그린다 → 안쪽으로 민다
                 xx = max(xx, mx(0) + rad)
@@ -477,12 +550,12 @@ def build_schedule_xlsx(rows: Sequence[Dict[str, Any]], start_date: date, title:
         else:
             row = ln["row"]
             y = row_y(row, 0.62)
-            x1, x2 = mx(ln["start"] - 1), mx(ln["end"])
+            x1, x2 = mx(ln["start"]), mx(ln["end"])
             summary_y[ln["sec"]] = y
             sec_span[ln["sec"]] = (ln["start"], ln["end"])
             # 라벨 상자: 착수 시점 바로 앞(샘플처럼), 첫 열을 넘지 않게
             bw = 1.8 * month_emu
-            if ln["start"] > 1:
+            if ln["start"] > 0.5:
                 bx1, bx2 = max(mx(0), x1 - bw), x1
             else:
                 bx1, bx2 = x1, x1 + bw
@@ -504,10 +577,10 @@ def build_schedule_xlsx(rows: Sequence[Dict[str, Any]], start_date: date, title:
     secs = list(summary_y)
     for i, s in enumerate(secs[1:], start=1):
         st_m = sec_span[s][0]
-        prev = [p for p in secs[:i] if sec_span[p][1] <= st_m]
+        prev = [p for p in secs[:i] if sec_span[p][0] < st_m]
         if prev:
             p = max(prev, key=lambda q: sec_span[q][1])
-            x = mx(st_m - 1)
+            x = mx(st_m)
             dr.line(x, summary_y[p], x, summary_y[s], _RED, 19050)
 
     # 누계 S-커브: 본문 아래가 0%, 위가 100%

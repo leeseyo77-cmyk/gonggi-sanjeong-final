@@ -4,8 +4,10 @@ import openpyxl
 import zipfile
 import zlib
 from openpyxl.utils.exceptions import InvalidFileException
-from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback
+from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback, parse_excavator_buckets
 import schedule_plan as sp
+import crew_space as cs
+import drawing_reader as dr
 import math
 import re
 from datetime import datetime, timedelta
@@ -1382,24 +1384,25 @@ def eval_crews(model, crew, combine_sum):
     return per, (sum(per) if combine_sum else max(per, default=0))
 
 
-def recommend_crews(model, combine_sum, target, cap):
+def recommend_crews(model, combine_sum, target, cap, caps=None):
     """목표 순작업일수 안에 주공정이 끝나도록 항목별 투입조수를 추천한다.
 
     - 최장(병행): 목표를 넘는 라인 중 초과가 가장 큰 라인에서 가장 긴 항목부터 1조씩 늘린다.
     - 합산(순차): 대공종 일수의 합만 목표 안에 들면 되므로, 합이 목표를 넘는 동안 각 대공종의
       가장 긴 라인에서 가장 긴 항목부터 늘린다. 대공종마다 목표를 비율로 쪼개면 작은 공종까지
       억지로 줄이게 된다(실측: 풍각 80개 항목 변경 → 24개).
-    상한(cap)에 닿았거나 1조를 늘려도 일수가 줄지 않는 항목은 건드리지 않는다.
+    상한(cap, 항목별로는 caps[키])에 닿았거나 1조를 늘려도 일수가 줄지 않는 항목은 건드리지 않는다.
     반환: {항목키: 추천 조수} (모든 항목)
     """
     crew = dict(model["base"])
+    caps = caps or {}
 
     def _cands(lst):
         """상한 미만이면서 1조 늘리면 일수가 실제로 줄어드는 항목의 (현재 일수, 키)."""
         out = []
         for k, d1 in lst:
             c = crew[k]
-            if c < cap and -(-d1 // c) > -(-d1 // (c + 1)):
+            if c < caps.get(k, cap) and -(-d1 // c) > -(-d1 // (c + 1)):
                 out.append((-(-d1 // c), k))
         return out
 
@@ -1459,6 +1462,249 @@ def critical_keys(model, combine_sum, target, crew_rec):
     return keys
 
 
+@st.cache_data(show_spinner=False, max_entries=4)
+def _dwg_candidates(pdf_bytes: bytes):
+    """일반도 PDF의 (전체 쪽수, 평면도·단면도 후보 쪽)."""
+    return dr.page_count(pdf_bytes), dr.find_plan_pages(pdf_bytes)
+
+
+def _struct_items(structs):
+    """구조물(라인)별 내역서 항목 — 면적 어림과 도면 대조에 쓴다."""
+    out = {ln: [] for ln in structs}
+    for r in (st.session_state.get("work_result") or {}).get("rows", []):
+        if sp.civil_cat(r.get("공종명_pure") or "") != "구조물공":
+            continue
+        for it in r.get("세부항목", []):
+            ln = it.get("_ukey") or it.get("district") or "(공통)"
+            if ln in out:
+                out[ln].append(it)
+    return out
+
+
+def drawing_reader_ui(structs, items_by):
+    """일반도 PDF → Claude가 구조물별 치수를 읽고, 앱이 면적 계산·내역서 대조 후 면적 표에 채운다."""
+    with st.expander("📄 일반도 PDF로 면적 읽기 (Claude)", expanded=False):
+        st.caption(
+            "일반도(평면도·단면도) PDF를 올리면 Claude가 구조물별 바닥 치수·벽 길이·높이·두께를 읽고, 앱이 면적을 "
+            "계산해 내역서 물량(버림·철근콘크리트·거푸집)과 대조합니다. 차이가 30%를 넘으면 잘못 읽었을 수 있다고 "
+            "표시합니다. API 키가 없으면 '수동'으로 claude.ai(무료·Pro) 채팅에 붙여 넣어 같은 결과를 얻을 수 있습니다.")
+        pdf = st.file_uploader("일반도 PDF (CAD에서 출력한 PDF 권장)", type=["pdf"], key="dwg_pdf")
+        if not pdf:
+            return
+        data = pdf.getvalue()
+        n_pages, cands = _dwg_candidates(data)
+        if not cands:
+            st.warning(f"'일반도'이면서 평면도·단면도가 든 쪽을 찾지 못했습니다(전체 {n_pages}쪽). "
+                       "아래에서 쪽 번호를 직접 고르세요.")
+        labels = {c["page"]: f"{c['page']}쪽 · {c['title']}" for c in cands}
+        pages = st.multiselect(
+            f"읽을 쪽 (전체 {n_pages}쪽 중 일반도 후보 {len(cands)}쪽 — 최대 {dr.MAX_PAGES}쪽)",
+            options=list(range(1, n_pages + 1)), default=[c["page"] for c in cands][:dr.MAX_PAGES],
+            format_func=lambda p: labels.get(p, f"{p}쪽"), key="dwg_pages")
+        how = st.radio("읽는 방법", ["수동 — claude.ai 채팅에 붙여넣기 (추가 비용 없음)",
+                                    "API — 내 Anthropic API 키로 자동 (쓴 만큼 결제)"],
+                       key="dwg_mode", horizontal=False)
+        if how.startswith("수동"):
+            _manual_dwg_ui(data, pages, structs)
+        else:
+            _api_dwg_ui(data, pages, structs)
+        _dwg_result_ui(items_by)
+
+
+def _manual_dwg_ui(data, pages, structs):
+    """수동 모드: 발췌 PDF 내려받기 → claude.ai에 지시문과 함께 올리기 → 답(JSON)을 붙여 넣기."""
+    if not pages:
+        st.info("읽을 쪽을 고르세요.")
+        return
+    st.markdown("**① 발췌 PDF 내려받기** → **② claude.ai 새 채팅에 PDF를 올리고 아래 지시문을 붙여 넣기** "
+                "→ **③ Claude의 답(JSON)을 복사해 아래 칸에 붙여 넣기**")
+    st.download_button("📥 ① 일반도 발췌 PDF 내려받기", data=dr.extract_pages_pdf(data, pages),
+                       file_name=f"일반도_발췌_{len(pages)}쪽.pdf", mime="application/pdf", key="dwg_dl")
+    st.caption("② 지시문 (오른쪽 위 복사 버튼)")
+    st.code(dr.manual_prompt(structs, pages), language="text")
+    pasted = st.text_area("③ Claude의 답 붙여넣기", height=180, key="dwg_paste",
+                          placeholder='{"structures": [ ... ]}')
+    if st.button("📋 붙여 넣은 답 반영", disabled=not pasted.strip(), key="dwg_parse"):
+        try:
+            st.session_state["dwg_result"] = dr.parse_manual(pasted)
+        except ValueError as e:
+            st.error(f"{e} — Claude에게 '지시문의 JSON 형식으로만 다시 답해 줘'라고 요청해 보세요.")
+
+
+def _api_dwg_ui(data, pages, structs):
+    """API 모드: 사용자 키로 Claude를 직접 호출."""
+    _k1, _k2 = st.columns([2, 1])
+    api_key = _k1.text_input("Anthropic API 키", type="password", key="anthropic_api_key",
+                             help="console.anthropic.com에서 발급한 키(claude.ai 구독과 별도 결제). "
+                                  "이 요청에만 쓰고 저장하지 않습니다.")
+    model = _k2.selectbox("모델", list(dr.MODELS), format_func=lambda m: dr.MODELS[m], key="dwg_model")
+    _price = {"claude-opus-5-5": (4, 20), "claude-sonnet-5-5": (2, 10)}[model]
+    _est = len(pages) * 3500 * _price[0] / 1e6 + 10000 * _price[1] / 1e6
+    st.caption(f"예상 비용: 약 ${_est:.2f} (쪽당 그림·글자 약 3,500토큰 + 응답 약 1만 토큰 가정)")
+    if st.button("🔍 도면 읽기", disabled=not (api_key and pages), key="dwg_run"):
+        if len(pages) > dr.MAX_PAGES:
+            st.error(f"한 번에 {dr.MAX_PAGES}쪽까지만 읽습니다. 구조물 평면도·단면도만 고르세요.")
+        else:
+            try:
+                import anthropic
+                with st.spinner(f"Claude가 도면 {len(pages)}쪽을 읽는 중… (1~3분)"):
+                    st.session_state["dwg_result"] = dr.read_drawings(
+                        api_key, dr.render_pages(data, sorted(pages)), structs, model=model)
+            except ImportError:
+                st.error("anthropic 패키지가 설치되지 않았습니다(requirements.txt 확인).")
+            except anthropic.AuthenticationError:
+                st.error("API 키가 올바르지 않습니다.")
+            except anthropic.PermissionDeniedError:
+                st.error("이 API 키로는 해당 모델을 쓸 수 없습니다.")
+            except anthropic.RateLimitError:
+                st.error("요청 한도를 넘었습니다. 잠시 뒤 다시 시도하세요.")
+            except anthropic.APIStatusError as e:
+                st.error(f"API 오류({e.status_code}): {e.message}")
+            except anthropic.APIConnectionError:
+                st.error("Anthropic 서버에 연결하지 못했습니다(네트워크 확인).")
+            except ValueError as e:
+                st.error(str(e))
+
+
+def _dwg_result_ui(items_by):
+    """도면 읽기 결과(API·수동 공통): 면적 계산·내역서 대조 표와 '면적 채우기'."""
+    res = st.session_state.get("dwg_result")
+    if not res:
+        return
+    rows, apply = [], {}
+    for s_ in res.get("structures", []):
+        est = dr.areas_from_dims(s_)
+        boq = cs.boq_quantities(items_by.get(s_["name"], []))
+        bad = dr.check(est, boq) if s_["name"] in items_by else ["내역서 구조물명과 맞지 않음"]
+        rows.append({"구조물": s_["name"], "바닥(㎡)": est["slab"], "벽 한 면(㎡)": est["wall"],
+                     "버림 차이": dr.diff_pct(est["버림"], boq["버림"]),
+                     "콘크리트 차이": dr.diff_pct(est["철근콘크리트"], boq["철근콘크리트"]),
+                     "거푸집 차이": dr.diff_pct(est["거푸집"], boq["거푸집"]),
+                     "판정": "⚠️ " + ", ".join(bad) if bad else "✅",
+                     "계산식": s_.get("calc", ""), "메모": s_.get("notes", ""),
+                     "쪽": ", ".join(str(p) for p in s_.get("pages", []))})
+        if s_["name"] in items_by:
+            apply[s_["name"]] = est
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                 column_config={k: st.column_config.NumberColumn(format="%+.0f%%")
+                                for k in ("버림 차이", "콘크리트 차이", "거푸집 차이")})
+    u = res.get("usage", {})
+    _tok = f" · 입력 {u.get('input', 0):,} / 출력 {u.get('output', 0):,} 토큰" if u else ""
+    st.caption(f"{res.get('model', '')}{_tok}. "
+               "차이는 (도면 추정 − 내역서) ÷ 내역서. 거푸집은 벽 양면 + 상부슬래브 하부로 추정합니다.")
+    if apply and st.button(f"✅ 도면 값으로 면적 채우기 ({len(apply)}개 구조물)", key="dwg_apply"):
+        store = st.session_state.setdefault("struct_areas", {})
+        for nm, est in apply.items():
+            store[nm] = {"slab": est["slab"], "wall": est["wall"],
+                         "src": "도면(수동)" if "수동" in str(res.get("model")) else "도면(Claude API)"}
+        st.session_state["struct_area_nonce"] = st.session_state.get("struct_area_nonce", 0) + 1
+        st.rerun(scope="fragment")
+
+
+def area_caps_ui(model):
+    """면적 기준 동시 투입 상한(선택) — 체크하면 부지·구조물 면적을 받아 터파기·철근·거푸집의
+    항목별 상한을 구한다(crew_space). 개략 검토에서는 끄고 '항목당 최대 투입조수'만 쓴다.
+    반환: {항목키: 상한 조수}
+    """
+    if not st.checkbox(
+            "📐 면적 기준 동시 투입 상한 사용 (터파기·철근·거푸집 — 상세 검토)", value=False,
+            key="area_caps_on",
+            help="구조물 면적에서 공종별로 동시에 붙일 수 있는 조수를 구해 상한으로 씁니다. "
+                 "개략 검토에서는 끄고 '항목당 최대 투입조수'만 쓰면 됩니다."):
+        return {}
+    st.caption(
+        "동시 투입 상한 = 작업면적 ÷ (1조 인원 × 1인 작업공간). 1인 작업공간은 Thomas & Smith(1990)의 "
+        "최적 생산성 기준 30.2㎡(최소는 19㎡), 1조 인원은 표준품셈 작업조(철근 조립 7~8인, 유로폼 5인, 합판 7인)이고 "
+        "1일 작업량이 노무비 역산(직종별 1인)에서 왔으면 직종 수입니다. 작업면적은 철근 = 슬라브 + 벽체, "
+        "거푸집 = 벽체 양면 + 슬라브, 터파기 = 구조물 바닥 합(굴착기 1대 영역 (2×작업반경)²으로 나눔 — "
+        "작업반경은 내역서 산근·일위대가의 굴착기 규격(㎥)에서 제원표 최대 굴착반경으로 정함). "
+        "국내 법령·연구에는 1인당 면적 기준이 없어 해외 연구값을 씁니다.")
+    _a1, _a2, _a3 = st.columns(3)
+    site = float(_a1.number_input("부지면적 (㎡, 0 = 미입력)", min_value=0.0, value=0.0, step=100.0,
+                                  key="site_area"))
+    per_area = float(_a2.number_input(
+        "1인 작업공간 (㎡)", min_value=5.0, max_value=100.0, value=cs.PERSON_AREA_OPT, step=0.1,
+        key="person_area", help="Thomas & Smith(1990): 최적 생산성 30.2㎡(기본값), 최소 19㎡"))
+    radius = float(_a3.number_input(
+        "굴착기 작업반경 — 규격 미확인 시 (m)", min_value=2.0, max_value=20.0, value=8.5, step=0.5,
+        key="excavator_radius",
+        help="내역서에서 굴착기 규격을 찾지 못한 터파기 항목에만 씁니다(기본 8.5m = 0.6㎥급 제원). "
+             "찾은 항목은 규격별 제원표 최대 굴착반경을 씁니다."))
+    structs = []
+    for cat in model["cats"]:
+        if sp.civil_cat(cat["name"]) == "구조물공":
+            structs += [ln for ln in cat["lines"] if ln not in structs]
+    store = st.session_state.setdefault("struct_areas", {})
+    if structs:
+        # 처음엔 내역서로 어림한 값(바닥 = 버림 ÷ 0.1m, 벽 = (거푸집 − 바닥) ÷ 2)을 채운다 — 개략 검토용.
+        # 도면(Claude)이나 직접 입력으로 바꾼 값은 출처와 함께 유지한다.
+        items_by = _struct_items(structs)
+        basis = {}
+        for ln in structs:
+            e_slab, e_wall, basis[ln] = cs.estimate_areas(items_by.get(ln, []))
+            if ln not in store:
+                store[ln] = {"slab": e_slab, "wall": e_wall, "src": "내역서 어림" if (e_slab or e_wall) else "-"}
+        _ed = st.data_editor(
+            pd.DataFrame([{"구조물": ln, "바닥슬라브 면적(㎡)": float(store[ln].get("slab", 0.0)),
+                           "벽체 면적(㎡, 한 면)": float(store[ln].get("wall", 0.0)),
+                           "출처": store[ln].get("src", "입력"), "내역서 어림 근거": basis[ln]} for ln in structs]),
+            hide_index=True, width="stretch", disabled=["구조물", "출처", "내역서 어림 근거"],
+            key=f"struct_area_editor_{st.session_state.get('struct_area_nonce', 0)}")
+        for _, r in _ed.iterrows():
+            ln, v_s, v_w = r["구조물"], float(r["바닥슬라브 면적(㎡)"] or 0), float(r["벽체 면적(㎡, 한 면)"] or 0)
+            if abs(v_s - store[ln].get("slab", 0)) > 1e-6 or abs(v_w - store[ln].get("wall", 0)) > 1e-6:
+                store[ln] = {"slab": v_s, "wall": v_w, "src": "입력"}
+        st.caption("기본값은 내역서로 어림한 값입니다(버림콘크리트가 아닌 기초 무근콘크리트가 섞이면 크게 틀릴 수 "
+                   "있음). 표에서 직접 고치거나 아래 일반도 PDF 읽기로 바꿀 수 있습니다.")
+        drawing_reader_ui(structs, items_by)
+    else:
+        st.caption("주공정에 구조물공 대공종이 없어 철근·거푸집 상한은 구하지 않습니다.")
+    slab_sum = sum(store.get(ln, {}).get("slab", 0.0) for ln in structs)
+    excav = min(slab_sum, site) if (slab_sum and site) else (slab_sum or site)
+    trace_all = st.session_state.get("naeyeok_labor_trace") or {}
+    buckets = st.session_state.get("excavator_buckets") or {}
+    code_by_item = st.session_state.get("naeyeok_code_by_item") or {}
+    caps, rows = {}, []
+    for k, m in model["meta"].items():
+        cls = cs.trade_class(m["세부공종"])
+        if not cls:
+            continue
+        method = calc_days_priority(m["세부공종"], m["규격"], 1, 1, m["단위"], use_item_crew=False)[2]
+        tr = trace_all.get(labor_key_for(m["세부공종"], m["규격"])) or {}
+        persons = cs.crew_persons(cls, m["세부공종"], m["규격"], method, len(tr.get("직종별 인수") or []))
+        r_item, r_note = radius, "규격 미확인 — 입력 반경"
+        if cls == "터파기":
+            _bk = ((buckets.get("code") or {}).get(code_by_item.get((m["세부공종"], m["규격"])))
+                   or (buckets.get("alt") or {}).get(labor_key_for(m["세부공종"], m["규격"])))
+            if _bk:
+                r_item, r_note = cs.excavator_reach(_bk), f"굴착기 {_bk:g}㎥ → 최대 굴착반경 {cs.excavator_reach(_bk):g}m"
+        best = None
+        for ln in sorted(m["라인"]):
+            if cls == "터파기":
+                area = excav
+            else:
+                a = store.get(ln) or {}
+                area = cs.work_area(cls, a.get("slab", 0.0), a.get("wall", 0.0))
+            c = cs.area_cap(cls, area, persons, per_area, r_item)
+            if c is not None and (best is None or c < best[0]):
+                best = (c, ln, area)
+        if best is None:
+            continue
+        caps[k] = best[0]
+        rows.append({"공종": cls, "세부공종": m["세부공종"], "규격": m["규격"],
+                     "구조물": "(토공 전체)" if cls == "터파기" else best[1],
+                     "1조": r_note if cls == "터파기" else f"{persons}인",
+                     "상한(조)": best[0],
+                     "근거": cs.explain(cls, best[2], persons, per_area, r_item, best[0])})
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.caption("이 항목들은 위 '항목당 최대 투입조수' 대신 면적 기준 상한을 씁니다. "
+                   "한 항목이 여러 구조물에 있으면 가장 작은 상한을 씁니다.")
+    elif structs or site:
+        st.caption("면적을 입력하면 터파기·철근·거푸집 항목의 상한이 여기에 나옵니다.")
+    return caps
+
+
 @st.fragment
 def render_crew_recommendation(wr):
     """공기산정 탭: 목표 공기 기준 크리티컬 공종의 필요 투입조수 역산 + 사용자 조정.
@@ -1503,7 +1749,8 @@ def render_crew_recommendation(wr):
     if not base:
         st.info("주공정 대공종에 작업일수가 계산된 항목이 없습니다.")
         return
-    rec = recommend_crews(model, combine_sum, target, int(cap))
+    area_caps = area_caps_ui(model)
+    rec = recommend_crews(model, combine_sum, target, int(cap), caps=area_caps)
     crit = critical_keys(model, combine_sum, target, rec)
 
     # 결과 지표는 편집표 위에 보이도록 자리를 먼저 잡고, 편집값을 읽은 뒤 채운다
@@ -1524,6 +1771,7 @@ def render_crew_recommendation(wr):
             "대공종": m["대공종"], "세부공종": m["세부공종"], "규격": m["규격"], "단위": m["단위"],
             "라인 수": len(m["라인"]),
             "현재 조수": base[k], "현재 일수": -(-d1 // base[k]),
+            "상한": area_caps.get(k, int(cap)),
             "필요 조수": rec[k], "필요 조수 시 일수": -(-d1 // rec[k]),
             "적용 조수": rec[k],
         })
@@ -1535,6 +1783,7 @@ def render_crew_recommendation(wr):
     if rows_df:
         # 목표·상한·모드가 바뀌면 추천값이 달라지므로 편집 내용을 새로 시작한다(키에 포함)
         _ekey = (f"crew_editor_{target}_{int(cap)}_{int(combine_sum)}_{int(show_all)}_"
+                 f"{zlib.crc32(repr(sorted(area_caps.items())).encode())}_"
                  f"{st.session_state['crew_edit_nonce']}")
         _df = pd.DataFrame(rows_df)
         edited = st.data_editor(
@@ -1574,13 +1823,14 @@ def render_crew_recommendation(wr):
             st.warning(f"⚠️ 조정안은 목표보다 {tot_usr - target}일 깁니다. "
                        "🔴 표시 공종의 적용 조수를 늘려 보세요.")
         # 필요 조수가 상한에 닿는다 = 목표가 빠듯하다(또는 무리다)는 신호
-        _at_cap = [k for k in rec if rec[k] >= int(cap) and rec[k] != base.get(k)]
+        _at_cap = [k for k in rec if rec[k] >= area_caps.get(k, int(cap)) and rec[k] != base.get(k)]
         if tot_rec > target:
-            st.error(f"🔴 항목당 최대 {int(cap)}조까지 넣어도 목표보다 {tot_rec - target}일 깁니다 — "
+            st.error(f"🔴 상한(항목당 {int(cap)}조" + (", 면적 기준 상한" if area_caps else "")
+                     + f")까지 넣어도 목표보다 {tot_rec - target}일 깁니다 — "
                      "목표 공기가 무리일 수 있습니다. 상한이 현장 기준보다 낮은지, 목표 공기·주공정 "
                      "선택이 맞는지 검토하세요.")
         elif _at_cap:
-            st.warning(f"⚠️ {len(_at_cap)}개 공종이 상한({int(cap)}조)까지 필요합니다 — 목표가 빠듯합니다. "
+            st.warning(f"⚠️ {len(_at_cap)}개 공종이 상한까지 필요합니다 — 목표가 빠듯합니다. "
                        "현장에서 그만큼 동시에 투입할 수 있는지 확인하세요.")
         if not rows_df:
             st.caption("목표를 넘는 크리티컬 공종이 없습니다. 조수를 조정하려면 '크리티컬이 아닌 항목도 표시'를 켜세요.")
@@ -1894,6 +2144,8 @@ def parse_workbook_cached(file_bytes: bytes):
             "labor_daily": labor_daily,
             "aq_daily": aq_daily,
             "labor_trace": labor_trace,
+            # 굴착기 규격(버킷 ㎥) — 면적 기준 상한에서 굴착기 작업반경을 정할 때
+            "excavator_buckets": parse_excavator_buckets(wb, tmpl),
             # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
             "series_fallback": apply_series_fallback(items, code_daily, labor_daily),
         }
@@ -2023,6 +2275,7 @@ with tab2:
                     st.session_state["naeyeok_code_daily"] = _tmpl_data["code_daily"]
                     st.session_state["naeyeok_labor_daily"] = _tmpl_data["labor_daily"]
                     st.session_state["naeyeok_aq_daily"] = _tmpl_data.get("aq_daily", {})
+                    st.session_state["excavator_buckets"] = _tmpl_data.get("excavator_buckets") or {}
                     # 노무비 역산 근거(호표·기준수량·직종별 인수·계산식) — 추정값 검토 화면에서 사용
                     st.session_state["naeyeok_labor_trace"] = _tmpl_data.get("labor_trace", {})
                     # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계

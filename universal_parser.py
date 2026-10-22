@@ -492,6 +492,94 @@ def parse_unit_price_generic(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple[float,
 
 
 # ---------------------------------------------------------------------------
+# 굴착기 규격(버킷 용량) — 면적 기준 동시 투입 상한에서 굴착기 작업반경을 정할 때 쓴다
+# ---------------------------------------------------------------------------
+
+# '1.장비(굴착기 0.7㎥)', '굴삭기(무한궤도) / 0.2㎥', '백호우(0.7 ㎥)', '굴삭기 0.7 M3', '굴착기1.0㎥'
+_BUCKET_RE = re.compile(r"(굴[착삭]기|백호우?|BACK\s*HOE)[^\d\n]{0,25}?(\d+(?:\.\d+)?)\s*(?:㎥|M3|m3)",
+                        re.IGNORECASE)
+
+
+def _block_starts(rows, col: int, regex: Optional[str], key_type: str):
+    """[(키, 시작행)] — regex가 없으면 열 값이 있는 행이 블록 시작(코드매칭형)."""
+    out, seen = [], set()
+    pat = re.compile(regex) if regex else None
+    for i, r in enumerate(rows):
+        c = r[col] if len(r) > col else None
+        if not (isinstance(c, str) and c.strip()):
+            continue
+        if pat:
+            m = pat.search(c)
+            if not m:
+                continue
+            k = int(m.group(1)) if key_type == "int" else m.group(1)
+        else:
+            k = c.strip()
+        if k not in seen:
+            seen.add(k)
+            out.append((k, i))
+    return out
+
+
+def _first_bucket(rows, s: int, e: int) -> Optional[float]:
+    """블록 안에서 처음 나오는 굴착기 버킷 용량(㎥). 장비 편성의 첫 굴착기가 주 장비다."""
+    for j in range(s, e):
+        for v in rows[j]:
+            if isinstance(v, str):
+                m = _BUCKET_RE.search(v)
+                if m:
+                    try:
+                        q = float(m.group(2))
+                    except ValueError:
+                        continue
+                    if 0.01 <= q <= 5:
+                        return q
+    return None
+
+
+def parse_excavator_buckets(wb, tmpl: Dict[str, Any]) -> Dict[str, Dict[Any, float]]:
+    """{"code": {산근 키: ㎥}, "alt": {일위대가 키: ㎥}} — 항목의 굴착기 규격을 찾는 색인.
+
+    일위대가 블록에 굴착기 표기가 없으면 구성 행이 가리키는 산근의 규격을 따른다.
+    """
+    out: Dict[str, Dict[Any, float]] = {"code": {}, "alt": {}}
+    ws = _get_sheet(wb, tmpl.get("unit_price_sheet_names") or [])
+    if ws is not None:
+        rows = [r for r in ws.iter_rows(values_only=True)]
+        st = _block_starts(rows, tmpl["unit_price_block_start_col"], tmpl.get("unit_price_block_start_regex"),
+                           tmpl.get("link_key_type", "str"))
+        for n, (k, i) in enumerate(st):
+            e = st[n + 1][1] if n + 1 < len(st) else len(rows)
+            q = _first_bucket(rows, i, e)
+            if q:
+                out["code"][k] = q
+    cfg = tmpl.get("labor")
+    if cfg and cfg.get("block_sheet") in wb.sheetnames:
+        rows = [r for r in wb[cfg["block_sheet"]].iter_rows(values_only=True)]
+        if "block_code_col" in cfg:
+            st = _block_starts(rows, cfg["block_code_col"], None, "str")
+        else:
+            st = _block_starts(rows, cfg["block_start_col"], cfg["block_start_regex"], cfg.get("key_type", "str"))
+        link = re.compile(tmpl["link_regex"]) if tmpl.get("link_regex") else None
+        for n, (k, i) in enumerate(st):
+            e = st[n + 1][1] if n + 1 < len(st) else len(rows)
+            q = _first_bucket(rows, i, e)
+            if q is None and link is not None:
+                for j in range(i, e):
+                    for v in rows[j][4:]:
+                        m = link.search(v) if isinstance(v, str) else None
+                        if m:
+                            sk = int(m.group(1)) if tmpl.get("link_key_type") == "int" else m.group(1)
+                            q = out["code"].get(sk)
+                            break
+                    if q:
+                        break
+            if q:
+                out["alt"][k] = q
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 항목 시트 파싱 (계층 전략별 분기)
 # ---------------------------------------------------------------------------
 

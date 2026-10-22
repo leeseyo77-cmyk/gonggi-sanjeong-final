@@ -119,6 +119,25 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
         widget(at, "number_input", "target_months_input").set_value(240.0).run()
         self.assertFalse(any("목표 공기가 무리" in e.value for e in at.error))
 
+    def test_area_caps_optional(self):
+        at = self.at
+        widget(at, "number_input", "target_months_input").set_value(24.0).run()
+        # 기본은 꺼짐 — 개략 검토에서는 '항목당 최대 투입조수'만 쓴다
+        self.assertFalse(widget(at, "checkbox", "area_caps_on").value)
+        at.session_state["struct_areas"] = {"오존접촉조": {"slab": 1500.0, "wall": 2500.0}}
+        widget(at, "checkbox", "area_caps_on").set_value(True).run()
+        self.assertEqual(exceptions(at), [])
+        tables = [d.value for d in at.dataframe if "근거" in d.value.columns]
+        self.assertTrue(tables)
+        t = tables[0]
+        # 유로폼(오존접촉조): 벽체 양면 5,000 + 슬라브 1,500 = 6,500㎡ ÷ (1조 인원 × 30.2㎡)
+        euro = t[(t["세부공종"] == "유로폼") & (t["구조물"] == "오존접촉조")]
+        self.assertEqual(len(euro), 1)
+        self.assertIn("6,500㎡", euro["근거"].iloc[0])
+        # 면적을 넣지 않은 구조물은 내역서로 어림한 값이 기본으로 채워진다
+        self.assertEqual(at.session_state["struct_areas"]["역T옹벽"]["src"], "내역서 어림")
+        widget(at, "checkbox", "area_caps_on").set_value(False).run()
+
     def test_schedule_excel_states_crew_assumption(self):
         at = self.at
         for f in OUT.glob("예정공정표_*.xlsx"):

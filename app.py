@@ -4,7 +4,7 @@ import openpyxl
 import zipfile
 import zlib
 from openpyxl.utils.exceptions import InvalidFileException
-from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback, parse_excavator_buckets
+from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback, parse_excavator_buckets, parse_loading_rates
 import schedule_plan as sp
 import crew_space as cs
 import drawing_reader as dr
@@ -869,8 +869,11 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
     # 그 시간만큼 본공정이 지연되므로 공기에 반영해야 한다(실무 확인).
     # 반면 덤프가 현장을 떠나 이동하는 운반·소운반·사토는 그동안 백호가 계속
     # 굴착할 수 있어 병행으로 본다.
-    # '폐기물상차(적치장)'처럼 상차와 운반이 한 이름에 섞인 경우도 상차 작업이
-    # 포함되어 있으므로 '상차'가 들어가면 제외하지 않는다(상차 우선 판정).
+    # 상차와 운반이 한 항목에 섞인 경우(사용자 기준 2026-10-22): 상차분 작업량을 따로 잡을 수 있으면
+    # 상차분만 공기에 넣고(운반은 병행), 잡을 수 없으면 항목 전체를 병행으로 뺀다.
+    #   - 산근에 '1.상차(굴착기 0.6㎥) Q=67.23㎥/hr'처럼 상차 구간이 있으면 그 Q가 상차분
+    #   - 직상차('1.터파기 … 발생토에서 계상')는 상차 구간이 없다(터파기에 포함) → 병행.
+    #     예전에는 이 블록의 첫 Q(덤프 운반 32.7㎥/hr)를 써서 운반 시간을 공기로 잡고 있었다(풍각 실측).
     try:
         _nm_h = name or ""
         _sp_h = spec or ""
@@ -879,10 +882,19 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
         # 상차 작업이 규격에만 표기된 경우가 있어 이름만 보면 통째로 제외돼 버린다.
         # 단, '하치장 상차도(VAT포함)'는 자재 인도조건(상차도)이지 상차 작업이 아니므로 제외한다.
         _has_loading = ("상차" in _nm_h) or ("상차" in _sp_h and "상차도" not in _sp_h)
-        if st.session_state.get("exclude_haul", False) and not _has_loading and any(
-            k in _nm_h for k in ("운반", "사토", "잔토")
-        ):
-            return 0, "병행", "병행(제외)"
+        if st.session_state.get("exclude_haul", False) and any(k in _nm_h for k in ("운반", "사토", "잔토")):
+            if not _has_loading:
+                return 0, "병행", "병행(제외)"
+            # 수동입력이 있으면 그 값을 쓴다(아래 0순위)
+            if f"{name}|{spec}" not in st.session_state.get("manual_rates", {}):
+                _lc = st.session_state.get("naeyeok_code_by_item", {}).get((name, spec))
+                _ld = st.session_state.get("naeyeok_loading_daily", {}).get(_lc) if _lc is not None else None
+                if not _ld or not _ld[0]:
+                    return 0, "병행", "병행(상차분 산정 불가)"
+                _dv, _du = _ld
+                days = math.ceil(qty / (_dv * crews))
+                _RATE_CAPTURE.v = (_dv, crews)
+                return days, f"{_dv:.1f}{_du}", "상차분만(운반 병행)"
     except Exception:
         pass
 
@@ -2268,6 +2280,8 @@ def parse_workbook_cached(file_bytes: bytes):
             "labor_trace": labor_trace,
             # 굴착기 규격(버킷 ㎥) — 면적 기준 상한에서 굴착기 작업반경을 정할 때
             "excavator_buckets": parse_excavator_buckets(wb, tmpl),
+            # 운반 항목의 상차분 작업량(산근 '상차' 구간 Q)
+            "loading_daily": parse_loading_rates(wb, tmpl),
             # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
             "series_fallback": apply_series_fallback(items, code_daily, labor_daily),
         }
@@ -2398,6 +2412,7 @@ with tab2:
                     st.session_state["naeyeok_labor_daily"] = _tmpl_data["labor_daily"]
                     st.session_state["naeyeok_aq_daily"] = _tmpl_data.get("aq_daily", {})
                     st.session_state["excavator_buckets"] = _tmpl_data.get("excavator_buckets") or {}
+                    st.session_state["naeyeok_loading_daily"] = _tmpl_data.get("loading_daily") or {}
                     # 노무비 역산 근거(호표·기준수량·직종별 인수·계산식) — 추정값 검토 화면에서 사용
                     st.session_state["naeyeok_labor_trace"] = _tmpl_data.get("labor_trace", {})
                     # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
@@ -2592,7 +2607,8 @@ with tab2:
                     )
                     st.session_state["combine_mode"] = _combine_mode
                     exclude_haul = st.checkbox(
-                        "운반·사토류 항목 자동 제외 (덤프 이동 중 굴착이 계속되므로 병행 처리, 상차는 공기에 반영)",
+                        "운반·사토류 항목 자동 제외 (덤프 이동 중 굴착이 계속되므로 병행 처리, 상차분을 따로 잡을 수 "
+                        "있으면 상차분만 공기에 반영)",
                         value=True,
                         key="exclude_haul_widget",
                     )
@@ -2662,7 +2678,8 @@ with tab2:
 | **노무비역산(직종)** | 일위대가에 인수(단위 '인')나 Q산식이 없어, 노무비를 해당 직종 노임단가로 나눠 되짚은 추정값. 할증·요율은 제외했습니다. | 낮음 (검토 권장) |
 | **가이드라인** | 국토교통부 「적정 공사기간 확보를 위한 가이드라인」 부록의 공종별 1일 작업량. | 높음 |
 | **단가산출근거** | 항목명 기준으로 단가산출근거에서 찾은 Q값. | 중간 |
-| **병행(제외)** | 운반·상차·사토처럼 본공정과 함께 진행되어 공기를 따로 만들지 않는 항목. 0일로 처리됩니다. | — |
+| **상차분만(운반 병행)** | 상차와 운반이 한 항목인 경우, 산근의 '상차' 구간 작업량만 공기에 넣은 값(운반은 병행). | 높음 |
+| **병행(제외)** | 운반·사토처럼 본공정과 함께 진행되어 공기를 따로 만들지 않는 항목. 상차가 섞여 있어도 상차분을 따로 잡을 수 없으면(직상차 등) '병행(상차분 산정 불가)'로 뺍니다. 0일로 처리됩니다. | — |
 | **매칭 안 됨** | 어디에서도 값을 찾지 못한 항목. **수동입력 관리** 탭에서 직접 입력해야 공기에 반영됩니다. | 입력 필요 |
 
 💡 **동일계열 Q승계**·**노무비역산**은 추정값이라 실제와 차이가 날 수 있습니다.

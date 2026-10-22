@@ -125,5 +125,29 @@ class SangeunAQTest(unittest.TestCase):
         self.assertAlmostEqual(got[140][0], 6.22 * 8, places=3)
 
 
+class LoadingRateTest(unittest.TestCase):
+    """운반 항목의 상차분 작업량 — 산근의 '상차' 구간 Q만(풍각 제110·113·116호표 형식)."""
+
+    def test_loading_section_only(self):
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+        _sheet(wb, "단가산출근거", [
+            [None, "제 113호표"], [None, "흙운반(외부반입) 굴착기 상차+덤프 운반 / ㎥"],
+            [None, "1.상차(굴착기 0.6㎥)"], [None, "Q=3600*qs*K*f*Es/Cms= 67.23 ㎥/hr"],
+            [None, "2.운반(덤프 24ton), L=10 ㎞"], [None, "Q=60*qo*f*E/Cm= 14.37 ㎥/hr"],
+            # 직상차: 상차 구간이 없다(터파기에 포함) — 첫 Q가 덤프 운반이라 그걸 쓰면 안 된다
+            [None, "제 116호표"], [None, "흙운반(적치:토사) 굴착기 직상차+덤프 운반 / ㎥"],
+            [None, "1.터파기(굴착기 1.0㎥):발생토에서 계상"], [None, "qs=1,      f=1/1.2= 0.83"],
+            [None, "2.운반(덤프 24ton), L=2 km"], [None, "Q=60*qo*f*E/Cm= 32.74 ㎥/hr"],
+            # 코드매칭형 표기
+            [None, "제 120호표"], [None, "소운반-토사"], [None, "1. 상차, 굴삭기 0.7 M3 <품셈 9-3>"],
+            [None, "Q = 3600 * 0.7 * 1.1 / 30 = 26.40 ㎥/hr"], [None, "2. 운반, DT 2.5TON"],
+        ])
+        got = up.parse_loading_rates(wb, up.TEMPLATES[0])
+        self.assertAlmostEqual(got[113][0], 67.23 * 8, places=2)
+        self.assertNotIn(116, got)
+        self.assertAlmostEqual(got[120][0], 26.40 * 8, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()

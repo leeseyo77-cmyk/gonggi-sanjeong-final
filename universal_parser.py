@@ -580,6 +580,47 @@ def parse_excavator_buckets(wb, tmpl: Dict[str, Any]) -> Dict[str, Dict[Any, flo
 
 
 # ---------------------------------------------------------------------------
+# 운반 항목의 '상차' 작업량 — 상차분만 공기에 넣고 운반은 병행으로 본다
+# ---------------------------------------------------------------------------
+# 산근 블록은 '1.상차(굴착기 0.6㎥)', '1. 상차, 굴삭기 0.7 M3' 처럼 번호 붙은 구간으로 나뉜다.
+# 상차 구간에 Q가 있으면 그것이 상차만의 작업량이다. 직상차('1.터파기 … 발생토에서 계상')는
+# 상차 구간이 없어 상차 작업량을 따로 잡을 수 없다(터파기에 포함).
+_SECTION_RE = re.compile(r"^\s*'?\s*(\d+)\s*[.)]\s*(.*)")
+
+
+def parse_loading_rates(wb, tmpl: Dict[str, Any]) -> Dict[Any, Tuple[float, str]]:
+    """{산근 키: (상차 일작업량, 단위)} — 상차 구간에 Q가 있는 블록만."""
+    ws = _get_sheet(wb, tmpl.get("unit_price_sheet_names") or [])
+    if ws is None:
+        return {}
+    rows = [r for r in ws.iter_rows(values_only=True)]
+    fc = tmpl["unit_price_formula_col"]
+    ucc = tmpl.get("unit_char_class", r"가-힣㎡㎥")
+    q_fwd, q_inv = _build_q_regexes(ucc)
+    st = _block_starts(rows, tmpl["unit_price_block_start_col"], tmpl.get("unit_price_block_start_regex"),
+                       tmpl.get("link_key_type", "str"))
+    out: Dict[Any, Tuple[float, str]] = {}
+    for n, (k, i) in enumerate(st):
+        e = st[n + 1][1] if n + 1 < len(st) else len(rows)
+        secs = []
+        for j in range(i + 1, e):
+            v = rows[j][fc] if len(rows[j]) > fc else None
+            if isinstance(v, str):
+                m = _SECTION_RE.match(v)
+                if m and not re.match(r"^\s*[\d.,]+\s*$", m.group(2)):
+                    secs.append((j, m.group(2)))
+        for si, (j, title) in enumerate(secs):
+            if not re.match(r"^\s*상차", title):
+                continue
+            end = secs[si + 1][0] if si + 1 < len(secs) else e
+            got = _extract_q_from_block(rows, j, end, fc, q_fwd, q_inv, ucc)
+            if got:
+                out[k] = got
+            break
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 항목 시트 파싱 (계층 전략별 분기)
 # ---------------------------------------------------------------------------
 

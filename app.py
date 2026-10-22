@@ -881,16 +881,16 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
         # 실측(풍각): '흙운반(적치:토사) | 굴착기 직상차+덤프 운반:L=2.0km'처럼
         # 상차 작업이 규격에만 표기된 경우가 있어 이름만 보면 통째로 제외돼 버린다.
         # 단, '하치장 상차도(VAT포함)'는 자재 인도조건(상차도)이지 상차 작업이 아니므로 제외한다.
-        _has_loading = ("상차" in _nm_h) or ("상차" in _sp_h and "상차도" not in _sp_h)
+        # 이름에 '상차'가 없어도 산근에 상차 구간이 있으면 상차분을 잡는다(화성 '소운반-토사 | 1. 상차, 굴삭기
+        # 0.7 M3'). 현장은 효율을 위해 덤프를 대기시키고 굴착하며 바로 싣는다 — 관로는 특히(사용자 기준).
         if st.session_state.get("exclude_haul", False) and any(k in _nm_h for k in ("운반", "사토", "잔토")):
-            if not _has_loading:
-                return 0, "병행", "병행(제외)"
             # 수동입력이 있으면 그 값을 쓴다(아래 0순위)
             if f"{name}|{spec}" not in st.session_state.get("manual_rates", {}):
                 _lc = st.session_state.get("naeyeok_code_by_item", {}).get((name, spec))
                 _ld = st.session_state.get("naeyeok_loading_daily", {}).get(_lc) if _lc is not None else None
                 if not _ld or not _ld[0]:
-                    return 0, "병행", "병행(상차분 산정 불가)"
+                    _has_loading = ("상차" in _nm_h) or ("상차" in _sp_h and "상차도" not in _sp_h)
+                    return 0, "병행", ("병행(상차분 산정 불가)" if _has_loading else "병행(제외)")
                 _dv, _du = _ld
                 days = math.ceil(qty / (_dv * crews))
                 _RATE_CAPTURE.v = (_dv, crews)

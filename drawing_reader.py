@@ -19,8 +19,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Sequence
 
-MODEL = "claude-opus-5-5"
-MODELS = {"claude-opus-5-5": "Claude Opus 5.5 (기본·정확)", "claude-sonnet-5-5": "Claude Sonnet 5.5 (저렴)"}
+from claude_call import MODEL, MODELS, call_structured, extract_json
 ZOOM = 1.3          # A3 도면 → 약 1,550×1,100px. API가 긴 변 1,568px 넘는 그림을 줄이므로 그 안에 맞춘다
 MAX_PAGES = 12
 
@@ -131,33 +130,8 @@ def read_drawings(api_key: str, rendered, struct_names: Sequence[str], model: st
     반환: {"structures": [...], "model": 응답 모델, "usage": {...}} — 거절·형식 오류면 ValueError.
     client는 테스트용(가짜 클라이언트 주입).
     """
-    if client is None:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key, max_retries=2)
-    kwargs = dict(
-        model=model, max_tokens=16000, system=SYSTEM,
-        messages=build_messages(rendered, struct_names),
-        output_config={"effort": "high", "format": {"type": "json_schema", "schema": SCHEMA}},
-    )
-    if model in ("claude-opus-5-5", "claude-sonnet-5-5"):
-        # 안전 분류기가 거절하면 서버가 권장 모델로 다시 돌린다(Claude API 기준 권장 설정)
-        kwargs.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
-    # 그림 여러 장 + high effort라 오래 걸릴 수 있다 → 스트리밍으로 받아 시간 초과를 피한다
-    with client.beta.messages.stream(**kwargs) as stream:
-        msg = stream.get_final_message()
-    if msg.stop_reason == "refusal":
-        raise ValueError("모델이 요청을 거절했습니다(안전 분류기). 도면 쪽을 줄이거나 다시 시도하세요.")
-    if msg.stop_reason == "max_tokens":
-        raise ValueError("응답이 길이 한도에서 잘렸습니다. 도면 쪽 수를 줄여 다시 시도하세요.")
-    text = next((b.text for b in msg.content if getattr(b, "type", "") == "text"), "")
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"응답을 해석하지 못했습니다: {e}") from e
-    u = getattr(msg, "usage", None)
-    data["model"] = getattr(msg, "model", model)
-    data["usage"] = {"input": getattr(u, "input_tokens", 0) or 0, "output": getattr(u, "output_tokens", 0) or 0}
-    return data
+    return call_structured(api_key, SYSTEM, build_messages(rendered, struct_names)[0]["content"], SCHEMA,
+                           model=model, client=client)
 
 
 # ── 면적 계산·내역서 대조 ─────────────────────────────────────────────────
@@ -220,16 +194,7 @@ _REQ = SCHEMA["properties"]["structures"]["items"]["required"]
 
 def parse_manual(text: str) -> Dict[str, Any]:
     """claude.ai 답을 API 모드 결과와 같은 형태로. 코드블록·앞뒤 설명이 섞여 있어도 JSON만 뽑는다."""
-    t = (text or "").strip()
-    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", t, flags=re.S)
-    if m:
-        t = m.group(1)
-    elif "{" in t:
-        t = t[t.index("{"): t.rindex("}") + 1]
-    try:
-        data = json.loads(t)
-    except (json.JSONDecodeError, ValueError) as e:
-        raise ValueError(f"붙여 넣은 내용에서 JSON을 읽지 못했습니다: {e}") from e
+    data = extract_json(text)
     if isinstance(data, list):
         data = {"structures": data}
     sts = data.get("structures") if isinstance(data, dict) else None

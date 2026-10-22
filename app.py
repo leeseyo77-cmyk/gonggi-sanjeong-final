@@ -8,6 +8,8 @@ from universal_parser import detect_template, parse_items_generic, parse_unit_pr
 import schedule_plan as sp
 import crew_space as cs
 import drawing_reader as dr
+import crew_advisor as cadv
+import claude_call as cc
 import math
 import re
 from datetime import datetime, timedelta
@@ -492,6 +494,16 @@ PREP_DAYS_FIXED = 60   # 상하수도 준비기간(가이드라인 '상수도공
 WRAPUP_DAYS_FIXED = 30  # 상하수도 정리기간 — 사용자 기준 고정값
 
 
+def _rerun_fragment():
+    """프래그먼트 안이면 그 프래그먼트만 다시 그린다. 전체 실행 중이면 실행을 마친 뒤 전체를 다시
+    실행한다 — 탭 중간의 st.rerun()은 뒤 탭 위젯 상태를 지우기 때문(rerun_after_render 참고)."""
+    from streamlit.errors import StreamlitAPIException
+    try:
+        st.rerun(scope="fragment")
+    except StreamlitAPIException:
+        rerun_after_render()
+
+
 def rerun_after_render():
     """앱 전체를 다시 실행하되, 이번 실행을 끝까지 마친 뒤에 한다(파일 맨 끝에서 처리).
 
@@ -503,7 +515,6 @@ def rerun_after_render():
     st.session_state["_rerun_after_render"] = True
 
 
-@st.fragment
 def critical_first(source_items, detail_items, line_days):
     """상세표를 크리티컬 순으로 정렬한다: 공기를 정하는 구간(최장)의 항목을 맨 위에.
 
@@ -528,6 +539,7 @@ def critical_first(source_items, detail_items, line_days):
     return [source_items[i] for i in order], out
 
 
+@st.fragment
 def render_detail_table(detail_items, source_items, base_crew, key):
     """상세공종 표를 '1일작업량 수정'과 '투입조수' 열만 편집 가능하게 렌더링.
 
@@ -1598,7 +1610,7 @@ def _dwg_result_ui(items_by):
             store[nm] = {"slab": est["slab"], "wall": est["wall"],
                          "src": "도면(수동)" if "수동" in str(res.get("model")) else "도면(Claude API)"}
         st.session_state["struct_area_nonce"] = st.session_state.get("struct_area_nonce", 0) + 1
-        st.rerun(scope="fragment")
+        _rerun_fragment()
 
 
 def area_caps_ui(model):
@@ -1611,6 +1623,7 @@ def area_caps_ui(model):
             key="area_caps_on",
             help="구조물 면적에서 공종별로 동시에 붙일 수 있는 조수를 구해 상한으로 씁니다. "
                  "개략 검토에서는 끄고 '항목당 최대 투입조수'만 쓰면 됩니다."):
+        st.session_state["area_caps_basis"] = {}
         return {}
     st.caption(
         "동시 투입 상한 = 작업면적 ÷ (1조 인원 × 1인 작업공간). 1인 작업공간은 Thomas & Smith(1990)의 "
@@ -1664,7 +1677,7 @@ def area_caps_ui(model):
     trace_all = st.session_state.get("naeyeok_labor_trace") or {}
     buckets = st.session_state.get("excavator_buckets") or {}
     code_by_item = st.session_state.get("naeyeok_code_by_item") or {}
-    caps, rows = {}, []
+    caps, rows, basis_map = {}, [], {}
     for k, m in model["meta"].items():
         cls = cs.trade_class(m["세부공종"])
         if not cls:
@@ -1691,11 +1704,13 @@ def area_caps_ui(model):
         if best is None:
             continue
         caps[k] = best[0]
+        basis_map[k] = cs.explain(cls, best[2], persons, per_area, r_item, best[0])
         rows.append({"공종": cls, "세부공종": m["세부공종"], "규격": m["규격"],
                      "구조물": "(토공 전체)" if cls == "터파기" else best[1],
                      "1조": r_note if cls == "터파기" else f"{persons}인",
                      "상한(조)": best[0],
                      "근거": cs.explain(cls, best[2], persons, per_area, r_item, best[0])})
+    st.session_state["area_caps_basis"] = basis_map
     if rows:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         st.caption("이 항목들은 위 '항목당 최대 투입조수' 대신 면적 기준 상한을 씁니다. "
@@ -1703,6 +1718,112 @@ def area_caps_ui(model):
     elif structs or site:
         st.caption("면적을 입력하면 터파기·철근·거푸집 항목의 상한이 여기에 나옵니다.")
     return caps
+
+
+def _crew_unit_text(name, spec, unit):
+    """이 항목의 '1조'가 무엇인지(조수 추천 지시문용)."""
+    method = calc_days_priority(name, spec, 1, 1, unit, use_item_crew=False)[2]
+    tr = (st.session_state.get("naeyeok_labor_trace") or {}).get(labor_key_for(name, spec)) or {}
+    trades = [t for t, _ in (tr.get("직종별 인수") or [])]
+    cls = cs.trade_class(name)
+    if str(method).startswith("노무비역산") and trades:
+        return f"직종별 1인({'·'.join(trades[:4])})"
+    if cls == "터파기":
+        return "굴착기 1대"
+    if cls:
+        return f"품셈 작업조 {cs.pumsem_persons(cls, name, spec)}인"
+    return f"{method} 기준 1조"
+
+
+def crew_ai_ui(model, base, rec, crit, caps_area, cap, target, months, combine_sum):
+    """Claude 투입조수 추천(수동/API). AI는 조수와 이유만 제안하고 일수·공기는 앱이 다시 계산한다.
+
+    반환: '적용 조수'에 채우기로 한 추천 {항목키: 조수}
+    """
+    with st.expander("🤖 Claude 조수 추천 (수동 / API) — 1차 버전: 사례 없이 일반 기준", expanded=False):
+        st.caption(
+            "크리티컬 공종의 1조 기준 일수·1조 구성·동시 투입 상한·목표 순작업일수를 Claude에 넘기면 공종별 조수와 "
+            "이유를 제안합니다. 작업일수·공기는 앱이 같은 계산식으로 다시 구하고, 상한을 넘는 값은 상한으로 자릅니다. "
+            "지금은 과거 사례 없이 일반 기준으로 판단하므로 참고용입니다(감리 현장 사례가 모이면 개선 예정).")
+        meta = model["meta"]
+        keys = sorted(crit, key=lambda k: -max(meta[k]["d1"]))[:cadv.MAX_ITEMS]
+        if not keys:
+            st.info("목표를 넘는 크리티컬 공종이 없어 추천할 대상이 없습니다.")
+            return st.session_state.get("crew_ai_apply") or {}
+        caps_all = {k: int(caps_area.get(k, cap)) for k in base}
+        basis = st.session_state.get("area_caps_basis") or {}
+        items = [{"key": k, "대공종": meta[k]["대공종"], "세부공종": meta[k]["세부공종"], "규격": meta[k]["규격"],
+                  "구간 수": len(meta[k]["라인"]),
+                  "1조 구성": _crew_unit_text(meta[k]["세부공종"], meta[k]["규격"], meta[k]["단위"]),
+                  "1조 기준 일수": max(meta[k]["d1"]), "현재 조수": base[k], "역산 필요 조수": rec[k],
+                  "상한(cap)": caps_all[k],
+                  "상한 근거": basis.get(k, f"항목당 최대 {cap}조(임시값)")} for k in keys]
+        tot_now = eval_crews(model, base, combine_sum)[1]
+        tot_rec = eval_crews(model, rec, combine_sum)[1]
+        ctx = cadv.build_context(items, {"target": target, "months": months, "combine_sum": combine_sum,
+                                       "now": tot_now, "rec": tot_rec,
+                                       "capacity": int(st.session_state.get("plant_capacity") or 0)})
+        how = st.radio("추천 받는 방법", ["수동 — claude.ai 채팅에 붙여넣기 (추가 비용 없음)",
+                                       "API — 내 Anthropic API 키로 자동 (쓴 만큼 결제)"], key="crew_ai_mode")
+        if how.startswith("수동"):
+            st.markdown("**① 아래 지시문을 복사해 claude.ai 새 채팅에 붙여 넣기** → **② Claude의 답(JSON)을 아래 칸에 붙여 넣기**")
+            st.code(cadv.manual_prompt(ctx), language="text")
+            pasted = st.text_area("② Claude의 답 붙여넣기", height=160, key="crew_ai_paste",
+                                  placeholder='{"recommendations": [ ... ]}')
+            if st.button("📋 붙여 넣은 답 반영", disabled=not pasted.strip(), key="crew_ai_parse"):
+                try:
+                    st.session_state["crew_ai_result"] = cadv.parse_manual(pasted)
+                except ValueError as e:
+                    st.error(f"{e} — Claude에게 '지시문의 JSON 형식으로만 다시 답해 줘'라고 요청해 보세요.")
+        else:
+            _k1, _k2 = st.columns([2, 1])
+            api_key = _k1.text_input("Anthropic API 키", type="password", key="anthropic_api_key_crew",
+                                     help="console.anthropic.com에서 발급한 키(claude.ai 구독과 별도 결제). "
+                                          "이 요청에만 쓰고 저장하지 않습니다.")
+            mdl = _k2.selectbox("모델", list(cc.MODELS), format_func=lambda m: cc.MODELS[m], key="crew_ai_model")
+            _pi, _po = cc.PRICE[mdl]
+            st.caption(f"예상 비용: 약 ${(len(ctx) / 2 + 3000) * _pi / 1e6 + 8000 * _po / 1e6:.2f}")
+            if st.button("🤖 조수 추천 받기", disabled=not api_key, key="crew_ai_run"):
+                try:
+                    with st.spinner("Claude가 조수를 검토하는 중…"):
+                        st.session_state["crew_ai_result"] = cadv.recommend_api(api_key, ctx, model=mdl)
+                except Exception as e:      # noqa: BLE001 — API·형식 오류를 화면 문구로
+                    st.error(cc.error_message(e))
+        res = st.session_state.get("crew_ai_result")
+        if res:
+            crew_ai, notes, unknown = cadv.apply_recommendations(res["recommendations"], base, caps_all)
+            tot_ai = eval_crews(model, crew_ai, combine_sum)[1]
+            _r = st.columns(3)
+            _r[0].metric("AI 추천안 주공정", f"{tot_ai}일", delta=f"목표 대비 {tot_ai - target:+d}일",
+                         delta_color="inverse")
+            _r[1].metric("역산안(최소 조수)", f"{tot_rec}일", delta=f"목표 대비 {tot_rec - target:+d}일",
+                         delta_color="inverse")
+            _r[2].metric("조수를 바꾼 공종", f"{sum(1 for k in crew_ai if crew_ai[k] != base[k])}개")
+            reasons = {r["key"]: r["reason"] for r in res["recommendations"]}
+            st.dataframe(pd.DataFrame([{
+                "세부공종": meta[k]["세부공종"], "규격": meta[k]["규격"], "현재": base[k], "역산": rec[k],
+                "AI 추천": crew_ai[k], "상한": caps_all[k], "AI 추천 시 일수": -(-max(meta[k]["d1"]) // crew_ai[k]),
+                "조정": notes.get(k, ""), "이유": reasons.get(k, "")} for k in keys]),
+                hide_index=True, width="stretch")
+            if res.get("overall"):
+                st.info("🤖 " + res["overall"])
+            for rk in res.get("risks") or []:
+                st.warning("⚠️ " + rk)
+            if unknown:
+                st.caption(f"표에 없는 공종 키 {len(unknown)}개는 무시했습니다: {', '.join(unknown[:5])}")
+            u = res.get("usage") or {}
+            if u:
+                st.caption(f"{res.get('model', '')} · 입력 {u.get('input', 0):,} / 출력 {u.get('output', 0):,} 토큰")
+            _b1, _b2 = st.columns(2)
+            if _b1.button("✅ AI 추천을 '적용 조수'에 채우기", key="crew_ai_apply_btn", type="primary"):
+                # 편집표는 이 뒤에 그려지므로 같은 실행에서 바로 반영된다(재실행 불필요)
+                st.session_state["crew_ai_apply"] = {k: crew_ai[k] for k in keys}
+                st.session_state["crew_edit_nonce"] = st.session_state.get("crew_edit_nonce", 0) + 1
+            if _b2.button("🗑️ 추천 지우기", key="crew_ai_clear"):
+                st.session_state.pop("crew_ai_result", None)
+                st.session_state.pop("crew_ai_apply", None)
+                st.session_state["crew_edit_nonce"] = st.session_state.get("crew_edit_nonce", 0) + 1
+    return st.session_state.get("crew_ai_apply") or {}
 
 
 @st.fragment
@@ -1752,6 +1873,7 @@ def render_crew_recommendation(wr):
     area_caps = area_caps_ui(model)
     rec = recommend_crews(model, combine_sum, target, int(cap), caps=area_caps)
     crit = critical_keys(model, combine_sum, target, rec)
+    ai_apply = crew_ai_ui(model, base, rec, crit, area_caps, int(cap), target, months, combine_sum)
 
     # 결과 지표는 편집표 위에 보이도록 자리를 먼저 잡고, 편집값을 읽은 뒤 채운다
     result_box = st.container()
@@ -1773,7 +1895,7 @@ def render_crew_recommendation(wr):
             "현재 조수": base[k], "현재 일수": -(-d1 // base[k]),
             "상한": area_caps.get(k, int(cap)),
             "필요 조수": rec[k], "필요 조수 시 일수": -(-d1 // rec[k]),
-            "적용 조수": rec[k],
+            "적용 조수": ai_apply.get(k, rec[k]),
         })
     rows_df.sort(key=lambda x: (x["크리티컬"] == "", -x["현재 일수"]))
 

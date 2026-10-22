@@ -6,6 +6,7 @@
 기준값(1,084일·2,645일 등)은 현재 산정 모델의 결과다. 모델을 의도적으로 바꿨다면
 결과를 확인한 뒤 여기 숫자를 갱신한다.
 """
+import json
 import os
 import unittest
 import zipfile
@@ -137,6 +138,31 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
         # 면적을 넣지 않은 구조물은 내역서로 어림한 값이 기본으로 채워진다
         self.assertEqual(at.session_state["struct_areas"]["역T옹벽"]["src"], "내역서 어림")
         widget(at, "checkbox", "area_caps_on").set_value(False).run()
+
+    def test_claude_crew_manual_mode(self):
+        at = self.at
+        widget(at, "number_input", "target_months_input").set_value(24.0).run()
+        # 수동 모드가 기본 — 지시문에 목표·공종 표가 들어간다
+        prompt = next(c.value for c in at.code if "목표 순작업일수" in c.value)
+        self.assertIn("1조 기준 일수", prompt)
+        key = "유로폼|0-7m:복잡"
+        self.assertIn(key, prompt)
+        ans = json.dumps({"recommendations": [{"key": key, "crew": 99, "reason": "테스트"}],
+                          "overall": "검토", "risks": ["빠듯함"]}, ensure_ascii=False)
+        widget(at, "text_area", "crew_ai_paste").set_value(ans).run()
+        button(at, "📋 붙여 넣은 답 반영").click().run()
+        self.assertEqual(exceptions(at), [])
+        self.assertIsNotNone(metric(at, "AI 추천안 주공정"))
+        # 상한(항목당 3조)을 넘는 추천은 상한으로 잘린다
+        ai = next(d.value for d in at.dataframe if "AI 추천" in d.value.columns)
+        row = ai[ai["세부공종"] == "유로폼"].iloc[0]
+        self.assertEqual(int(row["AI 추천"]), 3)
+        self.assertIn("상한 3조", row["조정"])
+        button(at, "✅ AI 추천을").click().run()
+        self.assertEqual(exceptions(at), [])
+        ed = next(d.value for d in at.dataframe if "적용 조수" in d.value.columns and "필요 조수" in d.value.columns)
+        self.assertEqual(int(ed[ed["세부공종"] == "유로폼"]["적용 조수"].iloc[0]), 3)
+        button(at, "🗑️ 추천 지우기").click().run()
 
     def test_schedule_excel_states_crew_assumption(self):
         at = self.at

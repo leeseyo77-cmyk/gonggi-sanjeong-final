@@ -34,13 +34,13 @@ def civil_cat(name: str) -> str:
         return "가시설"
     if "토공" in n:
         return "토공"
-    if "구조물" in n:
+    if "구조물" in n or "콘크리트타설" in n:          # 공주정수장형 '현장콘크리트타설공사'
         return "구조물공"
-    if any(k in n for k in ("관로", "배관", "관부설", "추진")):
+    if any(k in n for k in ("관로", "배관", "관부설", "추진", "관 및")):
         return "관로공"
-    if any(k in n for k in ("우수", "배수")):
+    if any(k in n for k in ("우수", "배수", "유출수")):
         return "우수공"
-    if "포장" in n:
+    if "포장" in n or "도로" in n:
         return "포장공"
     return "부대공"
 

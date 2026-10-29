@@ -968,6 +968,74 @@ def _parse_items_district_roman(ws, tmpl: Dict[str, Any]) -> List[Dict]:
     return flat_items
 
 
+def _parse_items_numbered_tree(ws, tmpl: Dict[str, Any]) -> List[Dict]:
+    """번호 트리형 코드매칭 내역서(공주정수장형).
+
+    대공종 줄에 점이 없고 '■' 표시도 없이 번호만으로 계층을 나타내는 양식:
+        가. 직접공사비 → Ⅱ. 상수도시설 → A. UV 접촉조 → A.1 UV 접촉조
+          → 1 공통공사(대공종) → 1.1 가설공사 → 1.1.1 시스템비계(항목)
+    - 'A.'·'B.'(영문 한 글자) 단계가 구조물이라 라인(구간)으로 쓴다 → 구조물끼리 병행
+    - 점 없는 'N 이름'이 대공종, 'N.N'은 세부 공종(대공종에 포함), 'N.N.N 이름'이 항목
+    - 항목 이름 앞 번호('2.2.4 ')는 뗀다
+    - '나. 안전시설'·'다. 품질관리비'처럼 직접공사비가 아닌 구분은 '(공사비 외)' 대공종 하나로 모은다
+    """
+    section_re = re.compile(r"^([가-하])\.\s*(.+)$")
+    facility_re = re.compile(r"^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+\.?\s+(.+)$")
+    facility_sub_re = re.compile(r"^[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+\.\d+")
+    struct_re = re.compile(r"^([A-Z])\.?\s+(.+)$")
+    struct_sub_re = re.compile(r"^[A-Z]\.\d+\s")
+    major_re = re.compile(r"^(\d+)\s+(.+)$")
+    leaf_num_re = re.compile(r"^\d+(?:\.\d+)+\s+")
+    header_tag_re = re.compile(r"^\s*No\.?\s*$", re.IGNORECASE)
+    name_col, spec_col, qty_col, unit_col = tmpl["name_col"], tmpl["spec_col"], tmpl["qty_col"], tmpl["unit_col"]
+    leaf_tag_col, link_code_col = tmpl["leaf_tag_col"], tmpl.get("link_code_col")
+
+    section, direct = None, True
+    facility, line, major = None, "", None
+    items: List[Dict] = []
+    for row in ws.iter_rows(values_only=True):
+        raw = row[name_col] if len(row) > name_col else None
+        if not raw:
+            continue
+        txt = re.sub(r"\s+", " ", str(raw)).strip()
+        tag = row[leaf_tag_col] if len(row) > leaf_tag_col else None
+        qty = row[qty_col] if len(row) > qty_col else None
+        is_leaf = tag not in (None, "") and isinstance(qty, (int, float))
+        if is_leaf and isinstance(tag, str) and header_tag_re.match(tag):
+            is_leaf = False
+        if not is_leaf:
+            m = section_re.match(txt)
+            if m:
+                section = m.group(2).strip()
+                direct = "직접" in section
+                facility, line, major = None, "", None
+                continue
+            if facility_sub_re.match(txt) or struct_sub_re.match(txt):
+                continue
+            m = facility_re.match(txt)
+            if m:
+                facility, line, major = m.group(1).strip(), "", None
+                continue
+            m = struct_re.match(txt)
+            if m and direct:
+                line, major = m.group(2).strip(), None
+                continue
+            m = major_re.match(txt)
+            if m and direct:
+                major = m.group(2).strip()
+            continue
+        spec = str(row[spec_col]).strip() if len(row) > spec_col and row[spec_col] else ""
+        unit = str(row[unit_col]).strip() if len(row) > unit_col and row[unit_col] else ""
+        code = row[link_code_col] if link_code_col is not None and len(row) > link_code_col else None
+        items.append({
+            "name": leaf_num_re.sub("", txt), "spec": spec, "qty": qty, "unit": unit,
+            "code": code.strip() if isinstance(code, str) else None,
+            "category": major if direct else f"{section} (공사비 외)",
+            "line": line if direct else "", "parent": facility, "subgroup": None,
+        })
+    return items
+
+
 def parse_items_generic(wb, tmpl: Dict[str, Any]) -> List[Dict]:
     """템플릿의 hierarchy_strategy에 따라 적절한 파서로 위임."""
     ws = _get_sheet(wb, tmpl["item_sheet_names"])
@@ -976,7 +1044,13 @@ def parse_items_generic(wb, tmpl: Dict[str, Any]) -> List[Dict]:
     tmpl = _resolve_header_columns(ws, tmpl)
     strategy = tmpl["hierarchy_strategy"]
     if strategy == "major_number_prefix":
-        return _parse_items_major_number_prefix(ws, tmpl)
+        items = _parse_items_major_number_prefix(ws, tmpl)
+        # 대공종을 하나도 못 잡았으면 번호 트리형(공주정수장형: '1 공통공사'처럼 점 없는 대공종)으로 다시 읽는다
+        if items and not any(it.get("category") for it in items):
+            tree = _parse_items_numbered_tree(ws, tmpl)
+            if any(it.get("category") for it in tree):
+                return tree
+        return items
     elif strategy == "district_roman":
         return _parse_items_district_roman(ws, tmpl)
     else:
@@ -1189,6 +1263,18 @@ def parse_labor_derived_rates(wb, sheet_name: str = "일위대가_호표",
 
 
 
+def _swap_name_spec_if_needed(rows):
+    """머리행이 '규격, 공종명' 순서면 각 행의 첫 두 열을 바꾼다(머리행은 처음 8행 안에서 찾는다)."""
+    def norm(v):
+        return re.sub(r"\s+", "", str(v or ""))
+    for r in rows[:8]:
+        if len(r) > 1 and norm(r[0]) == "규격" and norm(r[1]) in ("공종명", "공종", "품명", "명칭"):
+            return [((r[1], r[0]) + tuple(r[2:])) if len(r) > 1 else r for r in rows]
+        if len(r) > 1 and norm(r[0]) in ("공종명", "공종", "품명", "명칭"):
+            break
+    return rows
+
+
 def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool = False,
                                    code_daily: Optional[Dict[Any, Tuple[float, str]]] = None):
     """
@@ -1227,6 +1313,10 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
         return _empty
 
     rows = [r for r in wb[cfg["block_sheet"]].iter_rows(values_only=True)]
+    # 일위대가 시트의 첫 두 열이 '규 격 | 공 종 명' 순서인 양식(공주정수장 실측 — 화성은 '공 종 명 | 규 격')은
+    # 두 열을 바꿔 읽는다. 바꾸지 않으면 규격을 공종명으로 읽어 직종별 인수('인' 행의 직종명)와 하위 블록
+    # 참조가 모두 어긋나고, 1일 작업량이 1인 기준 노무비 역산으로 떨어진다(유로폼 4㎡/일 등).
+    rows = _swap_name_spec_if_needed(rows)
     result: Dict[Any, Tuple[float, str, str]] = {}
 
     _BASE_RE = re.compile(r"^([\d,\.]+)\s*([A-Za-z가-힣㎡㎥]+)$")

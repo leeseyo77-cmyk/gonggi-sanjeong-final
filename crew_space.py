@@ -179,3 +179,68 @@ def estimate_areas(items, blinding_t: float = BLINDING_T):
     if wall:
         parts.append(f"벽 = (거푸집 {q['거푸집']:,.0f}㎡ − 바닥 {slab:,.0f}㎡) ÷ 2")
     return round(slab, 1), round(wall, 1), " · ".join(parts) or "내역서로 어림 불가(버림·거푸집 항목 없음)"
+
+
+# ── 품셈 작업조(노무비만 있는 블록을 1조 기준으로 바꿀 때) ─────────────────────
+# 표준시장단가처럼 직종별 인수 없이 ㎡당 노무비만 있는 블록은 그동안 '노무비 ÷ 보통인부 노임'(1인 기준)으로
+# 계산돼 품셈 1조보다 수 배 느리게 나왔다(공주정수장 유로폼 4㎡/일 vs 품셈 25~40㎡/조). 공종이 품셈 작업조와
+# 맞으면 작업조의 하루 노임 합으로 나눠 1조 기준으로 바꾼다.
+#   단계가 하나:  1일 작업량 = 작업조 하루 노임 합 ÷ 단위당 노무비
+#   단계가 여럿(설치 → 해체 등, 순서대로): 품셈 단위당 노무비 P = Σ(작업조 노임_i ÷ 품셈 일당시공량_i),
+#     실제 단위당 노무비 L로 보정 k = L ÷ P, 1일 작업량 = 1 ÷ (k × Σ 1/일당시공량_i)
+# 2026 표준품셈 원문 대조(쪽): 유로폼 6-3-3(p195), 합판 6-3-1(p193), 철근 6-2-2·6-2-3(p189~190),
+# 강관 동바리 2-6-1(p101), 시스템 동바리 2-6-3(p102), 강관 비계 2-7-1·시스템 비계 2-7-2(p103),
+# 콘크리트 펌프차 타설 6-1-4(p186).
+_REBAR_ASSY = {"Ⅰ-1": ({"철근공": 6, "보통인부": 2}, 3.4), "Ⅰ-2": ({"철근공": 4, "보통인부": 1}, 2.2),
+               "Ⅱ-1": ({"철근공": 5, "보통인부": 2}, 2.6), "Ⅱ-2": ({"철근공": 2, "보통인부": 1}, 1.1),
+               "Ⅲ": ({"철근공": 5, "보통인부": 2}, 2.4)}
+_REBAR_FAB = {"Ⅰ": 4.5, "Ⅱ": 4.0, "Ⅲ": 3.5}
+
+
+def _rebar_type(t: str) -> str:
+    u = t.upper().replace("III", "Ⅲ").replace("II", "Ⅱ").replace("TYPE-I", "TYPE-Ⅰ")
+    m = re.search(r"TYPE\s*-?\s*(Ⅲ|Ⅱ|Ⅰ)(?:\s*-\s*([12]))?", u)
+    if not m:
+        return "Ⅱ-1"
+    return m.group(1) if m.group(1) == "Ⅲ" else f"{m.group(1)}-{m.group(2) or '1'}"
+
+
+def crew_steps(title: str, spec: str = ""):
+    """공종 → [(작업조 {직종: 인원}, 품셈 일당시공량)]. 품셈 작업조를 모르면 None."""
+    t = f"{title} {spec}"
+    n = re.sub(r"\s+", "", str(title or ""))
+    if any(k in n for k in ("깨기", "운반", "절단")):
+        return None
+    both = ("해체" in n or "철거" in n) or not ("설치" in n)
+    if "동바리" in n:
+        if "시스템" in n:
+            steps = [({"형틀목공": 4, "보통인부": 1}, 130)]
+            return steps + [({"형틀목공": 2, "보통인부": 2}, 150)] if both else steps
+        if "강관" in n:
+            return [({"형틀목공": 3, "보통인부": 1}, 45)]
+    if "비계" in n and "브라켓" not in n:
+        if "시스템" in n:
+            steps = [({"비계공": 4, "보통인부": 1}, 150)]
+            return steps + [({"비계공": 2, "보통인부": 2}, 150)] if both else steps
+        return [({"비계공": 3, "보통인부": 1}, 55)]
+    if "유로폼" in n and "지수" not in n:
+        return [({"형틀목공": 4, "보통인부": 1}, 35)]
+    if "거푸집" in n and not any(k in n for k in ("원형", "강재", "문양", "유로폼")):
+        return [({"형틀목공": 5, "보통인부": 2}, 30)]
+    if "철근" in n and ("조립" in n or "가공" in n) and "콘크리트" not in n:
+        ty = _rebar_type(t)
+        assy = _REBAR_ASSY.get(ty, _REBAR_ASSY["Ⅱ-1"])
+        fab = ({"철근공": 3, "보통인부": 1}, _REBAR_FAB.get(ty.split("-")[0], 4.0))
+        if "공장가공" in t.replace(" ", ""):
+            return [assy]                         # 가공은 공장 — 현장은 조립만
+        if "조립" in n and "가공" in n:
+            return [fab, assy]
+        return [assy] if "조립" in n else [fab]
+    if "타설" in n and ("펌프" in n or "펌프" in t) and "콘크리트" in t:
+        rc = "철근" in t
+        return [({"콘크리트공": 4 if rc else 3, "특별인부": 1, "형틀목공": 1, "보통인부": 1}, 100)]
+    return None
+
+
+def crew_text(steps) -> str:
+    return " → ".join(" + ".join(f"{k} {v}" for k, v in c.items()) for c, _ in steps)

@@ -271,6 +271,11 @@ def labor_trace_text(tr) -> str:
         head += f" ({tr['규격']})"
     if tr.get("행"):
         head += f" · 일위대가표 {tr['행']}행"
+    if tr.get("방식") == "일위대가 일당 시공량":
+        return f"🔎 {head} · {tr['식']}"
+    if tr.get("방식") == "노무비 ÷ 작업조 노임(품셈)":
+        return (f"🔎 {head} · 노무비 {tr.get('노무비', 0):,}원(기준 {tr['기준수량']:g}{tr['단위']}) · "
+                f"품셈 작업조 {tr.get('작업조', '')} → {tr['식']}")
     if tr.get("방식") == "산근 A·Q(일위대가 경유)":
         parts = ", ".join(f"{p['작업']} 산근{p['산근']}호표 A={p['A']:g}{p['단위']}/일"
                           for p in (tr.get("산근 작업") or [])[:4])
@@ -321,7 +326,7 @@ def civil_report_data():
                     unmatched.append(f"{nm} · {it['name']} {it.get('spec', '')}".strip())
                 continue
             basis = ""
-            if str(method).startswith(("노무비역산", "일위대가→산근")):
+            if str(method).startswith(("노무비역산", "일위대가→산근", "일위대가 일당")):
                 basis = labor_trace_text(trace_all.get(labor_key_for(it["name"], it.get("spec", "")))
                                          ).replace("🔎 ", "")
             ln = it.get("_ukey") or it.get("district") or "(공통)"
@@ -969,7 +974,8 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
             if daily_val and daily_val > 0 and _unit_ok(unit, item_unit):
                 days = math.ceil(qty / (daily_val * crews))
                 _RATE_CAPTURE.v = (daily_val, crews)
-                return days, f"{daily_val:.1f}{unit}", "일위대가→산근(A·Q)"
+                _src = "일위대가 일당시공량" if (len(_aq) > 2 and _aq[2] == "일당 시공량") else "일위대가→산근(A·Q)"
+                return days, f"{daily_val:.1f}{unit}", _src
     except Exception:
         pass
 
@@ -2270,7 +2276,7 @@ def parse_workbook_cached(file_bytes: bytes):
         labor_daily, labor_trace = parse_labor_derived_by_template(wb, tmpl, with_trace=True,
                                                                    code_daily=code_daily)
         # 일위대가 → 산근 A·Q를 따라간 값은 설계자 값이라 역산과 따로 둔다(승계 보정 대상도 아님)
-        aq_daily = {k: v for k, v in labor_daily.items() if v[2] == "산근 A·Q"}
+        aq_daily = {k: v for k, v in labor_daily.items() if v[2] in ("산근 A·Q", "일당 시공량")}
         labor_daily = {k: v for k, v in labor_daily.items() if k not in aq_daily}
         parsed["template"] = {
             "name": tmpl["name"],

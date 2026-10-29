@@ -334,6 +334,8 @@ TEMPLATES: List[Dict[str, Any]] = [
             "wage_sheet": "노임", "wage_name_col": 0, "wage_rate_col": 3,
             "block_sheet": "일위대가_호표",
             "block_code_col": 14, "title_col": 0, "qty_col": 2, "unit_col": 3,
+            # 구성 행이 가리키는 산근 코드(일위대가_산근의 키) — 산근 A·Q 따라가기용
+            "component_code_col": 17,
             "labor_amount_col": 9,
             "key_type": "str",
         },
@@ -1432,6 +1434,8 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
 
     # 일위대가 구성 행이 가리키는 산근(단가산출근거) 번호. 표준형은 '산근 N호표'가 비고 열에 있다.
     _sg_re = re.compile(tmpl["link_regex"]) if (code_daily and tmpl.get("link_regex")) else None
+    _sg_col = cfg.get("component_code_col") if code_daily else None
+    _aq_on = _sg_re is not None or _sg_col is not None
 
     def _unit_norm(u):
         u = str(u or "").strip().upper()
@@ -1458,7 +1462,9 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
             if any(k in nm for k in _SURCHARGE_KW):
                 continue
             sg = None
-            if _sg_re is not None:
+            if _sg_col is not None and len(r) > _sg_col and isinstance(r[_sg_col], str):
+                sg = r[_sg_col].strip() or None
+            if sg is None and _sg_re is not None:
                 for v in r[4:]:
                     if isinstance(v, str):
                         m = _sg_re.search(v)
@@ -1523,6 +1529,36 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
         }
         return True
 
+    _STATED_RE = re.compile(r"일당\s*시공량\s*[:：]?\s*([\d,]+(?:\.\d+)?)")
+
+    def _emit_stated(key, title, unit, s, e, row_idx=None, spec=""):
+        """블록 안 '일당 시공량 390㎡ | 적용금액(1/390)'처럼 설계자가 적어 둔 일당 시공량을 그대로 쓴다.
+
+        공주정수장 실측: 이 값을 읽지 않고 합계 노무비를 1인 노임으로 나눠 바닥면고르기가 0.18㎡/일
+        (설계 390㎡/일), CCTV조사가 0.06m/일(설계 520m/일)이 되어 토목 공기가 1만 일을 넘었다.
+        """
+        unit_s = str(unit).strip() if unit else ""
+        if not unit_s or unit_s in _NON_WORK_UNITS or key in result:
+            return False
+        for j in range(s + 1, e):
+            for v in rows[j][:2]:
+                m = _STATED_RE.search(v) if isinstance(v, str) else None
+                if m:
+                    try:
+                        val = float(m.group(1).replace(",", ""))
+                    except ValueError:
+                        continue
+                    if val > 0:
+                        result[key] = (round(val, 4), unit_s, "일당 시공량")
+                        traces[key] = {
+                            "호표": key, "제목": str(title or "").strip(), "규격": str(spec or "").strip(),
+                            "단위": unit_s, "행": (row_idx if row_idx is not None else s) + 1,
+                            "방식": "일위대가 일당 시공량", "기준수량": 1, "일작업량": round(val, 4),
+                            "식": f"일위대가에 적힌 일당 시공량 '{str(v).strip()}' → {val:g}{unit_s}/조·일",
+                        }
+                        return True
+        return False
+
     def _emit(key, title, unit, base_qty, labor_cost, manhours=0.0, explicit_base=None,
               trades=None, row_idx=None, spec=""):
         unit_s = str(unit).strip() if unit else ""
@@ -1563,6 +1599,33 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
         # 2순위: 노무비 ÷ 노임단가 (하위가 다른 일위대가를 참조해 직접 인수가 없는 블록)
         if not (isinstance(labor_cost, (int, float)) and labor_cost > 0):
             return
+        # 2-1순위: 공종이 품셈 작업조와 맞으면 작업조 하루 노임 합으로 나눠 1조 기준으로(표준시장단가 등)
+        from crew_space import crew_steps, crew_text
+        steps = crew_steps(str(title or ""), str(spec or ""))
+        if steps and key not in result:
+            per_unit = float(labor_cost) / base_qty           # 실제 단위당 노무비
+            p_unit, inv = 0.0, 0.0
+            for crew, d in steps:
+                ws_ = [wages.get(t.replace(" ", "")) for t in crew]
+                if not all(ws_):
+                    p_unit = 0.0
+                    break
+                p_unit += sum(w * n for w, n in zip(ws_, crew.values())) / d
+                inv += 1.0 / d
+            if p_unit > 0 and per_unit > 0:
+                daily = p_unit / (per_unit * inv)
+                crew_wage = [sum(wages[t.replace(" ", "")] * n for t, n in c.items()) for c, _ in steps]
+                result[key] = (round(daily, 4), unit_s, "품셈 작업조")
+                traces[key] = {
+                    **_head, "방식": "노무비 ÷ 작업조 노임(품셈)", "기준수량": base_qty,
+                    "노무비": round(float(labor_cost)), "작업조": crew_text(steps),
+                    "작업조 노임": [round(w) for w in crew_wage], "일작업량": round(daily, 4),
+                    "식": (f"작업조 하루 노임 {crew_wage[0]:,.0f}원 ÷ 단위당 노무비 {per_unit:,.0f}원 = "
+                          f"{daily:.4g}{unit_s}/조·일") if len(steps) == 1 else
+                         (f"단계별 품셈 일수 합 × (실제 노무비 {per_unit:,.0f}원 ÷ 품셈 노무비 {p_unit:,.0f}원) "
+                          f"→ {daily:.4g}{unit_s}/조·일"),
+                }
+                return
         w = wages.get(job.replace(" ", "")) or wages.get(_DEFAULT_LABOR.replace(" ", ""))
         if not w:
             return
@@ -1595,6 +1658,17 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
             _lac = cfg["labor_amount_col"]
             _lab_raw = r[_lac] if len(r) > _lac else None
             _lab_net = _labor_excl_surcharge(i, e, _lac)
+            _title = r[cfg["title_col"]] if len(r) > cfg["title_col"] else ""
+            _unit = r[cfg["unit_col"]] if len(r) > cfg["unit_col"] else ""
+            _spec = r[1] if len(r) > 1 else ""
+            if _emit_stated(code, _title, _unit, i, e, row_idx=i, spec=_spec):
+                continue
+            if _aq_on:
+                _q0 = r[cfg["qty_col"]] if len(r) > cfg["qty_col"] else None
+                _base = _explicit_base(i, e) or (_q0 if isinstance(_q0, (int, float)) and _q0 > 0 else 1.0)
+                _parts, _tr_aq, _rest = _aq_parts(i, e, _lac)
+                if _parts and _emit_aq(code, _title, _unit, _base, _parts, _tr_aq, _rest, row_idx=i, spec=_spec):
+                    continue
             _acc = {}
             _mh = _manhours(i, e, acc=_acc)
             _emit(code,
@@ -1636,7 +1710,9 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
                         labor_cost = v
             key = int(no) if cfg.get("key_type") == "int" else no
             _xb = _explicit_base(ti, e)
-            if _sg_re is not None:
+            if _emit_stated(key, title, unit, ti, e, spec=rows[ti][1] if len(rows[ti]) > 1 else ""):
+                continue
+            if _aq_on:
                 _parts, _tr_aq, _rest = _aq_parts(ti, e, lac)
                 if _parts and _emit_aq(key, title, unit, _xb or cfg.get("base_qty", 1.0), _parts, _tr_aq,
                                        _rest, row_idx=ti,

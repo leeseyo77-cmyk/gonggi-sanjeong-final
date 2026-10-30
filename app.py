@@ -97,6 +97,27 @@ except ImportError as e:
 st.set_page_config(page_title="상하수도 공기산정", layout="wide", initial_sidebar_state="expanded")
 
 # ══════════════════════════════════════════════════════════════
+# 중간저장 — 연결이 끊기거나 새로 고쳐도 이어서 작업(session_store 참고)
+# 주소창 ?w=<작업 코드>가 같으면 서버 임시 폴더의 자동 저장을 위젯을 그리기 전에 복원한다.
+# ══════════════════════════════════════════════════════════════
+import session_store as sstore
+
+if not st.session_state.get("_restore_checked"):
+    st.session_state["_restore_checked"] = True
+    _wid = st.query_params.get("w") or ""
+    _got = sstore.load_autosave(_wid) if _wid else None
+    if not _wid or sstore._dir(_wid) is None:
+        _wid = sstore.new_id()
+        st.query_params["w"] = _wid
+    st.session_state["_work_id"] = _wid
+    if _got:
+        _n = sstore.apply(st.session_state, _got[0])
+        st.session_state["_restored_files"] = _got[1]
+        _when = datetime.fromtimestamp(_got[2]).strftime("%m-%d %H:%M") if _got[2] else ""
+        st.session_state["_restore_msg"] = f"자동 저장된 작업을 이어서 불러왔습니다({_when} 저장, 입력값 {_n}개)."
+    sstore.cleanup()
+
+# ══════════════════════════════════════════════════════════════
 # 공종 키워드 매핑
 # ══════════════════════════════════════════════════════════════
 KEYWORD_MAP_DETAIL = {
@@ -2309,6 +2330,38 @@ def parse_discipline_cached(file_bytes: bytes, discipline: str):
 # ══════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════
+with st.sidebar.expander("💾 작업 저장·불러오기", expanded=bool(st.session_state.get("_restore_msg"))):
+    _rm = st.session_state.pop("_restore_msg", None)
+    if _rm:
+        st.success(_rm)
+    st.caption(f"자동 저장 중 · 작업 코드 **{st.session_state.get('_work_id', '')}**. 새로 고치거나 연결이 끊겨도 "
+               "주소(?w=…)가 같으면 이어집니다. 앱이 재배포·재시작되면 자동 저장이 지워지니, 오래 둘 작업은 "
+               "저장 파일로 받아 두세요(올린 내역서 포함, API 키는 저장하지 않음).")
+    if st.button("💾 저장 파일 만들기", key="work_save_make", width="stretch"):
+        st.session_state["_save_zip"] = (sstore.build_zip(sstore.collect(st.session_state),
+                                                          st.session_state.get("_files_current") or {}),
+                                         datetime.now().strftime("%Y%m%d_%H%M"))
+    if st.session_state.get("_save_zip"):
+        _zb, _zt = st.session_state["_save_zip"]
+        st.download_button(f"📥 작업 저장 파일 받기 ({_zt})", data=_zb, file_name=f"공기산정_작업_{_zt}.zip",
+                           mime="application/zip", key="work_save_dl", width="stretch")
+    _lz = st.file_uploader("📂 저장 파일 불러오기 (.zip)", type=["zip"], key="work_load_zip")
+    if _lz is not None and st.button("불러오기", key="work_load_btn", width="stretch"):
+        try:
+            _ls, _lf, _lm = sstore.read_zip(_lz.getvalue())
+            # 이번 실행에서 아직 그리지 않은 위젯들이 불러온 값으로 그려진다
+            _n = sstore.apply(st.session_state, _ls)
+            st.session_state["_restored_files"] = _lf
+            st.success(f"불러왔습니다({_lm.get('saved_at', '')} 저장, 입력값 {_n}개). "
+                       "올려 둔 내역서가 있으면 업로드 칸을 비워야 저장 파일의 내역서가 쓰입니다.")
+        except ValueError as _e:
+            st.error(str(_e))
+    if st.button("🆕 새 작업 시작", key="work_new", width="stretch",
+                 help="입력값과 올린 파일을 모두 비우고 새 작업 코드로 시작합니다(이전 자동 저장은 7일 뒤 지워짐)."):
+        st.session_state.clear()
+        st.query_params.clear()
+        st.rerun()
+
 st.sidebar.header("⚙️ 기본 설정")
 
 # 상위 사업 구분으로 대공종 분리 (처리장+관로 혼합 발주 대응)
@@ -2374,6 +2427,17 @@ with tab2:
         help="구버전 .xls 파일은 지원하지 않습니다. 엑셀에서 열어 '다른 이름으로 저장' → 'Excel 통합 문서(.xlsx)'로 저장한 뒤 업로드해주세요.",
     )
 
+    _rf_all = st.session_state.get("_restored_files") or {}
+    if uploaded is not None:
+        _rf_all.pop("civil", None)             # 새로 올리면 저장된 파일 대신 그 파일
+    elif _rf_all.get("civil"):
+        uploaded = sstore.MemFile(*_rf_all["civil"][0])
+        st.caption(f"💾 저장된 작업의 내역서를 쓰고 있습니다: **{uploaded.name}** (다른 파일을 올리면 바뀝니다)")
+    _fc = st.session_state.setdefault("_files_current", {})
+    if uploaded is not None:
+        _fc["civil"] = [(uploaded.name, uploaded.getvalue())]
+    else:
+        _fc.pop("civil", None)
     if uploaded:
         # 프로그레스 바
         progress_bar = st.progress(0)
@@ -3709,7 +3773,7 @@ with tab4:
             default_region = "서울"
         selected_region = st.selectbox(
             "공사 지역", options=REGIONS, index=REGIONS.index(default_region),
-            help="지역별 기상 데이터 적용",
+            help="지역별 기상 데이터 적용", key="weather_region_legacy",
         )
         st.session_state["selected_region"] = selected_region
         selected_station = None
@@ -3746,11 +3810,11 @@ with tab4:
     else:
         col1, col2, col3 = st.columns(3)
         with col1:
-            include_rain = st.checkbox("🌧️ 강우일 포함", value=True, help="월별 평균 강우일수")
+            include_rain = st.checkbox("🌧️ 강우일 포함", value=True, help="월별 평균 강우일수", key="weather_rain")
         with col2:
-            include_cold = st.checkbox("❄️ 한랭일 포함", value=True, help="일 최저기온 -10°C 이하")
+            include_cold = st.checkbox("❄️ 한랭일 포함", value=True, help="일 최저기온 -10°C 이하", key="weather_cold")
         with col3:
-            include_hot = st.checkbox("🔥 폭염일 포함", value=True, help="일 최고기온 33°C 이상")
+            include_hot = st.checkbox("🔥 폭염일 포함", value=True, help="일 최고기온 33°C 이상", key="weather_hot")
         _sel_conds = None
     
     st.markdown("**📅 법정공휴일 (B)**")
@@ -3758,13 +3822,13 @@ with tab4:
     with col_h1:
         include_holidays = st.checkbox(
             "📅 법정공휴일 포함",
-            value=True,
+            value=True, key="weather_holidays",
             help="가이드라인 부록1: 일요일(52일) + 명절 + 국경일 + 기타 + 대체공휴일"
         )
     with col_h2:
         min_weekly_rest = st.checkbox(
             "⚖️ 주 40시간 근무제 보장",
-            value=True,
+            value=True, key="weather_min_rest",
             help="월별 비작업일수가 주 40시간 근무제(주 2일 휴무)에 따른 월 8일보다 작으면 8일 적용(고시 제8조 ②)"
         )
 
@@ -3796,7 +3860,7 @@ with tab4:
         )
     with _pc3:
         commission_months = st.number_input(
-            "시운전(개월)", min_value=0.0, max_value=12.0, value=0.0, step=0.5,
+            "시운전(개월)", min_value=0.0, max_value=12.0, value=0.0, step=0.5, key="commission_months",
             help="하수처리시설·정수장 등 시설공사는 준공 전 시운전이 필요합니다(통상 4개월). "
                  "관로 공사만 있으면 0으로 두세요.",
         )
@@ -4960,6 +5024,17 @@ with tab7:
                         "공기에 반영", value=bool(_use_def), key=f"disc_use_{_dc}",
                         help="끄면 작업일수는 계산해서 보여 주되 전체 공기에는 넣지 않습니다.",
                     )
+                _rslot = (st.session_state.get("_restored_files") or {})
+                if _ups:
+                    _rslot.pop(f"disc_{_dc}", None)
+                elif _rslot.get(f"disc_{_dc}"):
+                    _ups = [sstore.MemFile(n, b) for n, b in _rslot[f"disc_{_dc}"]]
+                    st.caption("💾 저장된 작업의 내역서: " + ", ".join(u.name for u in _ups))
+                _fcd = st.session_state.setdefault("_files_current", {})
+                if _ups:
+                    _fcd[f"disc_{_dc}"] = [(u.name, u.getvalue()) for u in _ups]
+                else:
+                    _fcd.pop(f"disc_{_dc}", None)
                 _items = []
                 for _uf in _ups or []:
                     _r = parse_discipline_cached(_uf.getvalue(), _dc)
@@ -5265,5 +5340,10 @@ with tab8:
 # ══════════════════════════════════════════════════════════════
 # 미뤄 둔 재실행 — 모든 탭의 위젯을 한 번 그린 뒤에 다시 실행한다(rerun_after_render 참고)
 # ══════════════════════════════════════════════════════════════
+try:
+    sstore.autosave(st.session_state.get("_work_id", ""), sstore.collect(st.session_state),
+                    st.session_state.get("_files_current") or {})
+except OSError:
+    pass                                   # 자동 저장 실패는 작업을 막지 않는다
 if st.session_state.pop("_rerun_after_render", False):
     st.rerun()

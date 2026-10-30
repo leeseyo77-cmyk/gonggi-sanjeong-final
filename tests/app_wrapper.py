@@ -40,6 +40,8 @@ def _uploader(*a, **k):
             return [_Up(pathlib.Path(x).read_bytes(), os.path.basename(x))
                     for x in p.split("||") if x]
         return []
+    if key:                               # 저장 파일·도면 등 키가 있는 다른 업로더는 비워 둔다
+        return None
     return _Up(_data, _name) if _data else None
 
 

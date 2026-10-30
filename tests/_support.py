@@ -29,7 +29,7 @@ def have(*paths) -> bool:
     return all(pathlib.Path(p).exists() for p in paths)
 
 
-def app_test(civil=None, discs=None, timeout=1800):
+def app_test(civil=None, discs=None, timeout=1800, query=None):
     """샘플 파일을 업로드한 상태로 app.py를 한 번 실행한 AppTest를 돌려준다.
 
     file_uploader는 tests/app_wrapper.py가 바꿔치기한다. 다운로드 버튼에 실린 파일은
@@ -46,6 +46,8 @@ def app_test(civil=None, discs=None, timeout=1800):
     OUT.mkdir(exist_ok=True)
     os.environ["GONGGI_DL_DIR"] = str(OUT)
     at = AppTest.from_file(str(REPO / "tests" / "app_wrapper.py"), default_timeout=timeout)
+    for k, v in (query or {}).items():      # 주소창 값(?w=작업 코드 등)
+        at.query_params[k] = v
     at.run()
     return at
 

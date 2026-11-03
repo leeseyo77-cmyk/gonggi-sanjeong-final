@@ -324,8 +324,10 @@ def pipe_crew_daily(pipe_name: str, diameter_mm: int, condition: str = "A"):
         daily = 1.0 / rates["보통인부"]
         crew = {t: max(1, round(v * daily)) for t, v in rates.items()}
     else:
-        daily = 1.0 / max(rates.values())
-        crew = {t: 1 for t in rates}
+        # 본당 직종별 인수만 있는 표 — 1조 = 인수 비율 그대로의 품셈 구성원(crew_space.pumsem_crew)
+        from crew_space import ratio_crew, crew_rate
+        crew = ratio_crew(rates)
+        daily = crew_rate(rates, crew)[0]
     return round(daily / factor, 2), crew, closest
 
 if __name__ == "__main__":

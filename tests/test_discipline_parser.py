@@ -9,7 +9,7 @@ import discipline_parser as dp
 
 
 def _item(unit, group, days, disc="건축"):
-    """직종 정보 없는 항목 = 노무비 역산 1직종. days1이 곧 작업량(인·일)."""
+    """직종 정보 없는 항목 = 노무비 역산 1직종. days1이 곧 작업량(조·일)."""
     return {"discipline": disc, "unit_name": unit, "group": group, "name": group,
             "qty": 1.0, "days1": days, "trades": {}}
 

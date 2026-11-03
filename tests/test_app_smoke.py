@@ -27,15 +27,21 @@ class CivilTest(unittest.TestCase):
         self.assertEqual(exceptions(at), [])
         # 노무비 역산은 병목 직종 기준(1조 = 직종별 1인). 1인 합산 기준이던 때는 2,517일.
         # 일위대가 → 산근 A·Q를 따라가기 전에는 2,198일(철근 가공·조립이 역산 0.19t/일로 떨어짐)
-        self.assertEqual(at.session_state["total_work_days"], 1084)
+        # 가이드라인을 내역서 Q값 다음 순위로 올린 뒤 1,079일(가시설 띠장·시스템비계·시트방수 등),
+        # 1조 = 표준품셈 구성원(직종별 1인이 아니라 인수 비율 그대로의 구성원)으로 바꾼 뒤 808일
+        self.assertEqual(at.session_state["total_work_days"], 808)
 
-        # 상세표는 공기를 정하는 구간(🔴)의 항목이 맨 위 — 구조물공사는 오존접촉조 1,084일
+        # 토목 공기는 토공(연암·경암 터파기, 산근 Q) 808일 — 구조물공사(683일)보다 길어졌다
+        days = {r["공종명_pure"]: r["작업일수(일)"] for r in at.session_state["work_result"]["rows"]}
+        self.assertEqual((days["토공"], days["구조물공사"]), (808, 683))
+
+        # 상세표는 공기를 정하는 구간(🔴)의 항목이 맨 위 — 구조물공사는 오존접촉조 683일
         tables = [d.value for d in at.dataframe if "주공정" in d.value.columns]
         struct = next(df for df in tables if "오존접촉조" in set(df["구간"]))
         crit = struct["주공정"] == "🔴"
         self.assertTrue(crit.iloc[:int(crit.sum())].all())               # 🔴 행이 모두 위쪽에
         self.assertEqual(set(struct.loc[crit, "구간"]), {"오존접촉조"})
-        self.assertEqual(int(struct.loc[crit, "작업일수"].sum()), 1084)
+        self.assertEqual(int(struct.loc[crit, "작업일수"].sum()), 683)
 
 
 @unittest.skipIf(SKIP, WHY)
@@ -45,13 +51,13 @@ class ProjectTabTest(unittest.TestCase):
         self.assertEqual(exceptions(at), [])
         # 기계·전기는 앱에서 다루지 않는다(설치만 검토 — 공기를 지배하지 않음)
         self.assertFalse(any(w.key == "disc_use_전기" for w in at.checkbox))
-        # 토목 1,084 + 건축(동 병행) 1,561
-        self.assertEqual(metric(at, "사업 전체 순작업일수"), "2645일")
+        # 토목 808 + 건축(동 병행, 1조 = 품셈 구성원) 404 — 1조 = 직종별 1인이던 때는 건축 1,561
+        self.assertEqual(metric(at, "사업 전체 순작업일수"), "1212일")
 
         # 비작업일수 계산기로 넘기기
         button(at, "📥 전체 순작업일수").click().run()
         self.assertEqual(exceptions(at), [])
-        self.assertEqual(at.session_state["weather_work_days"], 2645)
+        self.assertEqual(at.session_state["weather_work_days"], 1212)
 
         # 건축을 공기에서 빼면 토목만 남는다
         widget(at, "checkbox", "disc_use_건축").set_value(False).run()
@@ -62,8 +68,8 @@ class ProjectTabTest(unittest.TestCase):
         at = app_test(civil=GWANGJU["토목"], discs={"건축": GWANGJU["건축"]})
         widget(at, "number_input", "disc_tc_건축").set_value(8).run()
         self.assertEqual(exceptions(at), [])
-        # 면 작업 상한 4조 → 활성탄흡착지 4조가 한계, 402일
-        self.assertEqual(metric(at, "건축 작업일수"), "402일")
+        # 면 작업 상한 4조 → 활성탄흡착지 4조가 한계, 107일(1조 = 직종별 1인이던 때는 402일)
+        self.assertEqual(metric(at, "건축 작업일수"), "107일")
 
 
 @unittest.skipIf(SKIP, WHY)
@@ -80,7 +86,7 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
         # '비작업일수 계산'이 탭 중간에서 바로 재실행하면 사업 전체 탭 위젯이 그려지지 않아
         # Streamlit이 그 상태(조수·업로드)를 지웠다 → 재실행을 실행 끝으로 미뤄 고쳤다
         self.assertEqual(self.at.session_state["disc_tc_건축"], 8)
-        self.assertEqual(metric(self.at, "건축 작업일수"), "402일")
+        self.assertEqual(metric(self.at, "건축 작업일수"), "107일")
 
     def test_appendix_workbook_generated(self):
         at = self.at

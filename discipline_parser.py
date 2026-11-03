@@ -11,11 +11,16 @@ discipline_parser.py — 기계·건축·전기 분야 내역서 파서 ('공종
   - '공종별집계표' 시트: 공종코드 계층별 이름(건물 동 / 설비 단위)
 열 순서(단위·수량, 재료비·노무비)는 파일마다 달라 머리행 글자로 찾는다.
 
-1조 일수(항목을 1개 조가 끝내는 데 걸리는 일수) 산정:
-  - 연결된 일위대가 블록에 직종별 인수가 있으면: 1조 = 직종별 1인씩.
-      1조 일수 = 수량 × max(직종별 인/단위). 다른 블록을 참조하는 행은 수량을 곱해 따라 들어간다.
-  - 인수가 없고 노무비만 있으면: 노무비 ÷ 기준 노임(파일에서 관측한 노임의 중앙값) — 노무비 역산(1인 기준)
-  - 노무비가 없으면(자재·기자재 구매) 공기에 반영하지 않는다.
+1조 일수(항목을 1개 조가 끝내는 데 걸리는 일수) 산정 — 1조 = 표준품셈 구성원(사용자 기준 2026-11-03,
+토목과 같은 기준: crew_space.pumsem_crew·crew_rate):
+  1) 가이드라인 부록4에 조건이 맞는 공종이 있으면: 1조 일수 = 수량 ÷ 가이드라인 1일 작업량(품셈 작업조 기준)
+  2) 일위대가 블록에 직종별 인수가 있으면: 구성원을 정하고(품셈 작업조를 알면 그것, 모르면 인수 비율 그대로
+     — 가장 적게 드는 주요 직종 1인), 1조 일수 = 수량 × max(직종별 인/단위 ÷ 구성원 인원).
+     다른 블록을 참조하는 행은 수량을 곱해 따라 들어간다.
+  3) 인수가 없고 노무비만 있으면: 노무비 ÷ (기준 노임 × 품셈 작업조 인원). 작업조를 모르면 구성원을
+     알 수 없어 1인 기준으로 두고 근거에 '구성원 미확인'을 적는다(수동입력으로 바로잡을 항목).
+  4) 노무비가 없으면(자재·기자재 구매) 공기에 반영하지 않는다.
+항목의 trades는 직종별 '조·일/단위'(인수 ÷ 작업조 인원)다. 원래 인수는 trades_person에 둔다.
 장비 사용료 블록 안의 운전사 행은 시간당 단가('1인'이지만 1시간분)라 인수로 세지 않는다
 (노임 단가가 MIN_DAILY_WAGE 미만인 행 제외).
 """
@@ -161,6 +166,17 @@ def _unit_name(gcode: str, by_code: Dict[str, str], by_num: Dict[str, str]) -> (
     return leaf, parent
 
 
+def trade_wages(blocks) -> Dict[str, float]:
+    """일위대가의 '인' 행에서 직종별 일 노임(중앙값). 가이드라인 작업조 노무비를 구할 때 쓴다."""
+    seen: Dict[str, List[float]] = defaultdict(list)
+    for b in blocks.values():
+        for r in b["rows"]:
+            if r["unit"] == "인" and r["qty"] > 0 and r["labor"] / r["qty"] >= MIN_DAILY_WAGE:
+                t = r["spec"] if _n(r["name"]).startswith("노무비") else r["name"]
+                seen[_n(t)].append(r["labor"] / r["qty"])
+    return {t: median(v) for t, v in seen.items()}
+
+
 def _parse_blocks(ws) -> (Dict[str, Dict[str, Any]], List[float]):
     """일위대가 블록: {블록코드: {"name", "rows": [...]}}, 관측한 일 노임 목록."""
     h = _header_map(ws)
@@ -217,12 +233,26 @@ def _block_trades(code: str, blocks, memo, stack=()) -> Dict[str, float]:
     return memo[code]
 
 
+def item_crew(name: str, spec: str, trades: Dict[str, float]):
+    """항목의 1조 구성원과 출처(crew_space.pumsem_crew — 토목과 같은 규칙)."""
+    from crew_space import pumsem_crew
+    return pumsem_crew(name, spec, trades)
+
+
+def _crew_label(crew: Dict[str, int]) -> str:
+    from crew_space import crew_label
+    return crew_label(crew)
+
+
 def parse_gjb(wb, discipline: str = "") -> Dict[str, Any]:
     """분야 내역서 파싱. 반환: {"items": [...], "base_wage": 원, "units": [단위명...]}.
 
     항목 필드: discipline, unit_name(설비·동), group(공종), name, spec, unit, qty,
-              labor(노무비 금액), days1(1조 일수, float), basis(산정 근거), trades(직종별 인/단위)
+              labor(노무비 금액), days1(1조 일수, float), basis(산정 근거),
+              trades(직종별 조·일/단위), trades_person(직종별 인/단위), crew(1조 작업조), crew_src
     """
+    import guideline_work as gw
+    ctx = "토목" if discipline == "토목" else "건축"
     ws = wb["공종별내역서"]
     h = _header_map(ws)
     if not h:
@@ -230,6 +260,7 @@ def parse_gjb(wb, discipline: str = "") -> Dict[str, Any]:
     by_code, by_num = _group_names(wb)
     blocks, wages = _parse_blocks(wb["일위대가"])
     base_wage = median(wages) if wages else DEFAULT_WAGE
+    t_wages = trade_wages(blocks)
     memo: Dict[str, Dict[str, float]] = {}
     items: List[Dict[str, Any]] = []
     units: List[str] = []
@@ -251,22 +282,50 @@ def parse_gjb(wb, discipline: str = "") -> Dict[str, Any]:
         gcode = gcode or cur_gcode
         group, unit_name = _unit_name(gcode, by_code, by_num)
         labor = _f(_cell(row, h.get("labor")))
-        trades = _block_trades(code, blocks, memo) if _s(_cell(row, h.get("f_il"))) == "T" else {}
-        if trades:
+        spec = _s(_cell(row, h.get("spec")))
+        unit = _s(_cell(row, h.get("unit")))
+        trades_p = _block_trades(code, blocks, memo) if _s(_cell(row, h.get("f_il"))) == "T" else {}
+        g = gw.match(nm, spec, unit, ctx) if (trades_p or labor > 0) else None
+        g_note = ""
+        if g and labor > 0:
+            # 노무비가 비슷할 때만 가이드라인(사용자 기준 2026-11-03) — 더 가벼운·무거운 작업에 씌우지 않게
+            guide_ul = gw.unit_labor(g, t_wages, base_wage)
+            sim = gw.labor_similar(labor / qty, guide_ul)
+            if sim is False:
+                g = None
+            elif sim:
+                g_note = f" · 노무비 대조 {labor / qty / guide_ul:.2f}배"
+        crew, crew_src = {}, ""
+        if g:
+            # 가이드라인 1개 작업조 — 주 직종(보통인부가 아닌 가장 많은 직종)에 작업량을 모은다
+            crew, crew_src = dict(g["crew"]), "가이드라인 작업조"
+            lead = max((k for k in crew if k != "보통인부"), key=lambda k: crew[k], default="보통인부")
+            trades = {lead: 1.0 / g["daily"]}
+            days1 = qty / g["daily"]
+            basis = "가이드라인: " + gw.describe(g) + g_note
+        elif trades_p:
+            crew, crew_src = item_crew(nm, spec, trades_p)
+            trades = {t: v / max(1, crew.get(t, 1)) for t, v in trades_p.items()}
             days1 = qty * max(trades.values())
-            basis = "일위대가 인수"
+            basis = f"일위대가 인수 ÷ 구성원({crew_src}: {_crew_label(crew)})"
         elif labor > 0:
-            days1 = labor / base_wage
-            basis = "노무비 역산"
+            crew, crew_src = item_crew(nm, spec, {})
+            persons = sum(crew.values()) if crew else 1
+            trades = {}
+            days1 = labor / (base_wage * persons)
+            basis = (f"노무비 역산 ÷ 품셈 작업조 {persons}인({_crew_label(crew)})" if crew else
+                     "노무비 역산 1인 기준 — 구성원 미확인(직종별 인수가 없음, 수동입력 권장)")
         else:
+            trades = {}
             days1 = 0.0
             basis = "자재(공기 제외)"
         if unit_name not in units:
             units.append(unit_name)
         items.append({
             "discipline": discipline, "unit_name": unit_name, "group": group,
-            "name": nm, "spec": _s(_cell(row, h.get("spec"))), "unit": _s(_cell(row, h.get("unit"))),
+            "name": nm, "spec": spec, "unit": unit,
             "qty": qty, "labor": labor, "days1": days1, "basis": basis, "trades": trades,
+            "trades_person": trades_p, "crew": crew, "crew_src": crew_src,
         })
     return {"items": items, "base_wage": base_wage, "units": units}
 
@@ -279,7 +338,7 @@ def build_packages(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """작업 묶음(설비·동 단위 안의 공종)별 직종 작업량(인·일)을 모은다.
 
     같은 공종 안에서 직종이 다른 항목(형틀목공·철근공 등)은 동시에 진행되므로, 묶음 일수는
-    작업량이 가장 많은 직종이 정한다. 모든 항목을 순차로 더하면 건축이 수천 일로 부풀었다
+    작업량(조·일)이 가장 많은 직종이 정한다. 모든 항목을 순차로 더하면 건축이 수천 일로 부풀었다
     (실측: 화성 건축 6,916일). 직종 정보가 없는 노무비 역산 항목은 '노무비역산' 한 직종으로 본다.
     """
     pk: Dict[tuple, Dict[str, Any]] = {}
@@ -322,7 +381,7 @@ def discipline_days(items: List[Dict[str, Any]], mode: str, crews: int = 1,
                     type_by_pkg: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """분야 작업일수.
 
-    작업 묶음(공종) 일수 = ceil(최대 직종 작업량 ÷ 투입조수)   — 1조 = 직종별 1인
+    작업 묶음(공종) 일수 = ceil(최대 직종 작업량(조·일) ÷ 투입조수)   — 1조 = 작업조
     설비·동 단위 일수    = 단위 안 공종 일수의 합(공종 순차)
     mode "seq"          : 단위끼리도 순차(건축에서 동을 순차로 볼 때)
     mode "unit_parallel": 단위끼리 병행(기계·전기 설비 단위, 건축 동 병행)

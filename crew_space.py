@@ -88,16 +88,16 @@ def pumsem_persons(cls: str, name: str = "", spec: str = "") -> int:
     return 1
 
 
-def crew_persons(cls: str, name: str, spec: str, method: str, trades: Optional[int] = None) -> int:
+def crew_persons(cls: str, name: str, spec: str, method: str, persons: Optional[int] = None) -> int:
     """앱에서 이 항목의 '1조'가 몇 명인지.
 
-    1일 작업량이 노무비 역산(직종별 인수의 병목)에서 왔으면 1조 = 직종별 1인이라 직종 수,
+    1일 작업량이 노무비 역산(직종별 인수 ÷ 품셈 구성원)에서 왔으면 그 구성원 인원(persons),
     그 밖(산근 A·Q, 품셈 작업조 등)은 품셈 작업조 인원.
     """
     if cls == "터파기":
         return 1
-    if str(method).startswith("노무비역산") and trades:
-        return max(1, int(trades))
+    if str(method).startswith("노무비역산") and persons:
+        return max(1, int(persons))
     return pumsem_persons(cls, name, spec)
 
 
@@ -205,8 +205,27 @@ def _rebar_type(t: str) -> str:
     return m.group(1) if m.group(1) == "Ⅲ" else f"{m.group(1)}-{m.group(2) or '1'}"
 
 
-def crew_steps(title: str, spec: str = ""):
-    """공종 → [(작업조 {직종: 인원}, 품셈 일당시공량)]. 품셈 작업조를 모르면 None."""
+# 노무비만 있는 항목의 구성원을 정할 때 쓰는 품셈 단위당 인수(2026 표준품셈) 또는 가이드라인 작업조.
+# (키워드 묶음 — 묶음마다 하나 이상 포함, 직종별 인수, 출처)
+_PUMSEM_TRADES = [
+    ((("수성페인트", "유성페인트", "페인트"), ("롤러", "칠")), {"도장공": 0.012, "보통인부": 0.002}, "품셈 11-2-2"),
+    ((("에폭시",), ("라이닝",)), {"도장공": 0.044, "보통인부": 0.023}, "품셈 11-2-8"),
+    ((("에폭시",), ("코팅", "페인트")), {"도장공": 0.039, "보통인부": 0.008}, "품셈 11-2-8"),
+    ((("현장정리", "준공청소"),), {"보통인부": 0.13}, "품셈 2-11-2"),
+    ((("방수",),), {"방수공": 0.03, "보통인부": 0.01}, "가이드라인 부록4 방수공사(방수공 3 + 보통인부 1)"),
+    ((("콘크리트면",), ("마감", "마무리")), {"미장공": 0.03, "견출공": 0.01, "보통인부": 0.01},
+     "가이드라인 부록4 콘크리트면 마무리(미장공 3 + 견출공 1 + 보통인부 1)"),
+    ((("모르타르", "미장"), ("바름",)), {"미장공": 0.03, "보통인부": 0.01},
+     "가이드라인 부록4 시멘트 모르타르 바름(미장공 3 + 보통인부 1)"),
+]
+
+
+def crew_steps(title: str, spec: str = "", fallback: bool = True):
+    """공종 → [(작업조 {직종: 인원}, 품셈 일당시공량)]. 품셈 작업조를 모르면 None.
+
+    fallback=True면 품셈 작업조 표에 없는 공종도 품셈 단위당 인수(_PUMSEM_TRADES)·가이드라인 작업조로
+    구성원을 정한다 — 직종별 인수가 없는(노무비만 있는) 항목용. 인수가 있는 항목은 그 인수가 곧 품셈
+    구성이라 fallback을 쓰지 않는다(pumsem_crew)."""
     t = f"{title} {spec}"
     n = re.sub(r"\s+", "", str(title or ""))
     if any(k in n for k in ("깨기", "운반", "절단")):
@@ -236,11 +255,93 @@ def crew_steps(title: str, spec: str = ""):
         if "조립" in n and "가공" in n:
             return [fab, assy]
         return [assy] if "조립" in n else [fab]
+    # 천장재 붙임 — 품셈 5-2-1 흡음텍스 설치·5-2-2 열경화성수지천장판 설치(내장공 2 + 보통인부 1, 45㎡).
+    # 압출성형 시멘트판(천장 텍스류)은 품셈에 없어 같은 천장재 구성원으로 본다(사용자 확인 2026-11-03).
+    if any(k in n for k in ("텍스", "천장판", "천정판", "압출성형", "시멘트판")) and not any(
+            k in n for k in ("해체", "철거", "운반")):
+        return [({"내장공": 2, "보통인부": 1}, 45)]
     if "타설" in n and ("펌프" in n or "펌프" in t) and "콘크리트" in t:
         rc = "철근" in t
         return [({"콘크리트공": 4 if rc else 3, "특별인부": 1, "형틀목공": 1, "보통인부": 1}, 100)]
+    if not fallback:
+        return None
+    # 품셈 단위당 인수로만 나오는 공종 — 구성원은 인수 비율 그대로(가장 적게 드는 직종 1인)
+    for keys, trades, _src in _PUMSEM_TRADES:
+        if all(any(k in n for k in alt) for alt in keys) and "해체" not in n and "보호" not in n:
+            crew = ratio_crew(trades)
+            return [(crew, crew_rate(trades, crew)[0])]
+    # 가이드라인 부록4의 작업조(품셈 생산성 기준) — 1일 작업량 값은 노무비가 맞을 때만 쓰지만(guideline_work),
+    # 구성원은 같은 공종이면 그대로 쓴다. 예) 우레탄도막방수 3mm: 노무비가 1층 값의 4배라 200㎡/일은 안 쓰고,
+    # 구성원 방수공 3 + 보통인부 1로 노무비 ÷ 작업조 노임 → 그 구성원의 1일 작업량
+    try:
+        import guideline_work as gw
+        m = gw.match(title, spec, "", "토목")
+    except Exception:            # noqa: BLE001
+        m = None
+    if m:
+        steps = [({k: n for k, n in c.items() if not any(e in k for e in gw._EQUIP)}, v) for _, v, c in m["steps"]]
+        if all(c for c, _ in steps):          # 장비만 있는 작업조(토사굴착 등)는 구성원이 아니다
+            return steps
     return None
 
 
 def crew_text(steps) -> str:
     return " → ".join(" + ".join(f"{k} {v}" for k, v in c.items()) for c, _ in steps)
+
+
+# ── 1조 = 표준품셈 구성원(사용자 기준 2026-11-03) ───────────────────────────
+# 공기 산정의 조수는 표준품셈의 구성원(직종·인원) 단위로 투입하고, 1일 작업량은 그 구성원이 하루에
+# 하는 양이다. 일위대가의 직종별 인수(인/단위)는 품셈 구성원이 단위 물량에 드는 품이므로
+#   1조 1일 작업량 = min(구성원 인원_직종 ÷ 인수_직종)
+# 구성원은 품셈 작업조를 아는 공종(crew_steps)이면 그 작업조, 모르면 인수 비율 그대로(가장 적게 드는
+# 주요 직종 = 1인). 예) 방수공 0.03 · 보통인부 0.01 → 방수공 3 + 보통인부 1 → 100㎡/조·일.
+# 주 직종의 1/10도 안 드는 직종은 1인(그 직종이 병목이 되지 않는다).
+# 직종별 1인(병목 직종)으로 보던 예전 방식은 품셈 구성원이 아니어서 작업일수가 구성원 수만큼 길었다.
+
+def ratio_crew(trades: Dict[str, float]) -> Dict[str, int]:
+    """직종별 인수 → 품셈 구성원(인수 비율, 가장 적게 드는 주요 직종 1인)."""
+    tr = {t: float(v) for t, v in (trades or {}).items() if v and v > 0}
+    if not tr:
+        return {}
+    lv = max(tr.values())
+    sig = {t: v for t, v in tr.items() if v >= lv * 0.1}
+    base = min(sig.values())
+    return {t: (max(1, math.ceil(v / base - 1e-6)) if t in sig else 1) for t, v in tr.items()}
+
+
+def pumsem_crew(title: str, spec: str = "", trades: Optional[Dict[str, float]] = None):
+    """항목의 1조 구성원과 출처. (구성원 {직종: 인원}, '품셈 작업조' | '품셈 인수 구성' | '')."""
+    trades = {t: float(v) for t, v in (trades or {}).items() if v and v > 0}
+    # 인수가 있으면 그 인수가 품셈 구성 — 품셈 작업조 표에 있는 공종만 작업조로 바꾸고 나머지는 인수 비율
+    steps = crew_steps(title, spec, fallback=not trades)
+    if steps:
+        crew: Dict[str, int] = {}
+        for c, _ in steps:
+            for k, v in c.items():
+                crew[k] = max(crew.get(k, 0), v)
+        if trades:
+            # 품셈 작업조에 없는 직종(내역서에 더 붙은 직종)은 주 직종과의 인수 비율로 붙인다
+            lead_t = max(crew, key=crew.get)
+            ref = trades.get(lead_t) or max(trades.values())
+            for t, v in trades.items():
+                if t not in crew:
+                    crew[t] = max(1, math.ceil(v / ref * crew[lead_t] - 1e-6))
+        return crew, "품셈 작업조"
+    if trades:
+        return ratio_crew(trades), "품셈 인수 구성"
+    return {}, ""
+
+
+def crew_rate(trades: Dict[str, float], crew: Dict[str, int]):
+    """1조(구성원)가 하루에 하는 양(인수의 기준수량 단위)과 병목 직종. (작업량, 직종)."""
+    best = None
+    for t, v in (trades or {}).items():
+        if v and v > 0:
+            r = max(1, int(crew.get(t, 1))) / float(v)
+            if best is None or r < best[0]:
+                best = (r, t)
+    return best if best else (0.0, "")
+
+
+def crew_label(crew: Dict[str, int]) -> str:
+    return " + ".join(f"{k} {v}" for k, v in sorted(crew.items(), key=lambda x: -x[1]))

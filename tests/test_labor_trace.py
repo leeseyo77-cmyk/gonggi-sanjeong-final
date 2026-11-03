@@ -1,7 +1,9 @@
-"""노무비 역산 — 직종별 인수는 병목 직종 기준(1조 = 직종별 1인)으로 환산하는지 확인한다.
+"""노무비 역산 — 직종별 인수는 1조 = 표준품셈 구성원(인수 비율 그대로, 가장 적게 드는 직종 1인)으로
+환산하고, 1일 작업량은 그 구성원이 하루에 하는 양인지 확인한다(사용자 기준 2026-11-03).
 
 품셈의 직종별 인수는 여러 직종이 함께 드는 조합이라, 인수를 모두 더해 나누면(1인 기준)
-작업일수가 1.5~3배 길게 나왔다. 풍각 샘플의 호표로 실제 값을 대조한다(샘플 없으면 건너뜀).
+작업일수가 1.5~3배 길게 나왔고, 직종별 1인(병목)으로 보면 구성원 수만큼 길었다.
+풍각 샘플의 호표로 실제 값을 대조한다(샘플 없으면 건너뜀).
 실행: python -m unittest discover -s tests -v
 """
 import unittest
@@ -24,18 +26,19 @@ class BottleneckTradeTest(unittest.TestCase):
         cls.by_ho = {t.get("호표"): t for t in traces.values()}
 
     def test_two_trades(self):
-        # 제96호표 보강토옹벽 블록: 특별인부 0.21 + 보통인부 0.09 → 병목 특별인부
+        # 제96호표 보강토옹벽 블록: 특별인부 0.21 + 보통인부 0.09 → 구성원 특별인부 3 + 보통인부 1
         t = self.by_ho[96]
-        self.assertEqual(t["방식"], "직종별 인수(병목 직종)")
-        self.assertEqual(t["병목 직종"], "특별인부")
-        self.assertAlmostEqual(t["일작업량"], 1 / 0.21, places=3)
+        self.assertEqual(t["방식"], "직종별 인수 ÷ 품셈 구성원")
+        self.assertEqual(t["구성원"], "특별인부 3 + 보통인부 1")
+        self.assertAlmostEqual(t["일작업량"], 1 / 0.09, places=3)
         self.assertAlmostEqual(t["1인 기준 일작업량"], 1 / 0.30, places=3)
 
     def test_four_trades(self):
         # 제100호표 세라믹 방수: 미장공 0.04 + 도장공 0.03 + 보통인부 0.03 + 특별인부 0.02
+        # 구성원 = 가장 적게 드는 특별인부 1인 기준 → 미장공 2 + 도장공 2 + 보통인부 2 + 특별인부 1
         t = self.by_ho[100]
-        self.assertEqual(t["병목 직종"], "미장공")
-        self.assertAlmostEqual(t["일작업량"], 25.0, places=3)        # 1인 기준이면 8.33
+        self.assertEqual(t["작업조 인원"], 7)
+        self.assertAlmostEqual(t["일작업량"], 50.0, places=3)        # 직종별 1인이면 25, 1인 기준이면 8.33
         self.assertAlmostEqual(t["인수합"], 0.12, places=6)
 
 
@@ -95,11 +98,11 @@ class SangeunAQTest(unittest.TestCase):
     def test_per_100_base(self):
         # '1개소당 | 1÷100개소' — 0.62인은 100개소 기준
         self.assertAlmostEqual(self.res[3][0], 100 / 0.62, places=2)
-        self.assertEqual(self.tr[3]["방식"], "직종별 인수(병목 직종)")
+        self.assertEqual(self.tr[3]["방식"], "직종별 인수 ÷ 품셈 구성원")
 
     def test_unit_mismatch_falls_back(self):
         # 산근 단위(㎥)와 구성 단위(TON)가 다르면 A·Q를 쓰지 않고 인수로
-        self.assertEqual(self.tr[4]["방식"], "직종별 인수(병목 직종)")
+        self.assertEqual(self.tr[4]["방식"], "직종별 인수 ÷ 품셈 구성원")
         self.assertAlmostEqual(self.res[4][0], 2.0, places=4)
 
     def test_a_value_preferred_over_rounded_q(self):

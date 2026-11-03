@@ -196,7 +196,7 @@ def _disc_sheet(wb, name: str, disc: Dict[str, Any]) -> str:
     """분야 작업일수 산정근거. 반환: 분야 합계 셀 주소."""
     ws = wb.create_sheet(name)
     S = _Sheet(ws)
-    hdr = ["번호", "공 종 명", "규 격", "단위", "수량", "주 직종 인수\n(인/단위)", "작업량\n(인·일)",
+    hdr = ["번호", "공 종 명", "규 격", "단위", "수량", "주 직종 작업량\n(조·일/단위)", "작업량\n(조·일)",
            "조", "작업일수(일)", "비 고"]
     S.widths([6, 34, 28, 6, 10, 12, 11, 5, 10, 40])
     label = DISC_LABEL.get(disc["name"], disc["name"])
@@ -205,7 +205,8 @@ def _disc_sheet(wb, name: str, disc: Dict[str, Any]) -> str:
     S.put(2, 1, f"({label}공사) 동·설비 안의 공종은 순차, " +
                 ("동·설비끼리는 병행이라 가장 긴 동이 작업일수입니다." if parallel else
                  "동·설비도 순차로 짓습니다.") +
-                " 공종 작업일수 = 가장 많이 드는 직종(병목)의 작업량 ÷ 조 (1조 = 직종별 1인)."
+                " 공종 작업일수 = 가장 많이 드는 직종(병목)의 작업량 ÷ 조 (1조 = 표준품셈 구성원: 가이드라인·품셈 작업조, "
+                "모르면 일위대가 인수 비율 그대로)."
                 + ("" if disc.get("use", True) else "  ※ 공기 미반영(참고)"),
           h="left", border=False)
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(hdr))

@@ -1277,6 +1277,28 @@ def _swap_name_spec_if_needed(rows):
     return rows
 
 
+def _read_wages(wb, cfg) -> Dict[str, float]:
+    """노임표 {직종(공백 제거): 일 노임}. 같은 직종이 여럿이면 낮은 단가(보수적)."""
+    wages: Dict[str, float] = {}
+    for r in wb[cfg["wage_sheet"]].iter_rows(values_only=True):
+        nc, rc = cfg["wage_name_col"], cfg["wage_rate_col"]
+        nm = r[nc] if len(r) > nc else None
+        rt = r[rc] if len(r) > rc else None
+        if isinstance(nm, str) and isinstance(rt, (int, float)) and rt > 0:
+            k = nm.replace(" ", "").strip()
+            if k and (k not in wages or rt < wages[k]):
+                wages[k] = float(rt)
+    return wages
+
+
+def parse_wages(wb, tmpl: Dict[str, Any]) -> Dict[str, float]:
+    """내역서 노임표 {직종: 일 노임}. 가이드라인 작업조의 단위 노무비를 이 파일 노임으로 구할 때 쓴다."""
+    cfg = tmpl.get("labor") if tmpl else None
+    if not wb or not cfg or cfg["wage_sheet"] not in wb.sheetnames:
+        return {}
+    return _read_wages(wb, cfg)
+
+
 def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool = False,
                                    code_daily: Optional[Dict[Any, Tuple[float, str]]] = None):
     """
@@ -1302,15 +1324,7 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
         return _empty
 
     # 1) 노임표 (동일 직종 중복 시 낮은 단가 = 보수적)
-    wages: Dict[str, float] = {}
-    for r in wb[cfg["wage_sheet"]].iter_rows(values_only=True):
-        nc, rc = cfg["wage_name_col"], cfg["wage_rate_col"]
-        nm = r[nc] if len(r) > nc else None
-        rt = r[rc] if len(r) > rc else None
-        if isinstance(nm, str) and isinstance(rt, (int, float)) and rt > 0:
-            k = nm.replace(" ", "").strip()
-            if k and (k not in wages or rt < wages[k]):
-                wages[k] = float(rt)
+    wages = _read_wages(wb, cfg)
     if not wages:
         return _empty
 
@@ -1492,7 +1506,7 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
     def _emit_aq(key, title, unit, base_qty, parts, trades, rest_cost, row_idx=None, spec=""):
         """산근 A·Q가 있는 블록: 작업일수를 더한다(설치 → 해체처럼 순서대로 하는 작업).
 
-        1기준수량의 일수 = Σ(구성 수량 ÷ A) + 나머지(직종별 인수의 병목, 인수가 없으면 노무비 ÷ 노임)
+        1기준수량의 일수 = Σ(구성 수량 ÷ A) + 나머지(직종별 인수 ÷ 품셈 구성원, 인수가 없으면 노무비 ÷ 노임)
         1일 작업량 = 기준수량 ÷ 그 일수. 예) 띠장 설치 A=80 + 해체 A=110 → 1/80 + 1/110 → 46.3m/일.
         """
         unit_s = str(unit).strip() if unit else ""
@@ -1502,8 +1516,12 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
         _tv = {t: v for t, v in (trades or {}).items() if v > 0}
         rest_days, rest_note = 0.0, ""
         if _tv:
-            lead_t, lead_mh = max(_tv.items(), key=lambda x: x[1])
-            rest_days, rest_note = lead_mh, f"{lead_mh:.4g}인({lead_t}, 병목 직종)"
+            from crew_space import pumsem_crew, crew_rate, crew_label
+            _crew, _src = pumsem_crew(str(title or ""), str(spec or ""), _tv)
+            _rate, _bt = crew_rate(_tv, _crew)
+            if _rate > 0:
+                rest_days = 1.0 / _rate
+                rest_note = f"{_tv[_bt]:.4g}인({_bt}) ÷ {_crew.get(_bt, 1)}인({crew_label(_crew)})"
         elif rest_cost and rest_cost > 0:
             job_r = pick_labor_type(str(title or ""), "")
             w = wages.get(job_r.replace(" ", "")) or wages.get(_DEFAULT_LABOR.replace(" ", ""))
@@ -1566,33 +1584,48 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
             return
         if not (isinstance(base_qty, (int, float)) and base_qty > 0):
             return
+        _emit_core(key, title, unit, base_qty, labor_cost, manhours, explicit_base, trades, row_idx, spec)
+        # 단위 노무비(원/기준단위) — 가이드라인 값이 이 항목과 같은 작업인지 노무비로 대조할 때 쓴다
+        _ub = explicit_base if (explicit_base and explicit_base > 0) else base_qty
+        if key in traces and isinstance(labor_cost, (int, float)) and labor_cost > 0 and _ub > 0:
+            traces[key].setdefault("단위노무비", round(float(labor_cost) / float(base_qty), 2))
+
+    def _emit_core(key, title, unit, base_qty, labor_cost, manhours=0.0, explicit_base=None,
+                   trades=None, row_idx=None, spec=""):
+        unit_s = str(unit).strip()
         job = pick_labor_type(str(title or ""), "")
         _head = {"호표": key, "제목": str(title or "").strip(), "규격": str(spec or "").strip(),
                  "단위": unit_s, "행": (row_idx + 1) if row_idx is not None else None}
 
         # 1순위: 직접 인수 기반 (할증·요율 배제, 야간=주간 동일값)
-        # 품셈의 직종별 인수는 여러 직종이 '함께' 드는 조합이다(예: 방수 ㎡당 미장공 0.04 + 도장공
-        # 0.03 + 보통인부 0.03 + 특별인부 0.02). 1조(직종별 1인)가 하루에 하는 양은 가장 많이 드는
-        # 직종(병목)이 정한다. 인수를 모두 더해 나누면 '1인이 모든 직종 일을 다 하는' 셈이 되어
-        # 작업일수가 보통 1.5배, 많게는 3배 이상 길게 나왔다(샘플 7개 실측). 건축·기계·전기
-        # (discipline_parser)도 같은 기준이므로 앱 전체에서 1조의 정의가 같아진다.
+        # 1조 = 표준품셈 구성원(사용자 기준 2026-11-03). 품셈의 직종별 인수는 구성원이 '함께' 드는 조합이라
+        # (예: 방수 ㎡당 방수공 0.03 + 보통인부 0.01 → 방수공 3 + 보통인부 1), 1조가 하루에 하는 양은
+        # min(구성원 인원 ÷ 인수)다(crew_space.pumsem_crew·crew_rate). 건축·조경(discipline_parser)도 같은 기준.
+        # 예전에는 1조 = 직종별 1인(병목 직종)이라 작업일수가 구성원 수만큼 길게 나왔다.
         if manhours and manhours > 0:
+            from crew_space import pumsem_crew, crew_rate, crew_label
             _bq = explicit_base if (explicit_base and explicit_base > 0) else base_qty
             _tv = {t: v for t, v in (trades or {}).items() if v > 0}
-            lead_t, lead_mh = max(_tv.items(), key=lambda x: x[1]) if _tv else ("", manhours)
-            daily = _bq / lead_mh
+            _crew, _src = pumsem_crew(str(title or ""), str(spec or ""), _tv)
+            _rate, lead_t = crew_rate(_tv, _crew) if _tv else (1.0 / manhours, "")
+            lead_mh = _tv.get(lead_t, manhours)
+            daily = _bq * _rate
             if daily > 0 and key not in result:
                 result[key] = (round(daily, 4), unit_s, job)
+                _n = _crew.get(lead_t, 1)
                 traces[key] = {
-                    **_head, "방식": "직종별 인수(병목 직종)", "기준수량": _bq,
+                    **_head, "방식": "직종별 인수 ÷ 품셈 구성원", "기준수량": _bq,
                     # 인수가 0.0004처럼 아주 작은 호표가 있어 자릿수를 넉넉히 남긴다(검산용)
                     "인수합": round(manhours, 6),
                     "직종별 인수": sorted(((t, round(v, 6)) for t, v in _tv.items()),
                                      key=lambda x: -x[1]),
+                    "구성원": crew_label(_crew) if _crew else "1인(직종 정보 없음)",
+                    "구성 출처": _src, "작업조 인원": sum(_crew.values()) if _crew else 1,
                     "병목 직종": lead_t, "병목 인수": round(lead_mh, 6),
                     "1인 기준 일작업량": round(_bq / manhours, 4),
                     "일작업량": round(daily, 4),
-                    "식": f"{_bq:g} ÷ {lead_mh:.6g}인({lead_t or '인부'}) = {daily:.4g}{unit_s}/조·일",
+                    "식": (f"{_bq:g} × {_n}인 ÷ {lead_mh:.6g}인({lead_t or '인부'}) = {daily:.4g}{unit_s}/조·일"
+                          f" — 구성원 {crew_label(_crew) if _crew else '1인'}"),
                 }
             return
 
@@ -1604,9 +1637,13 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
         steps = crew_steps(str(title or ""), str(spec or ""))
         if steps and key not in result:
             per_unit = float(labor_cost) / base_qty           # 실제 단위당 노무비
+            # 노임표에 없는 직종(철골공 등)은 기본 직종 노임으로 — 하나가 없다고 1인 기준으로 떨어지지 않게
+            _w0 = wages.get(_DEFAULT_LABOR.replace(" ", "")) or (sorted(wages.values())[len(wages) // 2]
+                                                                if wages else 0.0)
+            _wg = lambda t: wages.get(t.replace(" ", "")) or _w0          # noqa: E731
             p_unit, inv = 0.0, 0.0
             for crew, d in steps:
-                ws_ = [wages.get(t.replace(" ", "")) for t in crew]
+                ws_ = [_wg(t) for t in crew]
                 if not all(ws_):
                     p_unit = 0.0
                     break
@@ -1614,7 +1651,7 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
                 inv += 1.0 / d
             if p_unit > 0 and per_unit > 0:
                 daily = p_unit / (per_unit * inv)
-                crew_wage = [sum(wages[t.replace(" ", "")] * n for t, n in c.items()) for c, _ in steps]
+                crew_wage = [sum(_wg(t) * n for t, n in c.items()) for c, _ in steps]
                 result[key] = (round(daily, 4), unit_s, "품셈 작업조")
                 traces[key] = {
                     **_head, "방식": "노무비 ÷ 작업조 노임(품셈)", "기준수량": base_qty,

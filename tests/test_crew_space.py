@@ -28,10 +28,25 @@ class PersonsTest(unittest.TestCase):
         self.assertEqual(cs.pumsem_persons("거푸집", "유로폼", "0-7m:복잡"), 5)
         self.assertEqual(cs.pumsem_persons("거푸집", "합판거푸집", "0-7m:3회"), 7)
 
-    def test_labor_derived_crew_is_one_per_trade(self):
-        # 노무비 역산(직종별 1인 = 1조)이면 1조 인원은 직종 수
-        self.assertEqual(cs.crew_persons("거푸집", "유로폼", "", "노무비역산(형틀목공)", trades=2), 2)
-        self.assertEqual(cs.crew_persons("거푸집", "유로폼", "", "일위대가→산근(A·Q)", trades=2), 5)
+    def test_labor_derived_crew_is_pumsem_members(self):
+        # 노무비 역산이면 1조 인원은 품셈 구성원 인원(역산 근거의 '작업조 인원')
+        self.assertEqual(cs.crew_persons("거푸집", "유로폼", "", "노무비역산(형틀목공)", persons=4), 4)
+        self.assertEqual(cs.crew_persons("거푸집", "유로폼", "", "일위대가→산근(A·Q)", persons=4), 5)
+
+    def test_pumsem_crew_and_rate(self):
+        # 품셈 작업조를 아는 공종은 그 작업조, 모르면 인수 비율 그대로(가장 적게 드는 직종 1인)
+        self.assertEqual(cs.pumsem_crew("유로폼 설치 및 해체", "복잡", {"형틀목공": 0.2, "보통인부": 0.03}),
+                         ({"형틀목공": 4, "보통인부": 1}, "품셈 작업조"))
+        crew, src = cs.pumsem_crew("시트방수", "", {"방수공": 0.03, "보통인부": 0.01})
+        self.assertEqual((crew, src), ({"방수공": 3, "보통인부": 1}, "품셈 인수 구성"))
+        self.assertAlmostEqual(cs.crew_rate({"방수공": 0.03, "보통인부": 0.01}, crew)[0], 100.0)
+        self.assertEqual(cs.ratio_crew({"보통인부": 0.13}), {"보통인부": 1})
+        # 인수 없이 노무비만 있으면 품셈 단위당 인수·가이드라인 작업조로 구성원(수성페인트 11-2-2 → 6 : 1)
+        self.assertEqual(cs.pumsem_crew("수성페인트 롤러칠", "내부 2회")[0], {"도장공": 6, "보통인부": 1})
+        self.assertEqual(cs.pumsem_crew("무석면압출성형 시멘트판", "50T")[0], {"내장공": 2, "보통인부": 1})
+        # 주 직종의 1/10도 안 드는 직종은 1인(구성원을 부풀리지 않는다)
+        self.assertEqual(cs.ratio_crew({"철근공": 2.0, "보통인부": 0.5, "특별인부": 0.01}),
+                         {"철근공": 4, "보통인부": 1, "특별인부": 1})
 
 
 class CapTest(unittest.TestCase):

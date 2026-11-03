@@ -4,9 +4,10 @@ import openpyxl
 import zipfile
 import zlib
 from openpyxl.utils.exceptions import InvalidFileException
-from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback, parse_excavator_buckets, parse_loading_rates
+from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback, parse_excavator_buckets, parse_loading_rates, parse_wages
 import schedule_plan as sp
 import crew_space as cs
+import guideline_work as gw
 import drawing_reader as dr
 import crew_advisor as cadv
 import claude_call as cc
@@ -302,12 +303,10 @@ def labor_trace_text(tr) -> str:
                           for p in (tr.get("산근 작업") or [])[:4])
         rest = f" · 나머지 {tr['나머지']}" if tr.get("나머지") else ""
         return f"🔎 {head} · {parts}{rest} → 일수 합산: {tr['식']}"
-    if tr.get("방식") == "직종별 인수(병목 직종)":
+    if tr.get("방식") == "직종별 인수 ÷ 품셈 구성원":
         trades = ", ".join(f"{t} {v:g}인" for t, v in (tr.get("직종별 인수") or [])[:6]) or "-"
-        one = tr.get("1인 기준 일작업량")
-        return (f"🔎 {head} · 기준 {tr['기준수량']:g}{tr['단위']} · 인수 {trades} "
-                f"(합 {tr['인수합']:g}인) · 병목 {tr.get('병목 직종') or '인부'} → {tr['식']}"
-                + (f" (1인 기준이면 {one:g}{tr['단위']})" if one else ""))
+        return (f"🔎 {head} · 기준 {tr['기준수량']:g}{tr['단위']} · 인수 {trades} · "
+                f"1조 = {tr.get('구성원', '')}({tr.get('구성 출처', '')}) → {tr['식']}")
     return (f"🔎 {head} · 기준 {tr['기준수량']:g}{tr['단위']} · 노무비(할증 제외) "
             f"{tr.get('노무비', 0):,}원 ÷ {tr.get('적용직종', '')} 노임 "
             f"{tr.get('노임단가', 0):,}원 → {tr['식']} (1인 기준 — 직종 정보 없음)")
@@ -350,6 +349,9 @@ def civil_report_data():
             if str(method).startswith(("노무비역산", "일위대가→산근", "일위대가 일당")):
                 basis = labor_trace_text(trace_all.get(labor_key_for(it["name"], it.get("spec", "")))
                                          ).replace("🔎 ", "")
+            elif method == "가이드라인":
+                _g = guideline_lookup(it["name"], it.get("spec", ""), it.get("unit", ""))
+                basis = _g[2] if _g else ""
             ln = it.get("_ukey") or it.get("district") or "(공통)"
             lines.setdefault(ln, []).append({
                 "name": it["name"], "spec": it.get("spec", ""), "qty": float(it.get("qty", 0)),
@@ -417,7 +419,7 @@ def disc_report_data(disc_res: dict):
                     continue
                 rows_i.append({"name": it["name"], "spec": it.get("spec", ""), "unit": it.get("unit", ""),
                                "qty": qty if qty > 0 else 1.0, "rate": rate,
-                               "note": "" if it.get("trades") else "노무비 역산(1인 기준)"})
+                               "note": it.get("basis", "")})
             if pk["unit_name"] not in units:
                 units[pk["unit_name"]] = []
                 order.append(pk["unit_name"])
@@ -818,6 +820,68 @@ import threading as _threading
 _RATE_CAPTURE = _threading.local()
 
 
+def _guide_key(s):
+    return re.sub(r"[\s()（）]", "", str(s or ""))
+
+
+def guideline_lookup(name, spec="", item_unit=""):
+    """가이드라인 1일 작업량(1개 작업조) — (작업량, 단위, 근거) 또는 None.
+
+    부록4 건축분야 표(guideline_work: 조건·단위까지 맞춰 봄) → 토목 부록 표(GUIDELINE_APPENDIX_FULL:
+    표 항목명이 내역서 항목명 안에 그대로 들어 있고 단위가 같을 때만). 예전의 느슨한 매칭(항목명이 표 항목명의
+    일부이기만 해도 매칭)은 오매칭이 많아 노무비 역산 뒤의 마지막 대안으로만 남겨 둔다.
+
+    노무비 대조(사용자 기준 2026-11-03): 이름·조건이 맞아도 내역서 항목의 단위 노무비가 가이드라인 작업조의
+    단위 노무비(작업조 하루 노임 ÷ 1일 작업량, 이 내역서 노임표 기준)와 비슷할 때만(0.67~1.5배) 쓴다.
+    더 가벼운(또는 무거운) 작업에 가이드라인 값을 씌우지 않게. 노무비를 모르면 대조 없이 쓴다.
+    """
+    m = gw.match(name, spec, item_unit, "토목")
+    if m:
+        ok, note = guideline_labor_check(m, name, spec)
+        if ok:
+            return m["daily"], m["unit"], gw.describe(m) + note
+        return None
+    full = _guide_key(f"{name} {spec}")
+    nm = _guide_key(name)
+    # 표 항목의 부수 작업(빗물받이 '연결단지관 접합'·'철거'·'제작' 등)은 그 표 값이 아니다
+    if re.search(r"연결|단지관|접합|철거|뚜껑|교체|보수|청소|시험|제작|운반", nm):
+        return None
+    # 토목 부록표는 장비 시공(도로공사) 기준 — 인력·소규모 시공에는 맞지 않는다(보조기층 550㎥/일 등)
+    if re.search(r"인력|소규모", full):
+        return None
+    data = GUIDELINE_APPENDIX_FULL or GUIDELINE_APPENDIX
+    best = None
+    for key, val in data.items():
+        k = _guide_key(key)
+        if len(k) < 4 or not (k == nm or k in full):
+            continue
+        # 맨홀 값(3개소/일 등)은 맨홀 1개소 전체 — 부재(하부구체·연직구체·상판)별 항목에 쓰면 배로 잡힌다
+        if "맨홀" in k and re.search(r"구체|상판|상부|하부|슬래브|부속|뚜껑|사다리|인버트", full):
+            continue
+        dv = float(val.get("daily", 0) or 0)
+        u = str(val.get("unit", "")).split("/")[0].strip()
+        if dv <= 0 or u in ("", "-", "일") or not gw.unit_ok(u, item_unit):
+            continue
+        if best is None or len(k) > best[0]:            # 더 구체적인(긴) 표 항목 우선
+            best = (len(k), dv, u, key)
+    if best:
+        return best[1], best[2], f"{best[3]} {best[1]:g}{best[2]}/일 (가이드라인 부록4 토목)"
+    return None
+
+
+def guideline_labor_check(m, name, spec):
+    """(쓸지, 근거 문구). 내역서 단위 노무비 ÷ 가이드라인 단위 노무비가 0.67~1.5배면 쓴다."""
+    tr = (st.session_state.get("naeyeok_labor_trace") or {}).get(labor_key_for(name, spec)) or {}
+    item_ul = tr.get("단위노무비")
+    wages = st.session_state.get("naeyeok_wages") or {}
+    guide_ul = gw.unit_labor(m, wages, wages.get("보통인부", 0.0)) if wages else None
+    sim = gw.labor_similar(item_ul, guide_ul)
+    if sim is None:
+        return True, ""
+    note = f" · 노무비 대조 {item_ul / guide_ul:.2f}배(내역서 {item_ul:,.0f}원 / 가이드라인 {guide_ul:,.0f}원)"
+    return bool(sim), note
+
+
 def calc_days_with_rate(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_item_crew=True):
     """calc_days_priority + (그때 쓴 1일 작업량, 조수). 일수가 0이거나 값이 없으면 (None, None)."""
     _RATE_CAPTURE.v = None
@@ -831,7 +895,8 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
     우선순위:
     0. 수동입력
     1. 단가산출근거 호표 Q값 (호표번호 1:1 매칭) / 일위대가_산근 코드 Q값 (신양식, 코드 1:1 매칭)
-    2. 가이드라인 부록
+       / 일위대가 → 산근 A·Q
+    2. 가이드라인 부록4 (조건·단위가 맞을 때) — guideline_lookup
     3. 표준품셈 Man-day
     4. 단가산출근거 Q값 (항목명 기반)
     
@@ -1000,6 +1065,19 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
     except Exception:
         pass
 
+    # 2순위: 가이드라인 (사용자 기준 2026-11-02: 1순위 내역서 Q값, 2순위 가이드라인)
+    # 부록4 1일 작업량은 품셈 생산성 기준 '1개 작업조'의 값이라 앱의 1조와 같다.
+    # 조건(난이도·높이·규격)과 단위가 맞을 때만 쓴다 — 맞지 않으면 아래 순위로 넘긴다.
+    try:
+        _g = guideline_lookup(name, spec, item_unit)
+        if _g:
+            _dv, _du, _lbl = _g
+            days = math.ceil(qty / (_dv * crews))
+            _RATE_CAPTURE.v = (_dv, crews)
+            return days, f"{_dv:.1f}{_du}", "가이드라인"
+    except Exception:
+        pass
+
     # 1.4순위: 동일 계열 Q값 승계 (기계 위주 항목의 역산 과소평가 보정)
     try:
         _fb = st.session_state.get("naeyeok_series_fallback", {})
@@ -1120,7 +1198,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
     except Exception:
         pass
 
-    # 1순위: 가이드라인
+    # 마지막 대안: 가이드라인 느슨한 매칭(항목명 일부만 같아도) — 오매칭이 있어 노무비 역산보다 뒤
     try:
         # 정확한 매칭 시도
         full_name = f"{name} {spec}".strip()
@@ -1228,7 +1306,7 @@ def calc_days_priority(name, spec, qty, crews=DEFAULT_CREW, item_unit="", use_it
 
     # 2순위: 표준품셈 터파기·관부설 — 품셈 작업조(1조) 기준
     # 품셈이 작업조와 일당 시공량을 주면 그 1개 작업조가 앱의 1조다(1.44순위와 같은 원칙).
-    # 직종별 인수만 있는 본당 표(유리섬유복합관·파형강관 등)는 1조 = 직종별 1인, 병목 직종 기준.
+    # 직종별 인수만 있는 본당 표(유리섬유복합관·파형강관 등)는 1조 = 인수 비율 그대로의 품셈 구성원.
     # 이전에는 출처를 알 수 없는 직종 합계표를 '÷ (8 × 조수)'로 써서 인력 터파기를 하루 94㎥로
     # 잡았다(품셈 3-2-1 특별인부 1인 3.6㎥의 26배). 또 '굴착'·'흄관' 글자만 보고 H파일 근입,
     # 흄관접속관·보강거푸집에도 붙었다 → 관련 없는 작업은 빼고 단위가 맞을 때만 쓴다.
@@ -1725,7 +1803,7 @@ def area_caps_ui(model):
             continue
         method = calc_days_priority(m["세부공종"], m["규격"], 1, 1, m["단위"], use_item_crew=False)[2]
         tr = trace_all.get(labor_key_for(m["세부공종"], m["규격"])) or {}
-        persons = cs.crew_persons(cls, m["세부공종"], m["규격"], method, len(tr.get("직종별 인수") or []))
+        persons = cs.crew_persons(cls, m["세부공종"], m["규격"], method, tr.get("작업조 인원"))
         r_item, r_note = radius, "규격 미확인 — 입력 반경"
         if cls == "터파기":
             _bk = ((buckets.get("code") or {}).get(code_by_item.get((m["세부공종"], m["규격"])))
@@ -1765,10 +1843,9 @@ def _crew_unit_text(name, spec, unit):
     """이 항목의 '1조'가 무엇인지(조수 추천 지시문용)."""
     method = calc_days_priority(name, spec, 1, 1, unit, use_item_crew=False)[2]
     tr = (st.session_state.get("naeyeok_labor_trace") or {}).get(labor_key_for(name, spec)) or {}
-    trades = [t for t, _ in (tr.get("직종별 인수") or [])]
     cls = cs.trade_class(name)
-    if str(method).startswith("노무비역산") and trades:
-        return f"직종별 1인({'·'.join(trades[:4])})"
+    if str(method).startswith("노무비역산") and tr.get("구성원"):
+        return f"품셈 구성원 {tr['구성원']}"
     if cls == "터파기":
         return "굴착기 1대"
     if cls:
@@ -2307,6 +2384,8 @@ def parse_workbook_cached(file_bytes: bytes):
             "labor_daily": labor_daily,
             "aq_daily": aq_daily,
             "labor_trace": labor_trace,
+            # 노임표 — 가이드라인 작업조의 단위 노무비를 이 내역서 노임으로 구해 항목 노무비와 대조
+            "wages": parse_wages(wb, tmpl),
             # 굴착기 규격(버킷 ㎥) — 면적 기준 상한에서 굴착기 작업반경을 정할 때
             "excavator_buckets": parse_excavator_buckets(wb, tmpl),
             # 운반 항목의 상차분 작업량(산근 '상차' 구간 Q)
@@ -2487,6 +2566,7 @@ with tab2:
                     st.session_state["naeyeok_loading_daily"] = _tmpl_data.get("loading_daily") or {}
                     # 노무비 역산 근거(호표·기준수량·직종별 인수·계산식) — 추정값 검토 화면에서 사용
                     st.session_state["naeyeok_labor_trace"] = _tmpl_data.get("labor_trace", {})
+                    st.session_state["naeyeok_wages"] = _tmpl_data.get("wages") or {}
                     # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
                     st.session_state["naeyeok_series_fallback"] = _tmpl_data["series_fallback"]
                     st.session_state["naeyeok_code_by_item"] = {
@@ -2746,9 +2826,9 @@ with tab2:
 | **실무기준(1조=1개소/일)** | 배수설비처럼 일위대가 1개소에 여러 공종이 묶여 있어 역산이 맞지 않는 항목에 적용한 현장 기준값. | 높음 |
 | **단가산출근거(호표)**<br>**일위대가_산근(코드)** | 설계자가 단가산출근거·일위대가 산근에 직접 적어둔 시간당 작업량(`Q = … 단위/HR`)을 읽어 ×8시간으로 환산한 값. | **가장 높음** |
 | **일위대가→산근(A·Q)** | 설계내역서가 일위대가를 가리키고, 그 일위대가의 구성 작업이 산근의 일당 시공량(A)·시간당 시공량(Q)을 가리키는 경우 따라가서 읽은 값. 구성 작업이 여럿이면(설치 + 해체 등) 순서대로 하는 작업으로 보고 일수를 더하고, A·Q가 없는 나머지는 직종별 인수로 더합니다. | **가장 높음** |
+| **가이드라인** | 국토교통부 「적정 공사기간 확보를 위한 가이드라인」 부록4의 1일 작업량(품셈 생산성 기준 1개 작업조). 내역서 Q값 다음으로 적용합니다(사용자 기준). 난이도·높이·규격과 단위가 맞을 때만 쓰고, 다르면(예: 유로폼 '복잡') 아래 순위로 넘깁니다. 설치 및 해체처럼 묶인 항목은 일수를 더합니다. | 높음 |
 | **동일계열 Q승계** | 같은 계열(동일 항목명·규격)에 Q산식이 있어 그 값을 물려받은 항목. 아스팔트 기층↔표층처럼 시공 조건이 같을 때 적용됩니다. | 중간 (검토 권장) |
 | **노무비역산(직종)** | 일위대가에 인수(단위 '인')나 Q산식이 없어, 노무비를 해당 직종 노임단가로 나눠 되짚은 추정값. 할증·요율은 제외했습니다. | 낮음 (검토 권장) |
-| **가이드라인** | 국토교통부 「적정 공사기간 확보를 위한 가이드라인」 부록의 공종별 1일 작업량. | 높음 |
 | **단가산출근거** | 항목명 기준으로 단가산출근거에서 찾은 Q값. | 중간 |
 | **상차분만(운반 병행)** | 상차와 운반이 한 항목인 경우, 산근의 '상차' 구간 작업량만 공기에 넣은 값(운반은 병행). | 높음 |
 | **병행(제외)** | 운반·사토처럼 본공정과 함께 진행되어 공기를 따로 만들지 않는 항목. 상차가 섞여 있어도 상차분을 따로 잡을 수 없으면(직상차 등) '병행(상차분 산정 불가)'로 뺍니다. 0일로 처리됩니다. | — |
@@ -4716,8 +4796,9 @@ with tab6:
                     with st.expander(f"🔎 노무비 역산 근거 전체 ({len(_tr_all)}개 호표)", expanded=False):
                         st.caption(
                             "앱이 1일 작업량을 어떻게 구했는지 호표별로 보여 줍니다. "
-                            "'직종별 인수(병목 직종)'는 일위대가 블록에서 단위가 '인'인 행을 직종별로 모아 "
-                            "가장 많이 드는 직종의 인수로 나눈 값입니다(1조 = 직종별 1인, 건축·기계·전기와 같은 기준). "
+                            "'직종별 인수 ÷ 품셈 구성원'은 일위대가 블록에서 단위가 '인'인 행을 직종별로 모아, "
+                            "1조 = 표준품셈 구성원(품셈 작업조를 알면 그것, 모르면 인수 비율 그대로 — 가장 적게 드는 "
+                            "직종 1인)으로 보고 그 구성원이 하루에 하는 양을 구한 값입니다(건축·조경과 같은 기준). "
                             "인수를 모두 더해 나눈 1인 기준 값도 함께 적었습니다. "
                             "'노무비 ÷ 노임단가'는 인수 행이 없을 때 쓰는 방식으로, 직종을 알 수 없어 1인 기준입니다. "
                             "'산근 A·Q(일위대가 경유)'는 구성 작업이 가리키는 산근의 A·Q값으로 작업별 일수를 구해 더한 값입니다. "
@@ -4729,6 +4810,7 @@ with tab6:
                             "기준수량": _t.get("기준수량"), "단위": _t.get("단위", ""),
                             "방식": _t.get("방식", ""),
                             "인수합(인)": _t.get("인수합"),
+                            "1조 구성원": _t.get("구성원", ""),
                             "병목 직종": _t.get("병목 직종", ""), "병목 인수(인)": _t.get("병목 인수"),
                             "1인 기준 작업량": _t.get("1인 기준 일작업량"),
                             "직종별 인수": ", ".join(f"{a} {b:g}" for a, b in (_t.get("직종별 인수") or [])[:5]),
@@ -5003,6 +5085,10 @@ with tab7:
                     key=f"crew_cap_{_t}", help=_CAP_HELP.get(_t, ""),
                 ))
 
+        st.caption("ℹ️ 분야의 **1조 = 표준품셈 구성원**이고 1일 작업량은 그 구성원이 하루에 하는 양입니다(토목과 "
+                   "같은 기준). 항목마다 ① 가이드라인 부록4 1일 작업량(조건이 맞을 때) → ② 품셈 작업조 → ③ 일위대가 "
+                   "직종별 인수 비율 그대로의 구성원 순으로 정합니다. 직종별 인수 없이 노무비만 있는 항목은 구성원을 알 수 "
+                   "없어 1인 기준이며 근거에 '구성원 미확인'으로 표시됩니다 — 수동입력으로 바로잡으세요.")
         _disc_res = {}
         for _dc, _label, _mode, _use_def, _hint in _DISC_SPECS:
             with st.expander(_label, expanded=False):
@@ -5120,9 +5206,16 @@ with tab7:
                     _pk_rows = [{
                         "설비·동": p["unit_name"], "공종": p["group"], "유형": p["type"],
                         "상한": p["cap"], "조수": p["crews"], "항목수": p["n_items"],
-                        "주 직종": p["lead_trade"], "작업량(인·일)": p["workload"], "일수": p["days"],
+                        "주 직종": p["lead_trade"], "작업량(조·일)": p["workload"], "일수": p["days"],
                     } for p in sorted(_res["packages"], key=lambda x: -x["days"])]
                     st.dataframe(pd.DataFrame(_pk_rows), hide_index=True, width="stretch")
+                    if st.toggle("🔎 항목별 1조 산정 근거", key=f"disc_basis_{_dc}",
+                                 help="1조 = 작업조. 가이드라인 부록4 → 품셈 작업조 → 인수 비율 편성 순으로 정합니다."):
+                        st.dataframe(pd.DataFrame([{
+                            "설비·동": i["unit_name"], "공종": i["group"], "항목": i["name"], "규격": i["spec"],
+                            "단위": i["unit"], "수량": i["qty"], "1조 일수": round(i["days1"], 1),
+                            "근거": i["basis"],
+                        } for i in sorted(_work, key=lambda x: -x["days1"])]), hide_index=True, width="stretch")
 
         st.session_state["project_disc_res"] = _disc_res
         st.markdown("---")
@@ -5177,7 +5270,7 @@ with tab7:
                 "현장 동시 최대 조수 (0 = 제한 없음)", min_value=0, max_value=999, value=0, step=1,
                 key="site_crew_limit",
                 help="토목 이후 병행 구간에 동시에 들어가는 조수 합계를 점검합니다. "
-                     "1조 = 직종별 1인이므로 인원이 아니라 조 단위입니다."))
+                     "1조 = 표준품셈 구성원(여러 명)이므로 인원이 아니라 조 단위입니다."))
             _msg = f"👷 토목 이후 병행 구간 동시 투입 조수: **{_par_crews}조**"
             if _lim and _par_crews > _lim:
                 st.warning(_msg + f" — 현장 상한 {_lim}조를 넘습니다. 분야별 조수를 줄이거나 "

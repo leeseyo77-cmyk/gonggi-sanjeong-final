@@ -269,7 +269,7 @@ def civil_work_table(civil: Dict[str, Any]) -> Table:
 
 def disc_work_table(disc: Dict[str, Any]) -> Table:
     t = Table(_scale([9000, 12500, 9500, 7000, 3500, 5820]), header_rows=1)
-    for c, lab in enumerate(("동(설비)", "공 종", "주 직종(병목)", "작업량(인·일)", "조", "적용(일)")):
+    for c, lab in enumerate(("동(설비)", "공 종", "주 직종(병목)", "작업량(조·일)", "조", "적용(일)")):
         t.add(0, c, lab, kind="head")
     r = 1
     unit_days = []
@@ -359,7 +359,7 @@ def build_report_hwpx(data: Dict[str, Any], template: str = TEMPLATE) -> bytes:
         work += [_para(f"- {lab}공사 작업일수" + ("" if d.get("use", True) else " (공기 미반영·참고)"),
                        cp=97, page_break=True),
                  tbl(disc_work_table(d)),
-                 _para(" ※ 공종 작업일수 = 가장 많이 드는 직종(병목)의 작업량 ÷ 조(1조 = 직종별 1인). "
+                 _para(" ※ 공종 작업일수 = 가장 많이 드는 직종(병목)의 작업량 ÷ 조(1조 = 표준품셈 구성원). "
                        "항목별 산출은 부록 참조")]
     blocks["WORK_TABLES"] = "".join(work)
     for k, v in blocks.items():

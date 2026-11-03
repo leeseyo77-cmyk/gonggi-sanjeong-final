@@ -26,12 +26,12 @@ class ExcavationTest(unittest.TestCase):
 
 
 class PipeTest(unittest.TestCase):
-    def test_per_pipe_tables_use_bottleneck_trade(self):
-        # 본당 인수만 있는 표 → 1조 = 직종별 1인, 병목(배관공)으로 하루 시공량
+    def test_per_pipe_tables_use_pumsem_crew(self):
+        # 본당 인수만 있는 표 → 1조 = 인수 비율 그대로의 구성원(배관공 0.30 : 보통인부 0.12 → 3 : 1)
         daily, crew, dia = lr.pipe_crew_daily("유리섬유복합관(직관)", 200)
-        self.assertAlmostEqual(daily, 1 / 0.30, places=2)          # 지금까진 20본으로 잡혔다
-        self.assertEqual(crew, {"배관공": 1, "보통인부": 1})
-        self.assertAlmostEqual(lr.pipe_crew_daily("파형강관", 300)[0], 1 / 0.06, places=2)
+        self.assertAlmostEqual(daily, 1 / 0.12, places=2)          # 직종별 1인이면 3.33본
+        self.assertEqual(crew, {"배관공": 3, "보통인부": 1})
+        self.assertAlmostEqual(lr.pipe_crew_daily("파형강관", 300)[0], 1 / 0.03, places=2)
 
     def test_crew_tables_keep_pumsem_crew(self):
         # 일당 시공량 표 → 품셈 작업조 그대로(주철관 D300: 배관공 3 + 보통인부 1, 9본)

@@ -1,4 +1,35 @@
 import streamlit as st
+import importlib as _importlib
+import os as _os
+import sys as _sys
+
+
+def _refresh_local_modules():
+    """이 앱 폴더의 모듈 파일이 바뀌었으면 다시 읽는다.
+
+    Streamlit Cloud는 재배포(git pull) 후 app.py만 새로 실행하고, 이미 메모리에 올라온 모듈
+    (universal_parser 등)은 예전 것을 그대로 써서 'cannot import name …' 오류가 났다(2026-11-03 실측).
+    파일 수정 시각을 기억해 두고 바뀐 모듈만 다시 읽는다 — 의존하는 쪽보다 먼저 읽도록 순서대로.
+    """
+    for name in ("guideline_data", "guideline_weather_data", "holiday_data", "weather_data", "labor_rates_2025",
+                 "daily_work_rates", "pumsem_crew", "crew_space", "guideline_work", "hopyo_parser",
+                 "universal_parser", "discipline_parser", "schedule_plan", "schedule_excel", "session_store",
+                 "claude_call", "drawing_reader", "crew_advisor", "report_excel", "report_hwpx"):
+        m = _sys.modules.get(name)
+        f = getattr(m, "__file__", None) if m else None
+        if not f or "site-packages" in f:
+            continue
+        try:
+            cur = _os.path.getmtime(f)
+            if getattr(m, "_app_loaded_mtime", None) != cur:
+                m = _importlib.reload(m)
+                m._app_loaded_mtime = cur
+        except Exception:        # noqa: BLE001 — 다시 읽기 실패는 아래 import에서 드러난다
+            pass
+
+
+_refresh_local_modules()
+
 import pandas as pd
 import openpyxl
 import zipfile

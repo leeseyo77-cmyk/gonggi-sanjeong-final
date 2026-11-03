@@ -270,6 +270,17 @@ def crew_steps(title: str, spec: str = "", fallback: bool = True):
         if all(any(k in n for k in alt) for alt in keys) and "해체" not in n and "보호" not in n:
             crew = ratio_crew(trades)
             return [(crew, crew_rate(trades, crew)[0])]
+    # 관 부설·접합 — 품셈 관종별 작업조(labor_rates_2025: 주철관 배관공 3 + 보통인부 1 등)
+    if not any(k in n for k in ("철거", "절단", "하차", "운반", "천공")):
+        dm = re.search(r"[ΦØφD]\s*=?\s*(\d{2,4})", t, re.IGNORECASE)
+        if dm:
+            try:
+                import labor_rates_2025 as lr
+                pr = lr.pipe_crew_daily(n, int(dm.group(1)))
+            except Exception:    # noqa: BLE001
+                pr = None
+            if pr:
+                return [(dict(pr[1]), pr[0])]
     # 가이드라인 부록4의 작업조(품셈 생산성 기준) — 1일 작업량 값은 노무비가 맞을 때만 쓰지만(guideline_work),
     # 구성원은 같은 공종이면 그대로 쓴다. 예) 우레탄도막방수 3mm: 노무비가 1층 값의 4배라 200㎡/일은 안 쓰고,
     # 구성원 방수공 3 + 보통인부 1로 노무비 ÷ 작업조 노임 → 그 구성원의 1일 작업량

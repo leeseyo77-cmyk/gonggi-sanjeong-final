@@ -80,7 +80,7 @@ class SangeunAQTest(unittest.TestCase):
             _row("합  계", None, None, None, 91034),
         ])
         code_daily = {4: (80.0, "m"), 10: (110.0, "m"), 5: (25.0, "개소"), 6: (100.0, "㎥")}
-        cls.res, cls.tr = up.parse_labor_derived_by_template(wb, up.TEMPLATES[0], with_trace=True,
+        cls.res, cls.tr = up.parse_labor_derived_by_template(wb, up.template("standard_hopyo"), with_trace=True,
                                                              code_daily=code_daily)
 
     def test_install_and_removal_days_add(self):
@@ -122,7 +122,7 @@ class SangeunAQTest(unittest.TestCase):
             [None, " -일당 시공량: A=3.6 ㎥/일"],
             [None, " -시간당 시공량: Q=A/8 hr = 0.45 ㎥/hr"],
         ])
-        got = up.parse_unit_price_generic(wb, up.TEMPLATES[0])
+        got = up.parse_unit_price_generic(wb, up.template("standard_hopyo"))
         self.assertEqual(got[7], (63.0, "㎥"))
         self.assertEqual(got[32], (504.0, "㎡"))
         self.assertAlmostEqual(got[140][0], 6.22 * 8, places=3)
@@ -146,7 +146,7 @@ class LoadingRateTest(unittest.TestCase):
             [None, "제 120호표"], [None, "소운반-토사"], [None, "1. 상차, 굴삭기 0.7 M3 <품셈 9-3>"],
             [None, "Q = 3600 * 0.7 * 1.1 / 30 = 26.40 ㎥/hr"], [None, "2. 운반, DT 2.5TON"],
         ])
-        got = up.parse_loading_rates(wb, up.TEMPLATES[0])
+        got = up.parse_loading_rates(wb, up.template("standard_hopyo"))
         self.assertAlmostEqual(got[113][0], 67.23 * 8, places=2)
         self.assertNotIn(116, got)
         self.assertAlmostEqual(got[120][0], 26.40 * 8, places=2)

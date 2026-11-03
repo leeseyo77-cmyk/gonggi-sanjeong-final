@@ -11,7 +11,7 @@ import _support  # noqa: F401  (저장소 경로 등록)
 import crew_space as cs
 import universal_parser as up
 
-CM = up.TEMPLATES[1]          # 코드매칭형(내역서산근)
+CM = up.template("code_match_naeyeok")          # 코드매칭형(내역서산근)
 
 
 def _row(n=20, **cells):

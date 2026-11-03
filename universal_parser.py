@@ -178,6 +178,12 @@ def _extract_q_from_block(rows, start: int, end: int, formula_col: int, q_forwar
     found_day = None
     found_a = None
     numbered = {}
+    inv_all = []
+    # 블록 머리의 단위('… [M]') — 'TQ = 0.3hr/본', 'T = 0.03hr/M'처럼 역수가 여럿이면 머리 단위와 같은 것을 쓴다
+    # (경주 상수도 '말뚝박기용천공 [M]': 공당 시간을 읽어 26.7본/일 → m당 시간 0.03hr/M → 266.7M/일)
+    _hd = rows[start][formula_col] if start < len(rows) and len(rows[start]) > formula_col else None
+    _mh = re.search(r"\[([^\]]+)\]\s*$", _hd.strip()) if isinstance(_hd, str) else None
+    head_unit = _mh.group(1).strip().upper() if _mh else ""
     for j in range(start, end):
         row = rows[j]
         cell = row[formula_col] if len(row) > formula_col else None
@@ -231,10 +237,9 @@ def _extract_q_from_block(rows, start: int, end: int, formula_col: int, q_forwar
                         if _rx is _A_PER_DAY_RE:
                             found_a = found_day
                         break
-        if found_fwd is None and found_inv is None:
-            mi = q_inverse_re.search(cell)
-            if mi:
-                found_inv = (_to_float(mi.group(1)), mi.group(2))
+        if found_fwd is None:
+            for mi in q_inverse_re.finditer(cell):
+                inv_all.append((_to_float(mi.group(1)), mi.group(2)))
         # 번호 Q까지 모아야 하므로 조기 종료하지 않는다
     # '일당 시공량: A=63 ㎥/일' 바로 아래 'Q=A/8 hr = 7.88'은 A를 반올림한 시간당 값이라 ×8 하면
     # 63.04처럼 어긋난다 → 시간당 Q가 A/8과 같으면 원값 A를 쓴다(단위 표기도 A 쪽이 맞았다:
@@ -263,6 +268,9 @@ def _extract_q_from_block(rows, start: int, end: int, formula_col: int, q_forwar
     if found_day is not None:
         val, unit = found_day
         return round(val, 4), unit          # 일당이므로 ×8 하지 않음
+    if inv_all:
+        same = [x for x in inv_all if head_unit and x[1].strip().upper() == head_unit]
+        found_inv = same[0] if same else inv_all[0]
     if found_inv is not None:
         val, unit = found_inv
         if val > 0:
@@ -275,6 +283,39 @@ def _extract_q_from_block(rows, start: int, end: int, formula_col: int, q_forwar
 # ---------------------------------------------------------------------------
 
 TEMPLATES: List[Dict[str, Any]] = [
+    {
+        # 단산·일위·표준 참조형(경주 지방상수도 실측) — boq_adapters가 표준형 배치로 바꾼 뒤 표준형처럼 읽는다.
+        # 시트 이름이 표준형과 겹치므로(설계내역서·단가산출근거) 표준형보다 앞에서 비고의 'N참조' 표기로 가른다.
+        "id": "dansan_ref",
+        "name": "단산·일위·표준 참조형",
+        "item_sheet_names": ["설계내역서"],
+        "unit_price_sheet_names": ["단가산출근거"],
+        "detect_fn": "boq_adapters.is_dansan_ref",
+        "adapter": "boq_adapters.adapt_dansan_ref",
+        "name_col": 1,
+        "spec_col": 2,
+        "qty_col": 3,
+        "unit_col": 4,
+        "leaf_strategy": "regex_hierarchy",
+        "hierarchy_strategy": "letter_tree",
+        "gong_jong_col": 0,
+        "link_strategy": "text_regex",
+        "link_regex": r"산근\s*(\d+)\s*호표",
+        "link_regex_alt": r"대가\s*(\d+)\s*호표",
+        "link_key_type": "int",
+        "unit_price_block_start_col": 1,
+        "unit_price_block_start_regex": r"제\s*(\d+)\s*호표",
+        "unit_price_formula_col": 1,
+        "unit_char_class": r"가-힣㎡㎥A-Za-z",
+        "labor": {
+            "wage_sheet": "노무비목록표", "wage_name_col": 1, "wage_rate_col": 4,
+            "block_sheet": "일위대가표",
+            "block_start_col": 0, "block_start_regex": r"제\s*(\d+)\s*호표",
+            "title_offset": 1, "title_col": 0, "unit_col": 3,
+            "sum_row_keyword": "합", "labor_amount_col": 7,
+            "base_qty": 1.0, "key_type": "int",
+        },
+    },
     {
         "id": "standard_hopyo",
         "name": "표준형(산근호표)",
@@ -384,10 +425,31 @@ def detect_template(wb) -> Optional[Dict[str, Any]]:
     for tmpl in TEMPLATES:
         if not any(s in names for s in tmpl["item_sheet_names"]):
             continue
+        if tmpl.get("detect_fn") and not _call(tmpl["detect_fn"], wb):
+            continue
         ups = tmpl["unit_price_sheet_names"]
         if not ups or any(s in names for s in ups):
             return tmpl
     return None
+
+
+def template(tid: str) -> Dict[str, Any]:
+    """id로 템플릿 찾기(목록 순서는 판별 우선순위라 바뀔 수 있다)."""
+    return next(t for t in TEMPLATES if t["id"] == tid)
+
+
+def _call(path: str, *args):
+    """'모듈.함수' 이름으로 함수를 불러 실행한다(변환기 모듈을 필요할 때만 읽는다)."""
+    import importlib
+    mod, fn = path.rsplit(".", 1)
+    return getattr(importlib.import_module(mod), fn)(*args)
+
+
+def adapt_workbook(wb, tmpl):
+    """변환기가 있는 템플릿이면 표준형 배치로 바꾼 워크북을 돌려준다. 없으면 그대로."""
+    if tmpl and tmpl.get("adapter"):
+        return _call(tmpl["adapter"], wb)
+    return wb
 
 
 # 머리행 글자(공백 제거 후) → 템플릿 열 설정 키
@@ -1038,6 +1100,77 @@ def _parse_items_numbered_tree(ws, tmpl: Dict[str, Any]) -> List[Dict]:
     return items
 
 
+def _parse_items_letter_tree(ws, tmpl: Dict[str, Any]) -> List[Dict]:
+    """영문·숫자 번호 트리(경주 상수도형, boq_adapters 변환 후 '공종 | 품명 | 규격 | 수량 | 단위 | 참조').
+
+        ◎ 토목공사 → A. 관로공사 → 1. 1-1구간(…) → 1.1 토공(대공종) → 1) 포장깨기 → (1) … → 항목
+        ◎ 토목공사 → B. 가압장공사 → 1. 토공(대공종) → …
+    - 'N.' 다음 머리행이 'N.M'처럼 한 단계 깊으면 'N.'은 구간(라인 — 구간끼리 병행), 아니면 대공종.
+      번호는 설계자 입력이 어긋나는 일이 있어(2구간 안의 '8. 주요자재대', 5구간 안의 '4. 포장공') 번호 값이
+      아니라 깊이로만 판정한다.
+    - 구간이 없는 영문 단계(B. 가압장공사·C. 부대공사)는 그 이름이 라인. 숫자 단계 없이 항목이 오면 영문 이름이 대공종.
+    - '1)'·'(1)'·'가.' 등 대공종 아래 번호는 세부 묶음이라 무시한다.
+    - 토목이 아닌 ◎ 구분(기계·건축·관급자재대)은 '(공사비 외)' 대공종으로 모은다.
+    """
+    gj_col, name_col, spec_col = tmpl["gong_jong_col"], tmpl["name_col"], tmpl["spec_col"]
+    qty_col, unit_col = tmpl["qty_col"], tmpl["unit_col"]
+    link_re = re.compile(tmpl["link_regex"]) if tmpl.get("link_regex") else None
+    alt_re = re.compile(tmpl["link_regex_alt"]) if tmpl.get("link_regex_alt") else None
+    letter_re = re.compile(r"^(?:[A-Z]|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+)\.?$")
+    top_re = re.compile(r"^\d+\.?$")
+    mid_re = re.compile(r"^\d+\.\d+\.?$")
+
+    rows = [list(r) for r in ws.iter_rows(values_only=True)]
+
+    def _code(r):
+        return str(r[gj_col]).strip() if len(r) > gj_col and r[gj_col] is not None else ""
+
+    heads = [i for i, r in enumerate(rows) if _code(r) and (top_re.match(_code(r)) or mid_re.match(_code(r))
+                                                           or letter_re.match(_code(r)) or _code(r) == "◎")]
+    nxt = {h: (heads[n + 1] if n + 1 < len(heads) else None) for n, h in enumerate(heads)}
+
+    section, work = "", True
+    letter, line, major = "", "", None
+    items: List[Dict] = []
+    for i, r in enumerate(rows):
+        code = _code(r)
+        name = str(r[name_col]).strip() if len(r) > name_col and r[name_col] else ""
+        if code == "◎":
+            section, work = name, ("토목" in name)
+            letter, line, major = "", "", None
+            continue
+        if code and letter_re.match(code):
+            letter, line, major = name, name, None
+            continue
+        if code and top_re.match(code):
+            j = nxt.get(i)
+            if j is not None and mid_re.match(_code(rows[j])):
+                line, major = name, None                     # 구간
+            else:
+                major = name                                 # 대공종(구간 없는 영문 단계 아래)
+            continue
+        if code and mid_re.match(code):
+            major = name
+            continue
+        if code or not name:
+            continue                                         # '1)'·'(1)' 등 세부 묶음
+        qty = r[qty_col] if len(r) > qty_col else None
+        if not isinstance(qty, (int, float)) or qty <= 0:
+            continue
+        spec = str(r[spec_col]).strip() if len(r) > spec_col and r[spec_col] else ""
+        unit = str(r[unit_col]).strip() if len(r) > unit_col and r[unit_col] else ""
+        refs = " ".join(str(v) for v in r[unit_col + 1:] if isinstance(v, str))
+        m1 = link_re.search(refs) if link_re else None
+        m2 = alt_re.search(refs) if alt_re else None
+        items.append({
+            "name": name, "spec": spec, "qty": float(qty), "unit": unit,
+            "code": int(m1.group(1)) if m1 else None, "code_alt": int(m2.group(1)) if m2 else None,
+            "category": (major or letter or section) if work else f"{section} (공사비 외)",
+            "line": line if work else "", "parent": letter or None, "subgroup": None,
+        })
+    return items
+
+
 def parse_items_generic(wb, tmpl: Dict[str, Any]) -> List[Dict]:
     """템플릿의 hierarchy_strategy에 따라 적절한 파서로 위임."""
     ws = _get_sheet(wb, tmpl["item_sheet_names"])
@@ -1045,6 +1178,8 @@ def parse_items_generic(wb, tmpl: Dict[str, Any]) -> List[Dict]:
         return []
     tmpl = _resolve_header_columns(ws, tmpl)
     strategy = tmpl["hierarchy_strategy"]
+    if strategy == "letter_tree":
+        return _parse_items_letter_tree(ws, tmpl)
     if strategy == "major_number_prefix":
         items = _parse_items_major_number_prefix(ws, tmpl)
         # 대공종을 하나도 못 잡았으면 번호 트리형(공주정수장형: '1 공통공사'처럼 점 없는 대공종)으로 다시 읽는다
@@ -1453,7 +1588,9 @@ def parse_labor_derived_by_template(wb, tmpl: Dict[str, Any], with_trace: bool =
 
     def _unit_norm(u):
         u = str(u or "").strip().upper()
-        return u.replace("㎡", "M2").replace("㎥", "M3").replace("M³", "M3").replace("M²", "M2")
+        u = u.replace("㎡", "M2").replace("㎥", "M3").replace("M³", "M3").replace("M²", "M2")
+        # 개수 단위 표기 통일(경주: 일위대가 'EA' ↔ 단가산출 Q '개/hr' — 톤마대가 1인 노무비 역산으로 떨어졌다)
+        return "개" if u in ("EA", "개", "개소") else u
 
     def _aq_parts(s, e, lac, depth=0, mult=1.0, parts=None, acc=None, rest=None):
         """블록 [s+1, e)를 산근 A·Q가 있는 작업과 나머지로 나눈다.

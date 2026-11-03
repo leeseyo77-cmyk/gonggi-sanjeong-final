@@ -12,7 +12,7 @@ def _refresh_local_modules():
     파일 수정 시각을 기억해 두고 바뀐 모듈만 다시 읽는다 — 의존하는 쪽보다 먼저 읽도록 순서대로.
     """
     for name in ("guideline_data", "guideline_weather_data", "holiday_data", "weather_data", "labor_rates_2025",
-                 "daily_work_rates", "pumsem_crew", "crew_space", "guideline_work", "hopyo_parser",
+                 "daily_work_rates", "pumsem_crew", "crew_space", "guideline_work", "hopyo_parser", "boq_adapters", "boq_diagnose",
                  "universal_parser", "discipline_parser", "schedule_plan", "schedule_excel", "session_store",
                  "claude_call", "drawing_reader", "crew_advisor", "report_excel", "report_hwpx"):
         m = _sys.modules.get(name)
@@ -35,10 +35,11 @@ import openpyxl
 import zipfile
 import zlib
 from openpyxl.utils.exceptions import InvalidFileException
-from universal_parser import detect_template, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback, parse_excavator_buckets, parse_loading_rates, parse_wages
+from universal_parser import detect_template, adapt_workbook, parse_items_generic, parse_unit_price_generic, parse_labor_derived_by_template, apply_series_fallback, parse_excavator_buckets, parse_loading_rates, parse_wages
 import schedule_plan as sp
 import crew_space as cs
 import guideline_work as gw
+import boq_diagnose as bdg
 import drawing_reader as dr
 import crew_advisor as cadv
 import claude_call as cc
@@ -2399,7 +2400,14 @@ def parse_workbook_cached(file_bytes: bytes):
     parsed = {"dangagun": _extract_dangagun(wb), "template": None,
               "sheets": list(wb.sheetnames)}
     tmpl = detect_template(wb)
+    # 못 읽거나 일부만 읽었을 때 원인·고칠 방법(원본 배치, 인식된 양식의 규칙 기준)
+    try:
+        parsed["diagnosis"] = bdg.diagnose(wb, tmpl)
+    except Exception:            # noqa: BLE001 — 진단 실패가 업로드를 막지 않게
+        parsed["diagnosis"] = []
     if tmpl is not None:
+        # 표준형과 배치만 다른 양식(단산·일위·표준 참조형 등)은 표준형 배치로 바꿔 읽는다(boq_adapters)
+        wb = adapt_workbook(wb, tmpl)
         items = parse_items_generic(wb, tmpl)
         code_daily = parse_unit_price_generic(wb, tmpl)
         labor_daily, labor_trace = parse_labor_derived_by_template(wb, tmpl, with_trace=True,
@@ -2423,8 +2431,23 @@ def parse_workbook_cached(file_bytes: bytes):
             "loading_daily": parse_loading_rates(wb, tmpl),
             # 기계 위주 항목의 역산 과소평가 보정: 같은 계열 Q산식 값 승계
             "series_fallback": apply_series_fallback(items, code_daily, labor_daily),
+            # 읽은 항목의 근거 연결 상태(인식 점검)
+            "quality": bdg.quality(items, code_daily, labor_daily, aq_daily, is_non_work_category),
         }
     return all_rows, col_info, parsed
+
+
+def show_diagnosis(diag, title, expanded):
+    """양식 진단 — 원인과 엑셀에서 고칠 방법. 변환기를 더하면 업로드만으로 읽힌다는 안내도 함께."""
+    _icon = {"ok": "✅", "warn": "⚠️", "error": "❌"}
+    with st.expander(title, expanded=expanded):
+        for d in diag:
+            st.markdown(f"{_icon.get(d['level'], '•')} **{d['title']}**"
+                        + (f" — {d['detail']}" if d.get("detail") else ""))
+            if d.get("fix") and d["level"] != "ok":
+                st.caption(f"　👉 고치는 방법: {d['fix']}")
+        st.caption("엑셀을 위처럼 고쳐 다시 올리거나, 파일을 개발 담당에게 보내 주세요 — 이 양식의 변환기를 "
+                   "추가하면 고치지 않고 올리기만 해도 읽습니다.")
 
 
 @st.cache_data(show_spinner=False, max_entries=12)
@@ -2653,13 +2676,27 @@ with tab2:
                         st.session_state.pop("parallel_subgroup_widget", None)
                     if _uni_items:
                         st.info(f"✅ 템플릿 인식: {_tmpl_data['name']} — {len(_uni_items)}개 항목, {len(hierarchy)}개 대공종")
+                        _qa = _tmpl_data.get("quality") or {}
+                        if _qa.get("n_work"):
+                            _qa_txt = (f"공사 항목 {_qa['n_work']}개 중 근거 참조 연결 {_qa['linked']}개({_qa['linked_pct']}%) · "
+                                       f"Q값·인수를 찾은 항목 {_qa['found']}개({_qa['rate_pct']}%)")
+                            # 근거를 절반도 못 찾았으면 원인과 고칠 방법을 펼쳐 보여 준다
+                            _weak = _qa["rate_pct"] < 50 and (_tmpl_data["code_daily"] or _tmpl_data["labor_daily"])
+                            show_diagnosis(_parsed.get("diagnosis") or [],
+                                           ("⚠️ " if _weak else "🔎 ") + "인식 점검 — " + _qa_txt, _weak)
                         if not _tmpl_data["code_daily"] and not _tmpl_data["labor_daily"]:
                             st.caption(
                                 "ℹ️ 이 파일에는 단가산출근거·일위대가 시트가 없어 Q값·노무비 역산을 쓸 수 없습니다. "
                                 "1일 작업량은 표준품셈·가이드라인으로만 매칭되므로 '매칭 안 됨' 항목이 많을 수 있습니다."
                             )
+                    else:
+                        # 시트 이름은 맞는데 항목을 하나도 못 읽으면 결과가 비어 '멈춘 것처럼' 보였다(경주 상수도 실측)
+                        st.error(f"⚠️ '{_tmpl_data['name']}' 양식으로 보이지만 내역서 항목을 하나도 읽지 못했습니다.")
+                        show_diagnosis(_parsed.get("diagnosis") or [], "📋 읽지 못한 이유와 고치는 방법", True)
                 else:
-                    st.warning("⚠️ 인식할 수 없는 엑셀 양식입니다. 지원 양식: 표준형(산근호표), 코드매칭형(내역서산근), 내역서 단독형(설계내역서·도급내역서)")
+                    st.warning("⚠️ 인식할 수 없는 엑셀 양식입니다. 지원 양식: 표준형(산근호표), 코드매칭형(내역서산근), "
+                               "단산·일위·표준 참조형, 내역서 단독형(설계내역서·도급내역서)")
+                    show_diagnosis(_parsed.get("diagnosis") or [], "📋 읽지 못한 이유와 고치는 방법", True)
                 
                 if hierarchy:
                     # 중간 번호 기준 그룹핑 (1.1.X, 1.2.X, 2.1.X... 구분)

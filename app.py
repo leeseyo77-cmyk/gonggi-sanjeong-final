@@ -1770,7 +1770,7 @@ def area_caps_ui(model):
     반환: {항목키: 상한 조수}
     """
     if not st.checkbox(
-            "📐 면적 기준 동시 투입 상한 사용 (터파기·철근·거푸집 — 상세 검토)", value=False,
+            "📐 면적 기준 동시 투입 상한 사용 (터파기·철근·거푸집 — 상세 검토, 일반도 PDF 첨부는 여기)", value=False,
             key="area_caps_on",
             help="구조물 면적에서 공종별로 동시에 붙일 수 있는 조수를 구해 상한으로 씁니다. "
                  "개략 검토에서는 끄고 '항목당 최대 투입조수'만 쓰면 됩니다."):
@@ -1822,7 +1822,7 @@ def area_caps_ui(model):
                    "있음). 표에서 직접 고치거나 아래 일반도 PDF 읽기로 바꿀 수 있습니다.")
         drawing_reader_ui(structs, items_by)
     else:
-        st.caption("주공정에 구조물공 대공종이 없어 철근·거푸집 상한은 구하지 않습니다.")
+        st.caption("주공정에 구조물공 대공종이 없어 철근·거푸집 상한과 일반도 PDF 읽기는 쓰지 않습니다(구조물별 면적이 필요).")
     slab_sum = sum(store.get(ln, {}).get("slab", 0.0) for ln in structs)
     excav = min(slab_sum, site) if (slab_sum and site) else (slab_sum or site)
     trace_all = st.session_state.get("naeyeok_labor_trace") or {}
@@ -2006,13 +2006,6 @@ def render_crew_recommendation(wr):
             help="한 세부 공종에 동시에 붙일 수 있는 최대 조수(라인마다 적용). "
                  "기본 3조는 실무 근거가 없는 임시값입니다 — 회사·현장 기준으로 바꾸세요.",
         )
-    if months <= 0:
-        st.info("목표 공기(개월)를 입력하면 세부 공종별로 필요한 투입조수를 역산합니다.")
-        return
-    target, span, nw = target_work_days_from_months(wr, months)
-    if target <= 0:
-        st.error("목표 공기가 준비·시운전·정리 기간보다 짧습니다. 목표 공기나 비작업일수 탭의 기간 설정을 확인하세요.")
-        return
     sel = set(st.session_state.get("selected_major") or [])
     combine_sum = st.session_state.get("combine_mode", "최장(병행)").startswith("합산")
     model = build_crew_model(work["rows"], sel)
@@ -2020,7 +2013,16 @@ def render_crew_recommendation(wr):
     if not base:
         st.info("주공정 대공종에 작업일수가 계산된 항목이 없습니다.")
         return
+    # 면적 상한·도면 PDF 읽기는 목표 공기와 상관없이 먼저 쓸 수 있게 목표 입력 전에 둔다
+    # (예전에는 목표 공기를 넣어야 체크박스가 보여 도면 첨부 위치를 찾기 어려웠다)
     area_caps = area_caps_ui(model)
+    if months <= 0:
+        st.info("목표 공기(개월)를 입력하면 세부 공종별로 필요한 투입조수를 역산합니다.")
+        return
+    target, span, nw = target_work_days_from_months(wr, months)
+    if target <= 0:
+        st.error("목표 공기가 준비·시운전·정리 기간보다 짧습니다. 목표 공기나 비작업일수 탭의 기간 설정을 확인하세요.")
+        return
     rec = recommend_crews(model, combine_sum, target, int(cap), caps=area_caps)
     crit = critical_keys(model, combine_sum, target, rec)
     ai_apply = crew_ai_ui(model, base, rec, crit, area_caps, int(cap), target, months, combine_sum)
@@ -3810,6 +3812,8 @@ with tab1:
             render_crew_recommendation(result)
         else:
             st.info("👉 **'비작업일수 계산기'** 탭에서 비작업일수를 계산하면 최종 공기산정 결과가 표시됩니다!")
+            st.caption("📄 일반도 PDF 첨부(구조물 면적 읽기)·투입조수 역산은 계산 후 이 탭 아래 "
+                       "'👷 목표 공기 기준 투입조수 역산' → '📐 면적 기준 동시 투입 상한 사용'을 켜면 나옵니다.")
     else:
         st.warning("⚠️ **'엑셀 내역서 인식'** 탭에서 엑셀을 먼저 업로드해주세요.")
 

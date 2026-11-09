@@ -40,7 +40,7 @@ WIDGET_KEYS = {
     "weather_rain", "weather_cold", "weather_hot",
 }
 WIDGET_PATTERNS = [re.compile(p) for p in (
-    r"^disc_(par|use|tgt|how|tc)_", r"^wcond_", r"^crew_cap_(?!input$)", r"^crew_\d",
+    r"^disc_(par|use|tgt|how|tc|adj)_", r"^wcond_", r"^crew_cap_(?!input$)", r"^crew_\d",
     # 지구·공종별 투입조수(crew_<지구>_<공종>) — 버튼·편집표 키와 겹치지 않게 아래 NOT_CREW로 거른다
     r"^crew_(?!(ai_|by_item$|edit_|show_all$|targets$|editor_|reset_|cap_input$))",
 )]

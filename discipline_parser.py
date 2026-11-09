@@ -330,6 +330,60 @@ def parse_gjb(wb, discipline: str = "") -> Dict[str, Any]:
     return {"items": items, "base_wage": base_wage, "units": units}
 
 
+def item_key(it: Dict[str, Any]) -> str:
+    """사용자 조정(작업량 수정·제외)의 키 — 같은 항목이 여러 동에 있으면 함께 고친다(토목과 같은 방식)."""
+    return f"{it.get('name', '')}|{it.get('spec', '')}|{it.get('unit', '')}"
+
+
+def apply_adjust(items: List[Dict[str, Any]], rates: Optional[Dict[str, float]] = None,
+                 excluded=None) -> List[Dict[str, Any]]:
+    """사용자 조정을 반영한 항목 목록(원본은 그대로 둔다).
+
+    rates    : {item_key: 1조 1일작업량} — 산정값 대신 쓴다(토목 '1일작업량 수정'과 같다).
+               직종 작업량이 있는 항목은 주 직종 하나에 작업량을 모으고, 노무비 역산 항목은
+               예전처럼 '노무비역산' 묶음에 들어간다.
+    excluded : item_key 집합 — 공기 계산에서 뺀다(0일).
+    """
+    rates = {k: float(v) for k, v in (rates or {}).items() if v and float(v) > 0}
+    excluded = set(excluded or ())
+    out = []
+    for it in items:
+        k = item_key(it)
+        if k in excluded and it["days1"] > 0:
+            it = {**it, "days1": 0.0, "trades": {}, "adjusted": "제외",
+                  "basis": "제외(사용자) — 원래 " + it["basis"]}
+        elif k in rates and it["qty"] > 0:
+            d = rates[k]
+            lead = max(it["trades"], key=it["trades"].get) if it["trades"] else ""
+            orig = f"산정 {it['qty'] / it['days1']:.3g}" if it["days1"] > 0 else "산정값 없음"
+            it = {**it, "days1": it["qty"] / d, "trades": {lead: 1.0 / d} if lead else {},
+                  "adjusted": "수동입력",
+                  "basis": f"수동입력 1조 {d:g}{it['unit']}/일 ({orig}) — 원래 {it['basis']}"}
+        out.append(it)
+    return out
+
+
+def item_summary(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """조정표용 — 항목(품명·규격·단위)별로 동을 합친 수량·1조 일수·1조 1일작업량."""
+    agg: Dict[str, Dict[str, Any]] = {}
+    for it in items:
+        if it["days1"] <= 0 and not it.get("adjusted") and it["labor"] <= 0 and not it["trades_person"]:
+            continue                                   # 자재 행
+        a = agg.setdefault(item_key(it), {
+            "key": item_key(it), "name": it["name"], "spec": it["spec"], "unit": it["unit"],
+            "units": set(), "qty": 0.0, "days1": 0.0, "basis": it["basis"],
+        })
+        a["units"].add(it["unit_name"])
+        a["qty"] += it["qty"]
+        a["days1"] += it["days1"]
+    out = []
+    for a in agg.values():
+        a["n_units"] = len(a.pop("units"))
+        a["daily"] = a["qty"] / a["days1"] if a["days1"] > 0 else 0.0
+        out.append(a)
+    return sorted(out, key=lambda x: -x["days1"])
+
+
 def package_key(discipline: str, unit_name: str, group: str) -> str:
     return f"{discipline}|{unit_name}|{group}"
 

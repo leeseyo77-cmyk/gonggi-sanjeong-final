@@ -28,10 +28,16 @@ class CivilTest(unittest.TestCase):
         # 노무비 역산은 병목 직종 기준(1조 = 직종별 1인). 1인 합산 기준이던 때는 2,517일.
         # 일위대가 → 산근 A·Q를 따라가기 전에는 2,198일(철근 가공·조립이 역산 0.19t/일로 떨어짐)
         # 가이드라인을 내역서 Q값 다음 순위로 올린 뒤 1,079일(가시설 띠장·시스템비계·시트방수 등),
-        # 1조 = 표준품셈 구성원(직종별 1인이 아니라 인수 비율 그대로의 구성원)으로 바꾼 뒤 808일
-        self.assertEqual(at.session_state["total_work_days"], 808)
+        # 1조 = 표준품셈 구성원(직종별 1인이 아니라 인수 비율 그대로의 구성원)으로 바꾼 뒤 808일,
+        # 구조물을 차례로 시공(순차)하는 것을 기본으로 바꾼 뒤(사용자 기준 2026-11-09) 1,095일
+        self.assertEqual(at.session_state["total_work_days"], 1095)
+        days = {r["공종명_pure"]: r["작업일수(일)"] for r in at.session_state["work_result"]["rows"]}
+        self.assertEqual((days["토공"], days["구조물공사"]), (808, 1095))     # 구조물별 일수 합
 
-        # 토목 공기는 토공(연암·경암 터파기, 산근 Q) 808일 — 구조물공사(683일)보다 길어졌다
+        # 구조물공사를 병행으로 고르면 가장 긴 구조물(오존접촉조 683일)이 공종 일수 — 토공 808일이 공기
+        widget(at, "multiselect", "parallel_subgroup_widget").set_value(["구조물공사"]).run()
+        self.assertEqual(exceptions(at), [])
+        self.assertEqual(at.session_state["total_work_days"], 808)
         days = {r["공종명_pure"]: r["작업일수(일)"] for r in at.session_state["work_result"]["rows"]}
         self.assertEqual((days["토공"], days["구조물공사"]), (808, 683))
 
@@ -51,13 +57,13 @@ class ProjectTabTest(unittest.TestCase):
         self.assertEqual(exceptions(at), [])
         # 기계·전기는 앱에서 다루지 않는다(설치만 검토 — 공기를 지배하지 않음)
         self.assertFalse(any(w.key == "disc_use_전기" for w in at.checkbox))
-        # 토목 808 + 건축(동 병행, 1조 = 품셈 구성원) 404 — 1조 = 직종별 1인이던 때는 건축 1,561
-        self.assertEqual(metric(at, "사업 전체 순작업일수"), "1212일")
+        # 토목 1,095(구조물 순차) + 건축(동 순차, 1조 = 품셈 구성원) 556 — 둘 다 병행이던 때는 808 + 404
+        self.assertEqual(metric(at, "사업 전체 순작업일수"), "1651일")
 
         # 비작업일수 계산기로 넘기기
         button(at, "📥 전체 순작업일수").click().run()
         self.assertEqual(exceptions(at), [])
-        self.assertEqual(at.session_state["weather_work_days"], 1212)
+        self.assertEqual(at.session_state["weather_work_days"], 1651)
 
         # 건축을 공기에서 빼면 토목만 남는다
         widget(at, "checkbox", "disc_use_건축").set_value(False).run()
@@ -68,8 +74,34 @@ class ProjectTabTest(unittest.TestCase):
         at = app_test(civil=GWANGJU["토목"], discs={"건축": GWANGJU["건축"]})
         widget(at, "number_input", "disc_tc_건축").set_value(8).run()
         self.assertEqual(exceptions(at), [])
-        # 면 작업 상한 4조 → 활성탄흡착지 4조가 한계, 107일(1조 = 직종별 1인이던 때는 402일)
-        self.assertEqual(metric(at, "건축 작업일수"), "107일")
+        # 동 순차(기본) 8조 161일 — 동 병행이던 때는 면 작업 상한 4조가 한계라 107일
+        self.assertEqual(metric(at, "건축 작업일수"), "161일")
+
+    def test_user_adjustments(self):
+        """토목처럼 항목 1일작업량 수정·제외와 공종 조수 지정이 건축 일수에 반영된다."""
+        import discipline_parser as dp
+        at = app_test(civil=GWANGJU["토목"], discs={"건축": GWANGJU["건축"]})
+        widget(at, "number_input", "disc_tc_건축").set_value(8).run()
+        items = at.session_state["project_disc_res"]["건축"]["items"]
+        top = max(items, key=lambda i: i["days1"])
+        # 가장 긴 항목을 빼면 그 항목이 사라지고 공기가 늘지 않는다
+        at.session_state["disc_adj_건축"] = {"rates": {}, "excl": {dp.item_key(top)}, "pkg": {}}
+        at.run()
+        self.assertEqual(exceptions(at), [])
+        now = at.session_state["project_disc_res"]["건축"]
+        self.assertTrue(all(i["days1"] == 0 for i in now["items"] if dp.item_key(i) == dp.item_key(top)))
+        self.assertLessEqual(now["total"], 161)
+        # 모든 항목의 1일작업량을 아주 크게 → 공종마다 1일, 공종 조수 지정도 오류 없이 반영
+        keys = {dp.item_key(i) for i in items}
+        pk = now["res"]["packages"][0]
+        at.session_state["disc_adj_건축"] = {
+            "rates": {k: 1e9 for k in keys}, "excl": set(),
+            "pkg": {dp.package_key(pk["discipline"], pk["unit_name"], pk["group"]): 2}}
+        at.run()
+        self.assertEqual(exceptions(at), [])
+        now = at.session_state["project_disc_res"]["건축"]
+        self.assertTrue(all(p["days"] <= 1 for p in now["res"]["packages"]))
+        self.assertIn("사용자 조정", "".join(m.proto.delta for m in at.metric))
 
 
 @unittest.skipIf(SKIP, WHY)
@@ -86,7 +118,7 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
         # '비작업일수 계산'이 탭 중간에서 바로 재실행하면 사업 전체 탭 위젯이 그려지지 않아
         # Streamlit이 그 상태(조수·업로드)를 지웠다 → 재실행을 실행 끝으로 미뤄 고쳤다
         self.assertEqual(self.at.session_state["disc_tc_건축"], 8)
-        self.assertEqual(metric(self.at, "건축 작업일수"), "107일")
+        self.assertEqual(metric(self.at, "건축 작업일수"), "161일")
 
     def test_appendix_workbook_generated(self):
         at = self.at
@@ -189,6 +221,38 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
         self.assertIn("활성탄흡착지", col_b)
         with zipfile.ZipFile(files[0]) as z:
             self.assertIn("xl/drawings/drawing1.xml", z.namelist())
+
+
+@unittest.skipIf(SKIP, WHY)
+class ManualRateTest(unittest.TestCase):
+    """수동입력 관리 → 추정값 검토에서 고친 값이 순작업일수·총 공사기간에 바로 반영된다."""
+
+    def test_review_apply_reruns_and_recalculates_duration(self):
+        at = app_test(civil=GWANGJU["토목"])
+        # 구조물공사를 병행으로 — 토공(808일)이 공기, 구조물 항목은 주공정이 아니다
+        widget(at, "multiselect", "parallel_subgroup_widget").set_value(["구조물공사"]).run()
+        button(at, "📊 비작업일수 계산").click().run()
+        total0 = at.session_state["weather_result"]["total_days"]
+        # 추정값 검토(프래그먼트)의 반영 버튼 — 예전에는 앱 전체가 다시 실행되지 않았다
+        ni = next(w for w in at.number_input if (w.key or "").startswith("lr_0_"))
+        ni.set_value(1000.0).run()
+        next(b for b in at.button if "건 반영" in b.label).click().run()
+        self.assertEqual(exceptions(at), [])
+        self.assertIn(ni.key[len("lr_0_"):], at.session_state["manual_rates"])
+        # 주공정이 아닌 항목이면 공기가 그대로인 이유를 알려 준다
+        self.assertTrue(any("주공정" in i.value for i in at.info))
+
+        # 주공정 항목(토공 연암 터파기 535일)을 고치면 '비작업일수 계산'을 다시 누르지 않아도
+        # 순작업일수와 총 공사기간이 함께 줄어든다
+        key = "터파기(육상연암:H=2.7m이상)|굴삭기+대형브레이카 100%+크램쉘"
+        at.session_state["manual_rates"] = {key: {"daily": 1e6, "unit": "㎥"}}
+        at.run()
+        at.run()                                   # 미뤄 둔 재실행(rerun_after_render)
+        self.assertEqual(exceptions(at), [])
+        wd = at.session_state["total_work_days"]
+        self.assertLess(wd, 808)
+        self.assertEqual(at.session_state["weather_result"]["work_days"], wd)
+        self.assertLess(at.session_state["weather_result"]["total_days"], total0)
 
 
 if __name__ == "__main__":

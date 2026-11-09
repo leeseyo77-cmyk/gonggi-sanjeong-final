@@ -776,7 +776,13 @@ def _render_apply_rates(scope_key: str):
                 else:
                     st.session_state["manual_rates"].pop(_ik, None)
             st.session_state["pending_rate"] = {}
-            rerun_after_render()
+            st.session_state["_manual_applied"] = {
+                "n": _n, "before": int(st.session_state.get("total_work_days", 0) or 0),
+                "total_before": int((st.session_state.get("weather_result") or {}).get("total_days", 0) or 0)}
+            # 검토 섹션은 @st.fragment 안이라 프래그먼트만 다시 실행된다 — 파일 끝의 미뤄 둔 재실행
+            # (rerun_after_render)에 닿지 않아 값은 저장돼도 작업일수·공기가 그대로였다.
+            # 프래그먼트 안의 st.rerun()은 앱 전체를 다시 실행한다(프래그먼트 위젯만 정리되므로 안전).
+            st.rerun()
 
 
 def is_non_work_category(cat_name: str) -> bool:
@@ -1525,9 +1531,10 @@ def build_crew_model(rows, selected):
             cur = int(cm.get(key) or r.get("crew", DEFAULT_CREW) or DEFAULT_CREW)
             base[key] = max(base.get(key, 0), cur)
             m = meta.setdefault(key, {"대공종": cat_name, "세부공종": nm, "규격": sp,
-                                      "단위": it.get("unit", ""), "d1": [], "라인": set()})
+                                      "단위": it.get("unit", ""), "d1": [], "라인": set(), "구조물": set()})
             m["d1"].append(d1)
             m["라인"].add(ln)
+            m["구조물"].add(it.get("_struct") or ln)
             lines.setdefault(ln, []).append((key, d1))
         cats.append({"name": cat_name, "lines": lines})
     return {"cats": cats, "base": base, "meta": meta}
@@ -1638,7 +1645,7 @@ def _struct_items(structs):
         if sp.civil_cat(r.get("공종명_pure") or "") != "구조물공":
             continue
         for it in r.get("세부항목", []):
-            ln = it.get("_ukey") or it.get("district") or "(공통)"
+            ln = it.get("_struct") or it.get("_ukey") or it.get("district") or "(공통)"
             if ln in out:
                 out[ln].append(it)
     return out
@@ -1797,7 +1804,9 @@ def area_caps_ui(model):
     structs = []
     for cat in model["cats"]:
         if sp.civil_cat(cat["name"]) == "구조물공":
-            structs += [ln for ln in cat["lines"] if ln not in structs]
+            for k, m in model["meta"].items():
+                if m["대공종"] == cat["name"]:
+                    structs += [s_ for s_ in sorted(m["구조물"]) if s_ not in structs]
     store = st.session_state.setdefault("struct_areas", {})
     if structs:
         # 처음엔 내역서로 어림한 값(바닥 = 버림 ÷ 0.1m, 벽 = (거푸집 − 바닥) ÷ 2)을 채운다 — 개략 검토용.
@@ -1843,7 +1852,7 @@ def area_caps_ui(model):
             if _bk:
                 r_item, r_note = cs.excavator_reach(_bk), f"굴착기 {_bk:g}㎥ → 최대 굴착반경 {cs.excavator_reach(_bk):g}m"
         best = None
-        for ln in sorted(m["라인"]):
+        for ln in sorted(m.get("구조물") or m["라인"]):
             if cls == "터파기":
                 area = excav
             else:
@@ -2853,16 +2862,18 @@ with tab2:
                         if len(_names) > 1:
                             _sub_by_cat[_c['name']] = _names
                     if _sub_by_cat:
-                        # 처음에는 하위 단계가 있는 대공종을 모두 켜 두고, 아닌 것은 사용자가 뺀다.
+                        # 기본은 순차 — 대부분의 구조물은 차례로 시공한다(사용자 기준 2026-11-09).
+                        # 동시에 짓는 구조물이 있는 대공종만 사용자가 골라 병행으로 바꾼다.
                         _prev_par = st.session_state.get("parallel_subgroup_cats")
-                        _par_default = (sorted(_sub_by_cat.keys()) if _prev_par is None
+                        _par_default = ([] if _prev_par is None
                                         else [c for c in _prev_par if c in _sub_by_cat])
                         _par_cats = st.multiselect(
                             "🏗️ 구조물·동별 병행 계산할 대공종",
                             options=sorted(_sub_by_cat.keys()),
                             default=_par_default,
                             key="parallel_subgroup_widget",
-                            help="고른 대공종은 하위 단계(구조물·동)를 관로의 라인처럼 동시 시공으로 봅니다. "
+                            help="기본은 순차(구조물을 차례로 시공 — 구조물별 일수를 더함)입니다. "
+                                 "고른 대공종만 하위 단계(구조물·동)를 관로의 라인처럼 동시 시공으로 보고, "
                                  "가장 오래 걸리는 구조물이 그 공종의 작업일수가 됩니다. "
                                  "포장공의 '아스팔트 포장/콘크리트 포장'처럼 같은 팀이 차례로 하는 "
                                  "구분은 목록에서 빼세요.",
@@ -2935,6 +2946,8 @@ with tab2:
                                 _ln = item['subgroup'] if _ln == '(공통)' else f"{_ln} · {item['subgroup']}"
                             # 투입조수 추천·예정공정표가 같은 단위를 쓰도록 항목에 남긴다
                             item['_ukey'] = _ln
+                            # 구조물 이름은 순차(기본)여도 남긴다 — 면적 상한·일반도 읽기가 구조물별로 쓴다
+                            item['_struct'] = item.get('subgroup') or ""
                             _line_days[_ln] = _line_days.get(_ln, 0) + _d
                         cat_total_days = max(_line_days.values()) if _line_days else 0
                         
@@ -4073,20 +4086,24 @@ with tab4:
     # 순작업일수가 바뀌었는데 이전 계산 결과가 남아 있으면 안내.
     # 수동입력·조수 변경으로 작업일수가 달라져도 '비작업일수 계산' 버튼을 다시
     # 누르기 전까지는 총 공사기간이 옛 값으로 표시되어 "안 바뀐다"처럼 보인다.
+    # 예전에는 안내만 하고 버튼을 다시 눌러야 했다 — 수동입력을 저장해도 총 공사기간이 그대로라
+    # "안 바뀐다"로 보였다. 이미 한 번 계산했으면 같은 조건으로 자동 재계산한다.
     _prev_res = st.session_state.get("weather_result") or {}
     _prev_wd = _prev_res.get("work_days")
-    if _prev_wd is not None and int(_prev_wd) != int(work_days):
-        st.warning(
-            f"⚠️ 순작업일수가 **{int(_prev_wd)}일 → {int(work_days)}일**로 바뀌었습니다. "
-            "아래 **비작업일수 계산** 버튼을 다시 눌러야 총 공사기간에 반영됩니다."
-        )
+    _auto_recalc = _prev_wd is not None and int(_prev_wd) != int(work_days)
+    if _auto_recalc:
+        st.session_state["_weather_auto_msg"] = (
+            f"🔄 순작업일수가 {int(_prev_wd)}일 → {int(work_days)}일로 바뀌어 총 공사기간을 다시 계산했습니다.")
+    _auto_msg = st.session_state.pop("_weather_auto_msg", None) if not _auto_recalc else None
+    if _auto_msg:
+        st.info(_auto_msg)
     
     st.markdown("---")
     
     # ──────────────────────────────────
     # 4. 계산 버튼
     # ──────────────────────────────────
-    if st.button("📊 비작업일수 계산", type="primary", width="stretch"):
+    if st.button("📊 비작업일수 계산", type="primary", width="stretch") or _auto_recalc:
         from datetime import datetime as dt
         
         # datetime 변환
@@ -4754,6 +4771,24 @@ with tab6:
             )
             if _n_sr + _n_lr == 0:
                 st.success("추정값으로 계산된 항목이 없습니다.")
+            # 반영 결과 — 공기가 그대로면 고친 항목이 주공정이 아니라는 것을 알려 준다
+            _ma = st.session_state.pop("_manual_applied", None)
+            if _ma:
+                _now_wd = int(st.session_state.get("total_work_days", 0) or 0)
+                _wr_now = st.session_state.get("weather_result") or {}
+                _txt = f"✅ {_ma['n']}건 반영 — 토목 순작업일수 {_ma['before']}일 → {_now_wd}일"
+                if _ma.get("total_before") and _wr_now.get("total_days"):
+                    _txt += f", 총 공사기간 {_ma['total_before']}일 → {_wr_now['total_days']}일"
+                if _now_wd == _ma["before"]:
+                    _rows_w = (st.session_state.get("work_result") or {}).get("rows") or []
+                    _crit = max(_rows_w, key=lambda r: r.get("작업일수(일)", 0) or 0, default=None)
+                    st.info(_txt + ". 항목 일수는 바뀌었지만 공기는 그대로입니다 — 고친 항목이 공기를 정하는 "
+                            "공종·구간(주공정)에 있지 않기 때문입니다"
+                            + (f"(지금 가장 긴 공종: {_crit.get('공종명_pure', _crit.get('공종', ''))} "
+                               f"{_crit.get('작업일수(일)')}일)" if _crit else "")
+                            + ". '엑셀 내역서 인식' 탭 상세표의 🔴 항목을 고치면 공기가 줄어듭니다.")
+                else:
+                    st.success(_txt)
             # 값을 입력할 때마다 전체 재실행되면 느리므로 @st.fragment로 감싼다.
             # 이 영역만 다시 그려지고, 반영 버튼을 눌렀을 때만 전체가 갱신된다.
             @st.fragment
@@ -5174,8 +5209,9 @@ with tab7:
                 with _cc1:
                     if _mode == "seq":
                         _mode_now = "unit_parallel" if st.checkbox(
-                            "동(棟)을 동시 시공", value=True, key=f"disc_par_{_dc}",
-                            help="끄면 동을 하나씩 순차로 짓는 것으로 봅니다(동 물량을 모두 더함).",
+                            "동(棟)을 동시 시공", value=False, key=f"disc_par_{_dc}",
+                            help="기본은 순차(동을 하나씩 짓는 것으로 보고 동별 일수를 더함 — 사용자 기준). "
+                                 "켜면 동을 동시에 짓는 것으로 보고 가장 긴 동이 공기가 됩니다.",
                         ) else "seq"
                 with _cc2:
                     _use = st.checkbox(
@@ -5204,6 +5240,13 @@ with tab7:
                     st.caption(f"✅ {_uf.name} — 항목 {len(_r['items'])}개 · "
                                f"기준 노임 {_r['base_wage']:,.0f}원")
                 if _items:
+                    # 토목처럼 사용자가 고친 값 — 항목 1조 1일작업량·제외, 공종 조수 직접 지정
+                    _adj = st.session_state.setdefault(f"disc_adj_{_dc}", {})
+                    _adj.setdefault("rates", {})
+                    _adj.setdefault("excl", set())
+                    _adj.setdefault("pkg", {})
+                    _items_raw = _items
+                    _items = dp.apply_adjust(_items_raw, _adj["rates"], _adj["excl"])
                     if _dc in _pend_tgt:       # 목표 공기에서 역산한 값 주입(위젯 생성 전)
                         st.session_state[f"disc_how_{_dc}"] = "목표 일수로 역산"
                         st.session_state[f"disc_tgt_{_dc}"] = int(_pend_tgt[_dc])
@@ -5250,15 +5293,19 @@ with tab7:
                         disabled=["동·설비", "1조 기준(일)", "배분 조수"],
                     )
                     _cbu = {_r["동·설비"]: max(1, int(_r["적용 조수"] or 1)) for _, _r in _ed.iterrows()}
-                    _res = dp.discipline_days(_items, _mode_now, crew_by_unit=_cbu, caps=_caps)
+                    _pkg_fix = {k: int(v) for k, v in _adj["pkg"].items() if v}
+                    _res = dp.discipline_days(_items, _mode_now, crew_by_unit=_cbu, caps=_caps,
+                                              crew_by_pkg=_pkg_fix)
                     _applied = sum(_cbu.values())
                     _disc_res[_dc] = {"total": _res["total"], "res": _res, "n": len(_items),
                                       "use": bool(_use), "crews": _applied, "mode": _mode_now,
                                       "items": _items}
                     _work = [i for i in _items if i["days1"] > 0]
+                    _n_adj = len(_adj["rates"]) + len(_adj["excl"]) + len(_pkg_fix)
                     st.metric(f"{_dc} 작업일수" + ("" if _use else " (공기 미반영)"),
                               f"{_res['total']}일",
-                              delta=f"총 {_applied}조 · 공기 대상 {len(_work)}개 / 전체 {len(_items)}개 항목",
+                              delta=f"총 {_applied}조 · 공기 대상 {len(_work)}개 / 전체 {len(_items)}개 항목"
+                                    + (f" · 사용자 조정 {_n_adj}건" if _n_adj else ""),
                               delta_color="off")
                     if not _tgt and _pl["total_crews"] < int(st.session_state.get(f"disc_tc_{_dc}", 0) or 0):
                         st.caption(f"ℹ️ 유형별 상한 때문에 {_pl['total_crews']}조만 쓰였습니다 — "
@@ -5275,12 +5322,85 @@ with tab7:
                         if _full:
                             st.warning(f"⚠️ 상한까지 채워야 목표에 맞습니다: {', '.join(_full[:4])} — "
                                        "목표가 빠듯합니다. 현장에서 가능한 조수인지 확인하세요.")
+                    _pk_sorted = sorted(_res["packages"], key=lambda x: -x["days"])
+                    _pk_keys = [dp.package_key(p["discipline"], p["unit_name"], p["group"]) for p in _pk_sorted]
                     _pk_rows = [{
                         "설비·동": p["unit_name"], "공종": p["group"], "유형": p["type"],
                         "상한": p["cap"], "조수": p["crews"], "항목수": p["n_items"],
                         "주 직종": p["lead_trade"], "작업량(조·일)": p["workload"], "일수": p["days"],
-                    } for p in sorted(_res["packages"], key=lambda x: -x["days"])]
-                    st.dataframe(pd.DataFrame(_pk_rows), hide_index=True, width="stretch")
+                        "조수 지정": int(_pkg_fix.get(_k, 0)),
+                    } for p, _k in zip(_pk_sorted, _pk_keys)]
+                    with st.form(f"disc_pkg_form_{_dc}", border=False):
+                        _pk_ed = st.data_editor(
+                            pd.DataFrame(_pk_rows), hide_index=True, width="stretch",
+                            key=f"disc_pkg_ed_{_dc}_{zlib.crc32('|'.join(_pk_keys).encode('utf-8'))}",
+                            disabled=[c for c in _pk_rows[0] if c != "조수 지정"] if _pk_rows else True,
+                            column_config={"조수 지정": st.column_config.NumberColumn(
+                                min_value=0, max_value=99, step=1,
+                                help="이 공종만 조수를 직접 정합니다(0 = 동별 조수·상한을 따름). "
+                                     "지정값은 유형 상한보다 우선합니다.")})
+                        if st.form_submit_button("🔄 공종 조수 지정 반영"):
+                            _new = {}
+                            for _k, (_, _r) in zip(_pk_keys, _pk_ed.iterrows()):
+                                _v = int(_r["조수 지정"] or 0)
+                                if _v > 0:
+                                    _new[_k] = _v
+                            # 표에 없는(일수 0이 된) 공종의 지정값은 그대로 둔다
+                            _adj["pkg"] = {**{k: v for k, v in _adj["pkg"].items() if k not in _pk_keys},
+                                           **_new}
+                            st.rerun()
+                    if _tgt and _pkg_fix:
+                        st.caption("ℹ️ '목표 일수로 역산'은 동별 조수만 역산합니다 — 조수를 직접 지정한 "
+                                   "공종은 지정값 그대로 계산됩니다.")
+                    with st.expander(
+                            f"✏️ 항목별 1일작업량 수정·제외 (토목과 같은 방식)"
+                            + (f" — 조정 {len(_adj['rates']) + len(_adj['excl'])}건"
+                               if _adj["rates"] or _adj["excl"] else ""),
+                            expanded=bool(_adj["rates"] or _adj["excl"])):
+                        st.caption("1조(표준품셈 구성원)가 하루에 하는 양을 직접 고치거나, 공기에 영향이 없는 "
+                                   "항목을 뺍니다. 같은 항목이 여러 동에 있으면 함께 바뀝니다. "
+                                   "고친 값은 가장 먼저 적용되고(수동입력), 0을 넣으면 산정값으로 돌아갑니다.")
+                        _sm_raw = {a["key"]: a for a in dp.item_summary(_items_raw)}
+                        _sm_now = {a["key"]: a for a in dp.item_summary(_items)}
+                        _keys = list(_sm_raw)
+                        _rows = [{
+                            "항목": _sm_raw[k]["name"], "규격": _sm_raw[k]["spec"], "단위": _sm_raw[k]["unit"],
+                            "동 수": _sm_raw[k]["n_units"], "총 수량": round(_sm_raw[k]["qty"], 2),
+                            "산정 1일작업량(1조)": round(_sm_raw[k]["daily"], 3),
+                            "1일작업량 수정": float(_adj["rates"].get(k, 0.0)),
+                            "제외": k in _adj["excl"],
+                            "1조 일수": round(_sm_now.get(k, {}).get("days1", 0.0), 1),
+                            "근거": _sm_raw[k]["basis"],
+                        } for k in _keys]
+                        if _rows:
+                            with st.form(f"disc_item_form_{_dc}", border=False):
+                                _it_ed = st.data_editor(
+                                    pd.DataFrame(_rows), hide_index=True, width="stretch",
+                                    key=f"disc_item_ed_{_dc}_{zlib.crc32('|'.join(_keys).encode('utf-8'))}",
+                                    disabled=[c for c in _rows[0] if c not in ("1일작업량 수정", "제외")],
+                                    column_config={
+                                        "1일작업량 수정": st.column_config.NumberColumn(
+                                            min_value=0.0, step=0.1, format="%.3f",
+                                            help="1조가 하루에 하는 양(단위/일). 0이면 산정값을 씁니다."),
+                                        "제외": st.column_config.CheckboxColumn(
+                                            help="체크하면 공기 계산에서 뺍니다(병행·공기 무관 항목)."),
+                                    })
+                                _fb1, _fb2 = st.columns([1, 1])
+                                _go = _fb1.form_submit_button("🔄 수정 반영", type="primary")
+                                _clr = _fb2.form_submit_button("↩️ 조정 모두 지우기")
+                            if _go:
+                                _rt, _ex = {}, set()
+                                for k, (_, _r) in zip(_keys, _it_ed.iterrows()):
+                                    _v = float(_r["1일작업량 수정"] or 0.0)
+                                    if _v > 0:
+                                        _rt[k] = _v
+                                    if bool(_r["제외"]):
+                                        _ex.add(k)
+                                _adj["rates"], _adj["excl"] = _rt, _ex
+                                st.rerun()
+                            if _clr:
+                                _adj["rates"], _adj["excl"], _adj["pkg"] = {}, set(), {}
+                                st.rerun()
                     if st.toggle("🔎 항목별 1조 산정 근거", key=f"disc_basis_{_dc}",
                                  help="1조 = 작업조. 가이드라인 부록4 → 품셈 작업조 → 인수 비율 편성 순으로 정합니다."):
                         st.dataframe(pd.DataFrame([{

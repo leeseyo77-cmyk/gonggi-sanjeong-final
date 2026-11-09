@@ -87,5 +87,42 @@ class PlanCrewsTest(unittest.TestCase):
         self.assertEqual(r["total_days"], 100)            # 50 + 50
 
 
+class AdjustTest(unittest.TestCase):
+    """토목처럼 항목별 1조 1일작업량 수정·제외(사용자 조정)."""
+
+    @staticmethod
+    def _it(unit, name, qty, days, trades=None):
+        return {"discipline": "건축", "unit_name": unit, "group": "조적공사", "name": name, "spec": "",
+                "unit": "㎡", "qty": qty, "labor": 1.0, "days1": days, "basis": "산정",
+                "trades": trades or {}, "trades_person": {}}
+
+    def test_rate_override_applies_to_all_units(self):
+        items = [self._it("A동", "벽돌쌓기", 100, 10, {"조적공": 0.1, "보통인부": 0.05}),
+                 self._it("B동", "벽돌쌓기", 50, 5, {"조적공": 0.1, "보통인부": 0.05})]
+        out = dp.apply_adjust(items, rates={"벽돌쌓기||㎡": 20})
+        self.assertEqual([round(i["days1"], 3) for i in out], [5.0, 2.5])
+        self.assertEqual(out[0]["trades"], {"조적공": 0.05})          # 주 직종에 작업량을 모은다
+        self.assertEqual(out[0]["adjusted"], "수동입력")
+        self.assertEqual(items[0]["days1"], 10)                        # 원본은 그대로
+        self.assertEqual(dp.discipline_days(out, "seq")["total"], 8)  # A 5일 + B 3일(올림)
+
+    def test_labor_only_item_stays_in_labor_bucket(self):
+        out = dp.apply_adjust([self._it("A동", "단열재", 40, 8)], rates={"단열재||㎡": 10})
+        self.assertEqual(out[0]["trades"], {})
+        self.assertAlmostEqual(out[0]["days1"], 4.0)
+
+    def test_exclude(self):
+        items = [self._it("A동", "벽돌쌓기", 100, 10), self._it("A동", "미장", 100, 6)]
+        out = dp.apply_adjust(items, excluded={"벽돌쌓기||㎡"})
+        self.assertEqual(out[0]["days1"], 0)
+        self.assertEqual(dp.discipline_days(out, "seq")["total"], 6)
+
+    def test_summary_merges_units(self):
+        items = [self._it("A동", "벽돌쌓기", 100, 10), self._it("B동", "벽돌쌓기", 60, 6)]
+        s = dp.item_summary(items)
+        self.assertEqual(len(s), 1)
+        self.assertEqual((s[0]["n_units"], s[0]["qty"], s[0]["days1"], s[0]["daily"]), (2, 160, 16, 10))
+
+
 if __name__ == "__main__":
     unittest.main()

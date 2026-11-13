@@ -120,6 +120,15 @@ class CrewReverseAndScheduleTest(unittest.TestCase):
         self.assertEqual(self.at.session_state["disc_tc_건축"], 8)
         self.assertEqual(metric(self.at, "건축 작업일수"), "161일")
 
+    def test_monthly_table_matches_work_days(self):
+        # 월별 비작업일수 표(부록 별표1)의 작업가능일수 합 = 순작업일수, 달력일수 합 = 작업 + 비작업
+        wr = self.at.session_state["weather_result"]
+        rows = wr["monthly_rows"]
+        self.assertEqual(sum(r["대상일수"] - r["적용"] for r in rows), wr["work_days"])
+        self.assertEqual(sum(r["대상일수"] for r in rows), wr["work_days"] + wr["non_work_days"])
+        self.assertEqual((wr["work_end"] - wr["work_start"]).days + 1,
+                         wr["work_days"] + wr["non_work_days"])
+
     def test_appendix_workbook_generated(self):
         at = self.at
         for f in OUT.glob("공사기간 산정 부록_*.xlsx"):

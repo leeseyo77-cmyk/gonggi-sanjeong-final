@@ -289,7 +289,7 @@ def _nonwork_sheet(wb, name: str, nw: Dict[str, Any]) -> str:
     labels = ["일수", "법정공휴일(A)", "기후여건(B)", "월별중복일수(C)", "비작업일수",
               "주40시간 고려", "적용", "작업가능일수", "가동률(%)"]
     r = 4
-    total_cells = []
+    total_cells, work_cells = [], []
     for y in sorted(by_year):
         months = by_year[y]
         S.put(r, 1, "구 분", bold=True, fill=_HDR)
@@ -327,11 +327,17 @@ def _nonwork_sheet(wb, name: str, nw: Dict[str, Any]) -> str:
                       fmt="0.0#" if labels[i] == "기후여건(B)" else "#,##0",
                       fill=_CAT if labels[i] == "적용" else None)
         total_cells.append(f"N{base+6}")
+        work_cells.append(f"N{base+7}")
         r = base + len(labels) + 1
     S.put(r, 1, "적용 비작업일수 계", bold=True, fill=_SUB)
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=13)
     S.put(r, 14, "=" + "+".join(total_cells) if total_cells else 0, bold=True, fmt="#,##0", fill=_SUB)
     total_ref = f"{_q(name)}!N{r}"
+    r += 1
+    # 검산: 본공사 구간의 작업가능일수 합 = 순작업일수(총괄의 사업 전체 작업일수)
+    S.put(r, 1, "작업가능일수 계(= 작업일수)", bold=True, fill=_SUB)
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=13)
+    S.put(r, 14, "=" + "+".join(work_cells) if work_cells else 0, bold=True, fmt="#,##0", fill=_SUB)
     r += 2
     S.put(r, 1, "※ 첫·마지막 달은 공사 구간에 든 일수만큼 공휴일·기후여건·최소 일수를 안분했습니다.",
           h="left", border=False, size=8)

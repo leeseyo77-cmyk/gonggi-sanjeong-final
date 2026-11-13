@@ -4121,34 +4121,45 @@ with tab4:
         # 총 공사기간보다 준비기간만큼 짧게 나왔다.
         work_start = start_dt + timedelta(days=_prep_days)
 
-        # 종료일 추정: 순작업일수 * 1.5
-        rough_end_date = work_start + timedelta(days=int(work_days * 1.5))
-        
-        # 반복 계산: 정확한 종료일 찾기
-        for _ in range(5):
-            # 1. 월별 기상조건 비작업일수 (A) — 가이드라인 지점이 없으면 구버전 지역 자료
-            _use_guideline = bool(HAS_GUIDELINE_WEATHER and selected_station)
-            _wres = weather_monthly_for(
-                selected_station if _use_guideline else None,
-                list(st.session_state.get("weather_conditions") or []) if _use_guideline else None,
-                selected_region, work_start, rough_end_date, include_rain, include_cold, include_hot,
-            )
-            if _use_guideline:
-                st.session_state["weather_detail"] = _wres
+        # 본공사 종료일 찾기: [본공사 시작, 종료] 구간의 작업가능일수(달력일수 − 비작업일수)가
+        # 순작업일수와 같아지는 가장 이른 날. 월별 표(부록 별표1)도 바로 이 구간으로 만든다.
+        # 예전에는 '추정 종료일'로 계산한 월별 표를 그대로 저장하고 종료일만 다시 구해서,
+        # 월 최소 8일 보정 때문에 반복이 수렴하지 않으면 표의 작업가능일수 합이 작업일수와
+        # 며칠씩 달랐다(부록 엑셀에서 작업일수와 비작업일수 표가 맞물리지 않음).
+        _use_guideline = bool(HAS_GUIDELINE_WEATHER and selected_station)
+        _evals = {}
 
-            # 2. 고시 제8조: 월별 A + B − C, 월 비작업일수가 8일 미만이면 8일(주 40시간 근무제)
-            result = monthly_non_work(_wres["monthly"], include_holidays=include_holidays,
+        def _eval_end(_end):
+            if _end not in _evals:
+                # 1. 월별 기상조건 비작업일수 (A) — 가이드라인 지점이 없으면 구버전 지역 자료
+                _w = weather_monthly_for(
+                    selected_station if _use_guideline else None,
+                    list(st.session_state.get("weather_conditions") or []) if _use_guideline else None,
+                    selected_region, work_start, _end, include_rain, include_cold, include_hot,
+                )
+                # 2. 고시 제8조: 월별 A + B − C, 월 비작업일수가 8일 미만이면 8일(주 40시간 근무제)
+                _r = monthly_non_work(_w["monthly"], include_holidays=include_holidays,
                                       min_weekly_rest=min_weekly_rest)
+                _workable = (_end - work_start).days + 1 - _r["total"]
+                _evals[_end] = (_workable, _w, _r)
+            return _evals[_end]
 
-            non_work_days = result["total"]
-            
-            # 본공사 종료일 = 본공사 시작일 + 순작업일수 + 비작업일수
-            calculated_end = work_start + timedelta(days=int(work_days + non_work_days - 1))
-            
-            # 수렴 체크
-            if abs((rough_end_date - calculated_end).days) <= 1:
+        _W = max(1, int(work_days))
+        calculated_end = work_start + timedelta(days=int(_W * 1.5))
+        for _ in range(12):                       # 큰 걸음으로 가까이
+            _gap = _W - _eval_end(calculated_end)[0]
+            if abs(_gap) <= 3:
                 break
-            rough_end_date = calculated_end
+            calculated_end += timedelta(days=_gap)
+        while _eval_end(calculated_end)[0] < _W:  # 한 날씩: 모자라면 늘리고
+            calculated_end += timedelta(days=1)
+        while (calculated_end > work_start
+               and _eval_end(calculated_end - timedelta(days=1))[0] >= _W):  # 남으면 줄인다
+            calculated_end -= timedelta(days=1)
+        _, _wres, result = _eval_end(calculated_end)
+        if _use_guideline:
+            st.session_state["weather_detail"] = _wres
+        non_work_days = result["total"]
         
         # 본공사 종료 후 시운전·정리기간이 이어진다(준비기간은 위에서 착공일 뒤에 배치).
         completion_date = calculated_end + timedelta(days=_comm_days + _wrap_days)
